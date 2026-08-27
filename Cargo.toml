@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = []
+# exclude = ["vendor/zed"]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+uninlined_format_args = "allow"
+unreadable_literal = "allow"
+float_cmp = "allow"
+doc_markdown = "allow"
+similar_names = "allow"
+needless_continue = "allow"
+manual_range_contains = "allow"
+struct_excessive_bools = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+must_use_candidate = "allow"
+needless_raw_string_hashes = "allow"
+match_wildcard_for_single_variants = "allow"
+manual_let_else = "allow"
+items_after_statements = "allow"
+redundant_closure_for_method_calls = "allow"
+map_unwrap_or = "allow"
+unused_self = "allow"
+duration_suboptimal_units = "allow"
+needless_range_loop = "allow"
+single_match = "allow"
+single_match_else = "allow"
+assign_op_pattern = "allow"
+unnecessary_map_or = "allow"
+cast_lossless = "allow"
+type_complexity = "allow"
+collapsible_else_if = "allow"
+collapsible_if = "allow"
+match_same_arms = "allow"
+manual_clamp = "allow"
+approx_constant = "allow"
