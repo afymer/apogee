@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/apogee", "crates/apogee_app"]
+members = ["crates/apogee", "crates/apogee_app", "crates/apogee_planetarium"]
 # exclude = ["vendor/zed"]
 
 [workspace.package]
@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 gpui = { package = "gpui-ce", git = "https://github.com/Far-Beyond-Pulsar/wgpui" }
+bevy = { version = "0.19.1", default-features = false, features = ["bevy_render", "bevy_core_pipeline", "bevy_asset", "bevy_color", "multi_threaded", "bevy_pbr", "png", "jpeg", "bevy_winit", "x11", "wayland"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
