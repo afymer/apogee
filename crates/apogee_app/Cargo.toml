@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 gpui.workspace = true
+gpui_platform.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
