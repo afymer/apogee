@@ -10,6 +10,7 @@ edition = "2024"
 # gpui = { package = "gpui-ce", git = "https://github.com/Far-Beyond-Pulsar/wgpui" }
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", features = ["font-kit", "wayland", "x11", "wgpu"] }
+wgpu = "29.0.4"
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_render", "bevy_core_pipeline", "bevy_asset", "bevy_color", "multi_threaded", "bevy_pbr", "png", "jpeg", "bevy_winit", "x11", "wayland"] }
 
 [workspace.lints.clippy]

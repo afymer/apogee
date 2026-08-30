@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+wgpu.workspace = true
+apogee_planetarium = { path = "../apogee_planetarium" }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
