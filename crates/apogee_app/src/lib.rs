@@ -1,10 +1,11 @@
+mod app_state;
 mod bevy_viewport;
 
 use gpui::{App, Context, Entity, Window, WindowOptions, div, prelude::*, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_platform::application;
 
-use crate::bevy_viewport::BevyViewportView;
+use crate::{app_state::AppState, bevy_viewport::BevyViewportView};
 
 struct ApogeeApp {
     viewport: Entity<BevyViewportView>,
@@ -61,6 +62,8 @@ impl ApogeeApp {
 pub fn run() {
     application().run(|cx: &mut App| {
         gpui_component::init(cx);
+
+        cx.set_global(AppState::new());
 
         if let Err(e) = cx.open_window(WindowOptions::default(), |window, cx| {
             cx.new(|cx| ApogeeApp::new(window, cx))
