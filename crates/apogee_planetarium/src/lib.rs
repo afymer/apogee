@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
@@ -11,7 +11,6 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::RenderTarget,
     color::palettes::css::RED,
-    math::VectorSpace,
     prelude::*,
     render::{
         RenderPlugin,
@@ -25,9 +24,9 @@ use bevy::{
 };
 
 #[derive(Default, Component, Clone, Copy)]
-struct PlanetariumCameraMarker {}
+struct PlanetariumCameraMarker;
 
-pub struct PlanetariumRenderer {}
+pub struct PlanetariumRenderer;
 
 pub enum ViewportCommand {
     Resize(u32, u32),
@@ -38,6 +37,7 @@ pub struct BevyBridgeState {
     pub is_playing: bool,
     pub is_dirty: bool,
     pub latest_texture: Option<Arc<wgpu::TextureView>>,
+    pub last_size: Option<(u32, u32)>,
     pub pending_commands: Vec<ViewportCommand>,
 }
 
@@ -47,73 +47,82 @@ impl BevyBridgeState {
     }
 }
 
+struct BridgeInner {
+    state: Mutex<BevyBridgeState>,
+    cvar: Condvar,
+    shutdown: AtomicBool,
+    notify_ui_fn: Box<dyn Fn() + Send + Sync>,
+}
+
 #[derive(Clone)]
 pub struct BevyBridge {
-    state: Arc<(Mutex<BevyBridgeState>, Condvar)>,
-    notify_ui_fn: Arc<dyn Fn() + Send + Sync>,
-    shutdown: Arc<AtomicBool>,
-    last_size: Arc<Mutex<Option<(u32, u32)>>>,
+    inner: Arc<BridgeInner>,
 }
 
 impl BevyBridge {
-    pub fn new(
-        notify_ui: impl Fn() + Send + Sync + 'static,
-    ) -> (Self, Arc<(Mutex<BevyBridgeState>, Condvar)>) {
-        let state = Arc::new((
-            Mutex::new(BevyBridgeState {
-                is_dirty: true,
-                is_playing: false,
-                latest_texture: None,
-                pending_commands: Vec::new(),
+    pub fn new(notify_ui: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            inner: Arc::new(BridgeInner {
+                state: Mutex::new(BevyBridgeState {
+                    is_dirty: true,
+                    is_playing: false,
+                    latest_texture: None,
+                    last_size: None,
+                    pending_commands: Vec::new(),
+                }),
+                cvar: Condvar::new(),
+                shutdown: AtomicBool::new(false),
+                notify_ui_fn: Box::new(notify_ui),
             }),
-            Condvar::new(),
-        ));
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let bridge = Self {
-            state: state.clone(),
-            notify_ui_fn: Arc::new(notify_ui),
-            shutdown,
-            last_size: Arc::new(Mutex::new(None)),
-        };
-        (bridge, state)
+        }
     }
 
     pub fn texture_view(&self) -> Option<Arc<wgpu::TextureView>> {
-        let (lock, _) = &*self.state;
-        lock.lock().ok()?.latest_texture.clone()
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.latest_texture.clone()
     }
 
     pub fn last_size(&self) -> Option<(u32, u32)> {
-        self.last_size.lock().unwrap().clone()
-    }
-
-    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
-        self.shutdown.clone()
-    }
-
-    pub fn state(&self) -> Arc<(Mutex<BevyBridgeState>, Condvar)> {
-        self.state.clone()
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.last_size
     }
 
     pub fn send_command(&self, cmd: ViewportCommand) {
-        let (lock, cvar) = &*self.state;
-        if let Ok(mut guard) = lock.lock() {
-            guard.pending_commands.push(cmd);
-            guard.is_dirty = true;
-            cvar.notify_one();
-        }
+        let mut guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.pending_commands.push(cmd);
+        guard.is_dirty = true;
+        self.inner.cvar.notify_one();
     }
 
     pub fn request_redraw(&self) {
-        let (lock, cvar) = &*self.state;
-        if let Ok(mut guard) = lock.lock() {
-            guard.is_dirty = true;
-            cvar.notify_one();
-        }
+        let mut guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.is_dirty = true;
+        self.inner.cvar.notify_one();
     }
 
     pub fn notify_frame_ready(&self) {
-        (self.notify_ui_fn)();
+        (self.inner.notify_ui_fn)();
+    }
+
+    pub fn shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::Relaxed);
+        self.inner.cvar.notify_all();
     }
 }
 
@@ -126,7 +135,6 @@ impl PlanetariumRenderer {
         initial_width: u32,
         initial_height: u32,
         bridge: BevyBridge,
-        shared_state: Arc<(Mutex<BevyBridgeState>, Condvar)>,
     ) -> Result<JoinHandle<()>, std::io::Error> {
         std::thread::Builder::new()
             .name("Bevy renderer".to_string())
@@ -155,7 +163,6 @@ impl PlanetariumRenderer {
                             synchronous_pipeline_compilation: true,
                             ..default()
                         })
-                        // .disable::<bevy::winit::WinitPlugin>()
                         .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>(), // TODO: try to make pipelined rendering work
                 );
 
@@ -188,7 +195,7 @@ impl PlanetariumRenderer {
                             Camera3d::default(),
                             RenderTarget::Image(target_clone.clone().into()),
                             Transform::from_xyz(4., 5., 3.).looking_at(Vec3::ZERO, Dir3::Y),
-                            PlanetariumCameraMarker::default(),
+                            PlanetariumCameraMarker,
                         ));
 
                         commands.spawn((
@@ -212,18 +219,16 @@ impl PlanetariumRenderer {
 
                 app.finish();
                 app.cleanup();
-                let (lock, cvar) = &*shared_state;
 
-                let shutdown_flag = bridge.shutdown_flag();
+                while !bridge.inner.shutdown.load(Ordering::Relaxed) {
+                    let commands = {
+                        let mut guard = bridge
+                            .inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
 
-                let mut commands = Vec::new();
-
-                while !shutdown_flag.load(Ordering::Relaxed) {
-                    commands.clear();
-                    {
-                        let mut guard = lock.lock().unwrap();
-
-                        let timeout: Option<Duration> = if guard.is_playing {
+                        let timeout = if guard.is_playing {
                             Some(Duration::from_millis(16))
                         } else if guard.is_dirty {
                             Some(Duration::ZERO)
@@ -232,27 +237,35 @@ impl PlanetariumRenderer {
                         };
                         guard = match timeout {
                             Some(duration) if duration > Duration::ZERO => {
-                                cvar.wait_timeout(guard, duration).unwrap().0
+                                bridge
+                                    .inner
+                                    .cvar
+                                    .wait_timeout(guard, duration)
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .0
                             }
                             Some(_) => guard,
-                            None => cvar.wait(guard).unwrap(),
+                            None => bridge
+                                .inner
+                                .cvar
+                                .wait(guard)
+                                .unwrap_or_else(PoisonError::into_inner),
                         };
-                        if shutdown_flag.load(Ordering::Relaxed) {
+
+                        if bridge.inner.shutdown.load(Ordering::Relaxed) {
                             break;
                         }
 
-                        commands.append(&mut guard.pending_commands);
                         guard.is_dirty = false;
-                    }
+                        std::mem::take(&mut guard.pending_commands)
+                    };
 
-                    for cmd in &commands {
+                    for cmd in commands {
                         match cmd {
                             ViewportCommand::Resize(new_width, new_height) => {
-                                let new_width = new_width.max(&1u32);
-                                let new_height = new_height.max(&1u32);
                                 let new_size = Extent3d {
-                                    width: *new_width,
-                                    height: *new_height,
+                                    width: new_width.max(1),
+                                    height: new_height.max(1),
                                     depth_or_array_layers: 1,
                                 };
                                 if let Some(mut images) =
@@ -261,7 +274,12 @@ impl PlanetariumRenderer {
                                     if let Some(mut image) = images.get_mut(&render_target_handle) {
                                         if image.texture_descriptor.size != new_size {
                                             image.resize(new_size);
-                                            *bridge.last_size.lock().unwrap() =
+                                            let mut guard = bridge
+                                                .inner
+                                                .state
+                                                .lock()
+                                                .unwrap_or_else(PoisonError::into_inner);
+                                            guard.last_size =
                                                 Some((new_size.width, new_size.height));
                                         }
                                     }
@@ -282,8 +300,12 @@ impl PlanetariumRenderer {
                                 let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
                                 let wgpu_view = wgpu_texture
                                     .create_view(&wgpu::TextureViewDescriptor::default());
-                                let mut g = lock.lock().unwrap();
-                                g.latest_texture = Some(Arc::new(wgpu_view));
+                                let mut guard = bridge
+                                    .inner
+                                    .state
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner);
+                                guard.latest_texture = Some(Arc::new(wgpu_view));
                             }
                         }
                     }
