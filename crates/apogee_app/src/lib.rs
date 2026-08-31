@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use apogee_planetarium::{BevyBridge, PlanetariumRenderer, ViewportCommand};
 use futures::StreamExt;
 use gpui::{App, Context, Entity, Window, WindowOptions, div, prelude::*, px, rgb};
 use gpui_platform::application;
+use tracing::info;
 
 struct ApogeeApp {
     viewport: Entity<BevyViewportView>,
@@ -12,6 +13,7 @@ struct ApogeeApp {
 pub struct BevyViewportView {
     bridge: BevyBridge,
     cached_texture: Option<Arc<wgpu::TextureView>>,
+    last_size: Rc<Cell<Option<(u32, u32)>>>,
 }
 
 impl BevyViewportView {
@@ -62,6 +64,7 @@ impl BevyViewportView {
             Self {
                 bridge,
                 cached_texture: None,
+                last_size: Rc::new(Cell::new(None)),
             }
         })
     }
@@ -76,36 +79,68 @@ impl BevyViewportView {
 
 impl Render for BevyViewportView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // Release the lock while drawing
-        {
-            self.cached_texture = self.bridge.texture_view();
-        }
-        if let Some(ref view) = self.cached_texture {
-            gpui::surface(view.clone())
-                .size(px(400.0))
-                .rounded(px(10.))
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        }
+        self.cached_texture = self.bridge.texture_view();
+        let bridge = self.bridge.clone();
+        let last_size = self.last_size.clone();
+        div()
+            .size_full()
+            .bg(rgb(0x765432))
+            .relative()
+            .child(
+                gpui::canvas(
+                    move |bounds, window, _cx| {
+                        let scale = window.scale_factor();
+                        let width = (f32::from(bounds.size.width) * scale).round() as u32;
+                        let height = (f32::from(bounds.size.height) * scale).round() as u32;
+                        if width > 0 && height > 0 && last_size.get() != Some((width, height)) {
+                            // info!("Resizing to {},{}", width, height);
+                            last_size.set(Some((width, height)));
+                            bridge.send_command(ViewportCommand::Resize(width, height));
+                        }
+                    },
+                    |_bounds, _state, _window, _cx| {},
+                )
+                .size_full()
+                .absolute()
+                .top_0()
+                .left_0(),
+            )
+            .children(
+                self.cached_texture
+                    .as_ref()
+                    .map(|view| gpui::surface(view.clone()).size_full()),
+            )
     }
 }
 
 impl Render for ApogeeApp {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .flex_row()
-            .bg(rgb(0x226622))
-            .child(self.viewport.clone())
+        div().size_full().flex().flex_row().children([
+            div()
+                .w(px(200.))
+                .h_full()
+                .bg(rgb(0xaa2222))
+                .into_any_element(),
+            div()
+                .h_full()
+                .flex_1()
+                .bg(rgb(0x111111))
+                .child(self.viewport.clone())
+                .into_any_element(),
+            div()
+                .w(px(200.))
+                .h_full()
+                .bg(rgb(0xaa2222))
+                .into_any_element(),
+        ])
+        // .child(self.viewport.clone())
     }
 }
 
 impl ApogeeApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
-            viewport: BevyViewportView::build(window, cx, 400, 400),
+            viewport: BevyViewportView::build(window, cx, 64, 64),
         }
     }
 }

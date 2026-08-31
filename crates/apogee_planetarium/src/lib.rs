@@ -10,6 +10,8 @@ use std::{
 use bevy::{
     asset::RenderAssetUsages,
     camera::RenderTarget,
+    color::palettes::css::RED,
+    math::VectorSpace,
     prelude::*,
     render::{
         RenderPlugin,
@@ -21,14 +23,15 @@ use bevy::{
         settings::RenderCreation,
     },
 };
-use tracing::info;
 
 #[derive(Default, Component, Clone, Copy)]
 struct PlanetariumCameraMarker {}
 
 pub struct PlanetariumRenderer {}
 
-pub enum ViewportCommand {}
+pub enum ViewportCommand {
+    Resize(u32, u32),
+}
 
 #[derive(Default)]
 pub struct BevyBridgeState {
@@ -150,7 +153,7 @@ impl PlanetariumRenderer {
                 let mut render_image = Image::new_fill(
                     size,
                     TextureDimension::D2,
-                    &[255, 0, 0, 255],
+                    &[0, 0, 0, 255],
                     TextureFormat::Bgra8UnormSrgb,
                     RenderAssetUsages::default(),
                 );
@@ -162,14 +165,32 @@ impl PlanetariumRenderer {
                     .add(render_image);
 
                 let target_clone = render_target_handle.clone();
-                app.add_systems(Startup, move |mut commands: Commands| {
-                    commands.spawn((
-                        Camera3d::default(),
-                        RenderTarget::Image(target_clone.clone().into()),
-                        Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::Z, Vec3::Y),
-                        PlanetariumCameraMarker::default(),
-                    ));
-                });
+                app.add_systems(
+                    Startup,
+                    move |mut commands: Commands,
+                          mut meshes: ResMut<Assets<Mesh>>,
+                          mut materials: ResMut<Assets<StandardMaterial>>| {
+                        commands.spawn((
+                            Camera3d::default(),
+                            // Camera {
+                            //     clear_color: ClearColorConfig::Custom(Color::srgb(0.2, 0.9, 0.2)),
+                            //     ..Default::default()
+                            // },
+                            RenderTarget::Image(target_clone.clone().into()),
+                            Transform::from_xyz(-10., 5., 0.).look_at(Vec3::ZERO, Dir3::Y),
+                            PlanetariumCameraMarker::default(),
+                        ));
+
+                        commands.spawn((
+                            Mesh3d(meshes.add(Capsule3d::default())),
+                            MeshMaterial3d(materials.add(StandardMaterial {
+                                base_color: RED.into(),
+                                ..Default::default()
+                            })),
+                            Transform::from_xyz(0., 0., 0.),
+                        ));
+                    },
+                );
 
                 app.finish();
                 app.cleanup();
@@ -177,7 +198,10 @@ impl PlanetariumRenderer {
 
                 let shutdown_flag = bridge.shutdown_flag();
 
+                let mut commands = Vec::new();
+
                 while !shutdown_flag.load(Ordering::Relaxed) {
+                    commands.clear();
                     {
                         let mut guard = lock.lock().unwrap();
 
@@ -198,23 +222,43 @@ impl PlanetariumRenderer {
                         if shutdown_flag.load(Ordering::Relaxed) {
                             break;
                         }
+
+                        commands.append(&mut guard.pending_commands);
                         guard.is_dirty = false;
                     }
 
-                    info!("pre-update");
+                    for cmd in &commands {
+                        match cmd {
+                            ViewportCommand::Resize(new_width, new_height) => {
+                                let new_width = new_width.max(&1u32);
+                                let new_height = new_height.max(&1u32);
+                                let new_size = Extent3d {
+                                    width: *new_width,
+                                    height: *new_height,
+                                    depth_or_array_layers: 1,
+                                };
+                                if let Some(mut images) =
+                                    app.world_mut().get_resource_mut::<Assets<Image>>()
+                                {
+                                    if let Some(mut image) = images.get_mut(&render_target_handle) {
+                                        if image.texture_descriptor.size != new_size {
+                                            image.resize(new_size);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     app.update();
-                    info!("post-update");
 
                     if let Some(render_sub_app) = app.get_sub_app(bevy::render::RenderApp) {
-                        info!("ok 1");
                         let render_world = render_sub_app.world();
                         if let Some(render_assets) = render_world
                             .get_resource::<bevy::render::render_asset::RenderAssets<
                             bevy::render::texture::GpuImage,
                         >>() {
-                            info!("ok 2");
                             if let Some(gpu_image) = render_assets.get(&render_target_handle) {
-                                info!("ok 3");
                                 let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
                                 let wgpu_view = wgpu_texture
                                     .create_view(&wgpu::TextureViewDescriptor::default());
