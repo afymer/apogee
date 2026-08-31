@@ -52,6 +52,7 @@ pub struct BevyBridge {
     state: Arc<(Mutex<BevyBridgeState>, Condvar)>,
     notify_ui_fn: Arc<dyn Fn() + Send + Sync>,
     shutdown: Arc<AtomicBool>,
+    last_size: Arc<Mutex<Option<(u32, u32)>>>,
 }
 
 impl BevyBridge {
@@ -72,6 +73,7 @@ impl BevyBridge {
             state: state.clone(),
             notify_ui_fn: Arc::new(notify_ui),
             shutdown,
+            last_size: Arc::new(Mutex::new(None)),
         };
         (bridge, state)
     }
@@ -79,6 +81,10 @@ impl BevyBridge {
     pub fn texture_view(&self) -> Option<Arc<wgpu::TextureView>> {
         let (lock, _) = &*self.state;
         lock.lock().ok()?.latest_texture.clone()
+    }
+
+    pub fn last_size(&self) -> Option<(u32, u32)> {
+        self.last_size.lock().unwrap().clone()
     }
 
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
@@ -93,6 +99,14 @@ impl BevyBridge {
         let (lock, cvar) = &*self.state;
         if let Ok(mut guard) = lock.lock() {
             guard.pending_commands.push(cmd);
+            guard.is_dirty = true;
+            cvar.notify_one();
+        }
+    }
+
+    pub fn request_redraw(&self) {
+        let (lock, cvar) = &*self.state;
+        if let Ok(mut guard) = lock.lock() {
             guard.is_dirty = true;
             cvar.notify_one();
         }
@@ -141,7 +155,7 @@ impl PlanetariumRenderer {
                             synchronous_pipeline_compilation: true,
                             ..default()
                         })
-                        .disable::<bevy::winit::WinitPlugin>()
+                        // .disable::<bevy::winit::WinitPlugin>()
                         .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>(), // TODO: try to make pipelined rendering work
                 );
 
@@ -172,13 +186,17 @@ impl PlanetariumRenderer {
                           mut materials: ResMut<Assets<StandardMaterial>>| {
                         commands.spawn((
                             Camera3d::default(),
-                            // Camera {
-                            //     clear_color: ClearColorConfig::Custom(Color::srgb(0.2, 0.9, 0.2)),
-                            //     ..Default::default()
-                            // },
                             RenderTarget::Image(target_clone.clone().into()),
-                            Transform::from_xyz(-10., 5., 0.).look_at(Vec3::ZERO, Dir3::Y),
+                            Transform::from_xyz(4., 5., 3.).looking_at(Vec3::ZERO, Dir3::Y),
                             PlanetariumCameraMarker::default(),
+                        ));
+
+                        commands.spawn((
+                            DirectionalLight {
+                                illuminance: 10_000.0,
+                                ..Default::default()
+                            },
+                            Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
                         ));
 
                         commands.spawn((
@@ -243,6 +261,8 @@ impl PlanetariumRenderer {
                                     if let Some(mut image) = images.get_mut(&render_target_handle) {
                                         if image.texture_descriptor.size != new_size {
                                             image.resize(new_size);
+                                            *bridge.last_size.lock().unwrap() =
+                                                Some((new_size.width, new_size.height));
                                         }
                                     }
                                 }

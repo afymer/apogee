@@ -1,10 +1,10 @@
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 use apogee_planetarium::{BevyBridge, PlanetariumRenderer, ViewportCommand};
 use futures::StreamExt;
 use gpui::{App, Context, Entity, Window, WindowOptions, div, prelude::*, px, rgb};
+use gpui_component::{button::*, *};
 use gpui_platform::application;
-use tracing::info;
 
 struct ApogeeApp {
     viewport: Entity<BevyViewportView>,
@@ -13,7 +13,6 @@ struct ApogeeApp {
 pub struct BevyViewportView {
     bridge: BevyBridge,
     cached_texture: Option<Arc<wgpu::TextureView>>,
-    last_size: Rc<Cell<Option<(u32, u32)>>>,
 }
 
 impl BevyViewportView {
@@ -64,7 +63,6 @@ impl BevyViewportView {
             Self {
                 bridge,
                 cached_texture: None,
-                last_size: Rc::new(Cell::new(None)),
             }
         })
     }
@@ -75,13 +73,17 @@ impl BevyViewportView {
         state.pending_commands.push(cmd);
         cvar.notify_one();
     }
+
+    pub fn request_redraw(&self) {
+        self.bridge.request_redraw();
+    }
 }
 
 impl Render for BevyViewportView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.cached_texture = self.bridge.texture_view();
         let bridge = self.bridge.clone();
-        let last_size = self.last_size.clone();
+        let last_size = self.bridge.last_size();
         div()
             .size_full()
             .bg(rgb(0x765432))
@@ -92,9 +94,7 @@ impl Render for BevyViewportView {
                         let scale = window.scale_factor();
                         let width = (f32::from(bounds.size.width) * scale).round() as u32;
                         let height = (f32::from(bounds.size.height) * scale).round() as u32;
-                        if width > 0 && height > 0 && last_size.get() != Some((width, height)) {
-                            // info!("Resizing to {},{}", width, height);
-                            last_size.set(Some((width, height)));
+                        if width > 0 && height > 0 && last_size != Some((width, height)) {
                             bridge.send_command(ViewportCommand::Resize(width, height));
                         }
                     },
@@ -115,11 +115,23 @@ impl Render for BevyViewportView {
 
 impl Render for ApogeeApp {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = self.viewport.clone();
+
         div().size_full().flex().flex_row().children([
             div()
                 .w(px(200.))
                 .h_full()
                 .bg(rgb(0xaa2222))
+                .child(
+                    Button::new("refresh_rendering")
+                        .primary()
+                        .label("Refresh rendering")
+                        .on_click(move |_event, _window, cx| {
+                            viewport.update(cx, |view, _cx| {
+                                view.request_redraw();
+                            });
+                        }),
+                )
                 .into_any_element(),
             div()
                 .h_full()
@@ -133,29 +145,29 @@ impl Render for ApogeeApp {
                 .bg(rgb(0xaa2222))
                 .into_any_element(),
         ])
-        // .child(self.viewport.clone())
     }
 }
 
 impl ApogeeApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self {
-            viewport: BevyViewportView::build(window, cx, 64, 64),
-        }
+        let viewport = BevyViewportView::build(window, cx, 64, 64);
+
+        cx.observe(&viewport, |_this, _viewport, cx| {
+            cx.notify();
+        })
+        .detach();
+
+        Self { viewport }
     }
 }
 
 pub fn run() {
     application().run(|cx: &mut App| {
-        cx.open_window(WindowOptions::default(), |window, cx| {
-            // let device: wgpu::Device = (*window.wgpu_device().unwrap()).clone();
-            // let queue: wgpu::Queue = (*window.wgpu_queue().unwrap()).clone();
-            // let adapter: wgpu::Adapter = (*window.wgpu_adapter().unwrap()).clone();
-            // let instance: wgpu::Instance = (*window.wgpu_instance().unwrap()).clone();
+        gpui_component::init(cx);
 
+        cx.open_window(WindowOptions::default(), |window, cx| {
             cx.new(|cx| {
                 let apogee_app = ApogeeApp::new(window, cx);
-                // ApogeeApp::new()
                 apogee_app
             })
         })
