@@ -7,7 +7,8 @@ members = ["crates/apogee", "crates/apogee_app", "crates/apogee_planetarium"]
 edition = "2024"
 
 [workspace.dependencies]
-# gpui = { package = "gpui-ce", git = "https://github.com/Far-Beyond-Pulsar/wgpui" }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", features = ["font-kit", "wayland", "x11", "wgpu"] }
 wgpu = "29.0.4"
