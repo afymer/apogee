@@ -7,12 +7,13 @@ members = ["crates/apogee", "crates/apogee_app", "crates/apogee_planetarium"]
 edition = "2024"
 
 [workspace.dependencies]
+futures = "0.3.34"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", features = ["font-kit", "wayland", "x11", "wgpu"] }
 wgpu = "29.0.4"
-bevy = { version = "0.19.1", default-features = false, features = ["bevy_render", "bevy_core_pipeline", "bevy_asset", "bevy_color", "multi_threaded", "png", "jpeg", "bevy_winit", "x11", "wayland"] }
+bevy = { version = "0.19.1", default-features = false, features = ["bevy_render", "bevy_core_pipeline", "bevy_asset", "bevy_color", "multi_threaded", "zstd_rust", "tonemapping_luts", "png", "jpeg", "bevy_winit", "x11", "wayland"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

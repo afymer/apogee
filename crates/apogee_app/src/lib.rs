@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use apogee_planetarium::{BevyBridge, PlanetariumRenderer, ViewportCommand};
+use futures::StreamExt;
 use gpui::{App, Context, Entity, Window, WindowOptions, div, prelude::*, px, rgb};
 use gpui_platform::application;
 
@@ -20,8 +21,15 @@ impl BevyViewportView {
         initial_width: u32,
         initial_height: u32,
     ) -> Entity<Self> {
-        cx.new(|_cx| {
-            let notify_ui = || {};
+        cx.new(|cx| {
+            let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+
+            let notify_ui = {
+                let tx = tx.clone();
+                move || {
+                    let _ = tx.unbounded_send(());
+                }
+            };
 
             let (bridge, shared_state) = BevyBridge::new(notify_ui);
 
@@ -41,6 +49,15 @@ impl BevyViewportView {
                 shared_state,
             )
             .expect("Failed to spawn PlanetariumRenderer thread");
+
+            cx.spawn(async move |this, cx| {
+                while let Some(()) = rx.next().await {
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
 
             Self {
                 bridge,

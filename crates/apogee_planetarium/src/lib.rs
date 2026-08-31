@@ -21,6 +21,7 @@ use bevy::{
         settings::RenderCreation,
     },
 };
+use tracing::info;
 
 #[derive(Default, Component, Clone, Copy)]
 struct PlanetariumCameraMarker {}
@@ -134,9 +135,11 @@ impl PlanetariumRenderer {
                                 RenderAdapter(Arc::new(WgpuWrapper::new(adapter))),
                                 RenderInstance(Arc::new(WgpuWrapper::new(instance))),
                             ),
+                            synchronous_pipeline_compilation: true,
                             ..default()
                         })
-                        .disable::<bevy::winit::WinitPlugin>(),
+                        .disable::<bevy::winit::WinitPlugin>()
+                        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>(), // TODO: try to make pipelined rendering work
                 );
 
                 let size = Extent3d {
@@ -175,34 +178,43 @@ impl PlanetariumRenderer {
                 let shutdown_flag = bridge.shutdown_flag();
 
                 while !shutdown_flag.load(Ordering::Relaxed) {
-                    let mut guard = lock.lock().unwrap();
+                    {
+                        let mut guard = lock.lock().unwrap();
 
-                    let timeout: Option<Duration> = if guard.is_playing {
-                        Some(Duration::from_millis(16))
-                    } else if guard.is_dirty {
-                        Some(Duration::ZERO)
-                    } else {
-                        None
-                    };
-                    guard = match timeout {
-                        Some(duration) if duration > Duration::ZERO => {
-                            cvar.wait_timeout(guard, duration).unwrap().0
+                        let timeout: Option<Duration> = if guard.is_playing {
+                            Some(Duration::from_millis(16))
+                        } else if guard.is_dirty {
+                            Some(Duration::ZERO)
+                        } else {
+                            None
+                        };
+                        guard = match timeout {
+                            Some(duration) if duration > Duration::ZERO => {
+                                cvar.wait_timeout(guard, duration).unwrap().0
+                            }
+                            Some(_) => guard,
+                            None => cvar.wait(guard).unwrap(),
+                        };
+                        if shutdown_flag.load(Ordering::Relaxed) {
+                            break;
                         }
-                        Some(_) => guard,
-                        None => cvar.wait(guard).unwrap(),
-                    };
-                    if shutdown_flag.load(Ordering::Relaxed) {
-                        break;
+                        guard.is_dirty = false;
                     }
 
+                    info!("pre-update");
                     app.update();
+                    info!("post-update");
+
                     if let Some(render_sub_app) = app.get_sub_app(bevy::render::RenderApp) {
+                        info!("ok 1");
                         let render_world = render_sub_app.world();
                         if let Some(render_assets) = render_world
                             .get_resource::<bevy::render::render_asset::RenderAssets<
                             bevy::render::texture::GpuImage,
                         >>() {
+                            info!("ok 2");
                             if let Some(gpu_image) = render_assets.get(&render_target_handle) {
+                                info!("ok 3");
                                 let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
                                 let wgpu_view = wgpu_texture
                                     .create_view(&wgpu::TextureViewDescriptor::default());
