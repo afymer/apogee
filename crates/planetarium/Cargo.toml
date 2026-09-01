@@ -1,5 +1,5 @@
 [package]
-name = "apogee_planetarium"
+name = "planetarium"
 version = "0.1.0"
 edition.workspace = true
 

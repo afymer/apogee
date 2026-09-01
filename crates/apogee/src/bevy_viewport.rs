@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use apogee_planetarium::{BevyBridge, PlanetariumRenderer, ViewportCommand};
 use futures::StreamExt;
 use gpui::{App, Entity, Window, div, prelude::*, rgb};
+use planetarium::{BevyBridge, PlanetariumRenderer, ViewportCommand};
 
 pub struct BevyViewportView {
     bridge: BevyBridge,
