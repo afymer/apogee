@@ -96,23 +96,27 @@ impl BevyBridge {
     }
 
     pub fn send_command(&self, cmd: ViewportCommand) {
-        let mut guard = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        guard.pending_commands.push(cmd);
-        guard.is_dirty = true;
+        {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.pending_commands.push(cmd);
+            guard.is_dirty = true;
+        }
         self.inner.cvar.notify_one();
     }
 
     pub fn request_redraw(&self) {
-        let mut guard = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        guard.is_dirty = true;
+        {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.is_dirty = true;
+        }
         self.inner.cvar.notify_one();
     }
 
@@ -121,7 +125,7 @@ impl BevyBridge {
     }
 
     pub fn shutdown(&self) {
-        self.inner.shutdown.store(true, Ordering::Relaxed);
+        self.inner.shutdown.store(true, Ordering::Release);
         self.inner.cvar.notify_all();
     }
 }
@@ -220,46 +224,41 @@ impl PlanetariumRenderer {
                 app.finish();
                 app.cleanup();
 
-                while !bridge.inner.shutdown.load(Ordering::Relaxed) {
-                    let commands = {
-                        let mut guard = bridge
+                while !bridge.inner.shutdown.load(Ordering::Acquire) {
+                    let mut guard = bridge
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if !guard.is_dirty
+                        && !guard.is_playing
+                        && !bridge.inner.shutdown.load(Ordering::Acquire)
+                    {
+                        guard = bridge
                             .inner
-                            .state
-                            .lock()
+                            .cvar
+                            .wait_while(guard, |s| {
+                                !s.is_dirty
+                                    && !s.is_playing
+                                    && !bridge.inner.shutdown.load(Ordering::Acquire)
+                            })
                             .unwrap_or_else(PoisonError::into_inner);
+                    } else if guard.is_playing {
+                        guard = bridge
+                            .inner
+                            .cvar
+                            .wait_timeout(guard, Duration::from_millis(16))
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .0;
+                    }
+                    if bridge.inner.shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    guard.is_dirty = false;
+                    let commands = std::mem::take(&mut guard.pending_commands);
+                    drop(guard);
 
-                        let timeout = if guard.is_playing {
-                            Some(Duration::from_millis(16))
-                        } else if guard.is_dirty {
-                            Some(Duration::ZERO)
-                        } else {
-                            None
-                        };
-                        guard = match timeout {
-                            Some(duration) if duration > Duration::ZERO => {
-                                bridge
-                                    .inner
-                                    .cvar
-                                    .wait_timeout(guard, duration)
-                                    .unwrap_or_else(PoisonError::into_inner)
-                                    .0
-                            }
-                            Some(_) => guard,
-                            None => bridge
-                                .inner
-                                .cvar
-                                .wait(guard)
-                                .unwrap_or_else(PoisonError::into_inner),
-                        };
-
-                        if bridge.inner.shutdown.load(Ordering::Relaxed) {
-                            break;
-                        }
-
-                        guard.is_dirty = false;
-                        std::mem::take(&mut guard.pending_commands)
-                    };
-
+                    let mut texture_resized = false;
                     for cmd in commands {
                         match cmd {
                             ViewportCommand::Resize(new_width, new_height) => {
@@ -274,6 +273,7 @@ impl PlanetariumRenderer {
                                     if let Some(mut image) = images.get_mut(&render_target_handle) {
                                         if image.texture_descriptor.size != new_size {
                                             image.resize(new_size);
+                                            texture_resized = true;
                                             let mut guard = bridge
                                                 .inner
                                                 .state
@@ -297,21 +297,30 @@ impl PlanetariumRenderer {
                             bevy::render::texture::GpuImage,
                         >>() {
                             if let Some(gpu_image) = render_assets.get(&render_target_handle) {
-                                let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
-                                let wgpu_view = wgpu_texture
-                                    .create_view(&wgpu::TextureViewDescriptor::default());
                                 let mut guard = bridge
                                     .inner
                                     .state
                                     .lock()
                                     .unwrap_or_else(PoisonError::into_inner);
-                                guard.latest_texture = Some(Arc::new(wgpu_view));
+                                if guard.latest_texture.is_none() || texture_resized {
+                                    let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
+                                    let wgpu_view = wgpu_texture
+                                        .create_view(&wgpu::TextureViewDescriptor::default());
+                                    guard.latest_texture = Some(Arc::new(wgpu_view));
+                                }
                             }
                         }
                     }
 
                     bridge.notify_frame_ready();
                 }
+
+                let mut guard = bridge
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                guard.latest_texture = None;
             })
     }
 }

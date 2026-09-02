@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, thread::JoinHandle};
 
 use futures::StreamExt;
 use gpui::{App, Entity, Window, div, prelude::*, rgb};
@@ -7,6 +7,7 @@ use planetarium::{BevyBridge, PlanetariumRenderer, ViewportCommand};
 pub struct BevyViewportView {
     bridge: BevyBridge,
     cached_texture: Option<Arc<wgpu::TextureView>>,
+    renderer_handle: Option<JoinHandle<()>>,
 }
 
 impl BevyViewportView {
@@ -32,7 +33,7 @@ impl BevyViewportView {
             let adapter = (*window.wgpu_adapter().expect("wgpu adapter not available")).clone();
             let instance = (*window.wgpu_instance().expect("wgpu instance not available")).clone();
 
-            PlanetariumRenderer::spawn(
+            let renderer_handle = PlanetariumRenderer::spawn(
                 device,
                 queue,
                 adapter,
@@ -55,6 +56,7 @@ impl BevyViewportView {
             Self {
                 bridge,
                 cached_texture: None,
+                renderer_handle: Some(renderer_handle),
             }
         })
     }
@@ -100,6 +102,12 @@ impl Render for BevyViewportView {
 
 impl Drop for BevyViewportView {
     fn drop(&mut self) {
+        self.cached_texture = None;
         self.bridge.shutdown();
+        if let Some(handle) = self.renderer_handle.take() {
+            if let Err(e) = handle.join() {
+                tracing::error!("Failed to join PlanetariumRenderer thread: {e:?}");
+            }
+        }
     }
 }
