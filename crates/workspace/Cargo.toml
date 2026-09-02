@@ -1,0 +1,18 @@
+[package]
+name = "workspace"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "workspace"
+path = "src/workspace.rs"
+
+[dependencies]
+gpui.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true
