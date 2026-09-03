@@ -10,6 +10,7 @@ path = "src/workspace.rs"
 [dependencies]
 gpui.workspace = true
 tracing.workspace = true
+status_bar.path = "../status_bar"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

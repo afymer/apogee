@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use gpui::{Entity, Window, div, prelude::*};
+use status_bar::StatusBar;
 
 use crate::{
     Workspace, WorkspaceKind,
@@ -10,6 +11,7 @@ use crate::{
 pub struct Workbench {
     workspaces: HashMap<WorkspaceKind, Entity<Workspace>>,
     active_workspace_kind: WorkspaceKind,
+    status_bar: Entity<StatusBar>,
     registered_panels: Vec<Arc<dyn PanelHandle>>,
 }
 
@@ -21,10 +23,14 @@ impl Workbench {
             let ws = cx.new(|cx| Workspace::new(*kind, cx));
             workspaces.insert(*kind, ws);
         }
+
+        let status_bar = cx.new(|cx| StatusBar::new(cx));
+
         Self {
             workspaces,
             active_workspace_kind: WorkspaceKind::all()[0],
             registered_panels: Vec::new(),
+            status_bar,
         }
     }
 
@@ -54,11 +60,16 @@ impl Workbench {
 impl Render for Workbench {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let active_ws = self.workspaces.get(&self.active_workspace_kind).cloned();
-        div().size_full().flex().flex_col().child(
-            div()
-                .flex_1()
-                .relative()
-                .children(active_ws.map(|ws| ws.into_any_element())),
-        )
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_1()
+                    .relative()
+                    .children(active_ws.map(|ws| ws.into_any_element())),
+            )
+            .child(self.status_bar.clone())
     }
 }
