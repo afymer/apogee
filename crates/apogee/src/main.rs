@@ -3,6 +3,7 @@ mod bevy_viewport;
 
 use gpui::{App, AppContext, WindowOptions};
 use gpui_platform::application;
+use theme::ThemeMode;
 use workspace::workbench::Workbench;
 
 use crate::app_state::AppState;
@@ -11,8 +12,8 @@ fn main() {
     tracing_subscriber::fmt::init();
 
     application().run(|cx: &mut App| {
-        gpui_component::init(cx);
         bevy_viewport::init(cx);
+        theme::init(cx, ThemeMode::Dark);
 
         cx.set_global(AppState::new());
 

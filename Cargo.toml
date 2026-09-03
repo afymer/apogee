@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/apogee", "crates/planetarium", "crates/workspace", "crates/ui", "crates/status_bar"]
+members = [
+    "crates/apogee",
+    "crates/planetarium",
+    "crates/workspace",
+    "crates/theme",
+    "crates/ui",
+    "crates/status_bar"
+]
 default-members = ["crates/apogee"]
 # exclude = ["vendor/zed"]
 
