@@ -1,12 +1,16 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use gpui::{Entity, Window, div, prelude::*};
 
-use crate::{Workspace, WorkspaceKind};
+use crate::{
+    Workspace, WorkspaceKind,
+    panel::{Panel, PanelHandle},
+};
 
 pub struct Workbench {
     workspaces: HashMap<WorkspaceKind, Entity<Workspace>>,
     active_workspace_kind: WorkspaceKind,
+    registered_panels: Vec<Arc<dyn PanelHandle>>,
 }
 
 impl Workbench {
@@ -20,6 +24,7 @@ impl Workbench {
         Self {
             workspaces,
             active_workspace_kind: WorkspaceKind::all()[0],
+            registered_panels: Vec::new(),
         }
     }
 
@@ -27,6 +32,21 @@ impl Workbench {
         if self.active_workspace_kind != kind {
             self.active_workspace_kind = kind;
             cx.notify();
+        }
+    }
+
+    pub fn add_panel<T: Panel>(
+        &mut self,
+        panel: Entity<T>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle: Arc<dyn PanelHandle> = Arc::new(panel);
+        self.registered_panels.push(handle.clone());
+        for workspace in self.workspaces.values() {
+            workspace.update(cx, |ws, cx| {
+                ws.add_panel_if_enabled(handle.clone(), cx);
+            });
         }
     }
 }

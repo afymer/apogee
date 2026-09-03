@@ -1,9 +1,15 @@
 pub mod dock;
+pub mod panel;
 pub mod workbench;
+
+use std::sync::Arc;
 
 use gpui::{Entity, SharedString, div, prelude::*, rgb};
 
-use crate::dock::{Dock, DockPosition};
+use crate::{
+    dock::{Dock, DockPosition},
+    panel::PanelHandle,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WorkspaceKind {
@@ -66,6 +72,24 @@ impl Workspace {
 
     pub fn kind(&self) -> WorkspaceKind {
         self.kind
+    }
+
+    fn dock(&self, position: DockPosition) -> &Entity<Dock> {
+        match position {
+            DockPosition::Left => &self.left_dock,
+            DockPosition::Bottom => &self.bottom_dock,
+            DockPosition::Center => &self.center_dock,
+            DockPosition::Right => &self.right_dock,
+        }
+    }
+
+    /// Automatically routes a panel to the correct dock if enabled in this workspace
+    pub fn add_panel_if_enabled(&mut self, panel: Arc<dyn PanelHandle>, cx: &mut Context<Self>) {
+        if !panel.is_enabled_in_workspace(self.kind, cx) {
+            return;
+        }
+        let dock = self.dock(panel.position(cx));
+        dock.update(cx, |dock, cx| dock.add_panel(panel, cx));
     }
 }
 
