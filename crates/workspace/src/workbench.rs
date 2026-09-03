@@ -14,7 +14,7 @@ impl Workbench {
         let mut workspaces = HashMap::new();
 
         for kind in WorkspaceKind::all() {
-            let ws = cx.new(|_cx| Workspace::new(*kind));
+            let ws = cx.new(|cx| Workspace::new(*kind, cx));
             workspaces.insert(*kind, ws);
         }
         Self {
