@@ -9,6 +9,7 @@ gpui_platform.workspace = true
 gpui-component.workspace = true
 wgpu.workspace = true
 planetarium = { path = "../planetarium" }
+workspace = { path = "../workspace" }
 futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

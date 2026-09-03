@@ -4,6 +4,7 @@ mod bevy_viewport;
 use gpui::{App, Context, Entity, Window, WindowOptions, div, prelude::*, px, rgb};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_platform::application;
+use workspace::{Workspace, WorkspaceKind};
 
 use crate::{app_state::AppState, bevy_viewport::BevyViewportView};
 
@@ -59,22 +60,18 @@ impl Apogee {
     }
 }
 
-fn run() {
+fn main() {
+    tracing_subscriber::fmt::init();
+
     application().run(|cx: &mut App| {
         gpui_component::init(cx);
 
         cx.set_global(AppState::new());
 
-        if let Err(e) = cx.open_window(WindowOptions::default(), |window, cx| {
-            cx.new(|cx| Apogee::new(window, cx))
+        if let Err(e) = cx.open_window(WindowOptions::default(), |_window, cx| {
+            cx.new(|cx| Workspace::new(WorkspaceKind::Explore, cx))
         }) {
             tracing::error!("Failed to open main window: {e:?}");
         }
     });
-}
-
-fn main() {
-    tracing_subscriber::fmt::init();
-
-    run();
 }
