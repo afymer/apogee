@@ -13,7 +13,7 @@ use workspace::{
 pub fn init(cx: &mut App) {
     cx.observe_new(|workbench: &mut Workbench, window, cx| {
         if let Some(window) = window {
-            let viewport = PlanetariumPanel::build(window, cx, 64, 64);
+            let viewport = PlanetariumPanel::build(window, cx, 1024, 1024);
             cx.observe(&viewport, |_this, _viewport, cx| {
                 cx.notify();
             })
@@ -93,7 +93,7 @@ impl Render for PlanetariumPanel {
         let last_size = self.bridge.last_size();
         div()
             .size_full()
-            .bg(rgb(0x765432))
+            .bg(rgb(0x000000))
             .relative()
             .child(
                 gpui::canvas(

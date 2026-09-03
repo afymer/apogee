@@ -2,6 +2,12 @@
 	"lsp": {
 		"rust-analyzer": {
 			"initialization_options": {
+			    "check": {
+					"command": "clippy",
+					"extraEnv": {
+						"CARGO_TARGET_DIR": "target/analyzer"
+					}
+				},
 				"runnables": {
 					"extraEnv": {
 						"CARGO_TARGET_DIR": "target/analyzer"

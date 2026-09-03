@@ -224,6 +224,9 @@ impl PlanetariumRenderer {
                 app.finish();
                 app.cleanup();
 
+                let mut last_view_size = None;
+                let mut frames_remaining = 0;
+
                 while !bridge.inner.shutdown.load(Ordering::Acquire) {
                     let mut guard = bridge
                         .inner
@@ -258,7 +261,6 @@ impl PlanetariumRenderer {
                     let commands = std::mem::take(&mut guard.pending_commands);
                     drop(guard);
 
-                    let mut texture_resized = false;
                     for cmd in commands {
                         match cmd {
                             ViewportCommand::Resize(new_width, new_height) => {
@@ -273,7 +275,7 @@ impl PlanetariumRenderer {
                                     if let Some(mut image) = images.get_mut(&render_target_handle) {
                                         if image.texture_descriptor.size != new_size {
                                             image.resize(new_size);
-                                            texture_resized = true;
+                                            frames_remaining = 3;
                                             let mut guard = bridge
                                                 .inner
                                                 .state
@@ -302,14 +304,30 @@ impl PlanetariumRenderer {
                                     .state
                                     .lock()
                                     .unwrap_or_else(PoisonError::into_inner);
-                                if guard.latest_texture.is_none() || texture_resized {
-                                    let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
+                                let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
+                                let current_size = (wgpu_texture.width(), wgpu_texture.height());
+
+                                if guard.last_size == Some(current_size)
+                                    && last_view_size != Some(current_size)
+                                {
                                     let wgpu_view = wgpu_texture
                                         .create_view(&wgpu::TextureViewDescriptor::default());
                                     guard.latest_texture = Some(Arc::new(wgpu_view));
+                                    last_view_size = Some(current_size);
                                 }
                             }
                         }
+                    }
+
+                    if frames_remaining > 0 {
+                        frames_remaining -= 1;
+                        let mut guard = bridge
+                            .inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        guard.is_dirty = true;
+                        bridge.inner.cvar.notify_one();
                     }
 
                     bridge.notify_frame_ready();

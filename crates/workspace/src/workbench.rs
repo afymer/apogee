@@ -24,7 +24,7 @@ impl Workbench {
             workspaces.insert(*kind, ws);
         }
 
-        let status_bar = cx.new(|cx| StatusBar::new(cx));
+        let status_bar = cx.new(StatusBar::new);
 
         Self {
             workspaces,
