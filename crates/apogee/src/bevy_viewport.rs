@@ -3,14 +3,26 @@ use std::{sync::Arc, thread::JoinHandle};
 use futures::StreamExt;
 use gpui::{App, Entity, Window, div, prelude::*, rgb};
 use planetarium::{BevyBridge, PlanetariumRenderer, ViewportCommand};
+use workspace::workbench::Workbench;
 
-pub struct BevyViewportView {
+pub fn init(cx: &mut App) {
+    cx.observe_new(|_workbench: &mut Workbench, window, cx| {
+        let viewport = PlanetariumPanel::build(window.unwrap(), cx, 64, 64);
+        cx.observe(&viewport, |_this, _viewport, cx| {
+            cx.notify();
+        })
+        .detach();
+    })
+    .detach();
+}
+
+pub struct PlanetariumPanel {
     bridge: BevyBridge,
     cached_texture: Option<Arc<wgpu::TextureView>>,
     renderer_handle: Option<JoinHandle<()>>,
 }
 
-impl BevyViewportView {
+impl PlanetariumPanel {
     pub fn build(
         window: &mut Window,
         cx: &mut App,
@@ -60,13 +72,9 @@ impl BevyViewportView {
             }
         })
     }
-
-    pub fn request_redraw(&self) {
-        self.bridge.request_redraw();
-    }
 }
 
-impl Render for BevyViewportView {
+impl Render for PlanetariumPanel {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.cached_texture = self.bridge.texture_view();
         let bridge = self.bridge.clone();
@@ -100,7 +108,7 @@ impl Render for BevyViewportView {
     }
 }
 
-impl Drop for BevyViewportView {
+impl Drop for PlanetariumPanel {
     fn drop(&mut self) {
         self.cached_texture = None;
         self.bridge.shutdown();
