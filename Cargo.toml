@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/apogee", "crates/planetarium", "crates/workspace", "crates/ui", "crates/status_bar"]
+default-members = ["crates/apogee"]
 # exclude = ["vendor/zed"]
 
 [workspace.package]
@@ -71,13 +72,14 @@ approx_constant = "allow"
 # As recommended by the Bevy docs
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
-opt-level = 1
+opt-level = 0
 debug = 1
-split-debuginfo = "unpacked"
+split-debuginfo = "off"
 
 # Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
 opt-level = 3
+debug = 0
 
 [patch."https://github.com/zed-industries/zed"]
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", version = "0.2.2" }
