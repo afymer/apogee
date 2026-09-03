@@ -41,11 +41,14 @@ impl PlanetariumPanel {
         initial_height: u32,
     ) -> Entity<Self> {
         cx.new(|cx| {
-            let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+            let (tx, mut rx) = futures::channel::mpsc::channel::<()>(1);
+            let tx = std::sync::Mutex::new(tx);
 
             let notify_ui = {
                 move || {
-                    let _ = tx.unbounded_send(());
+                    if let Ok(mut tx) = tx.try_lock() {
+                        let _ = tx.try_send(());
+                    }
                 }
             };
 

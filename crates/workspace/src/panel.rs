@@ -13,7 +13,7 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized + 'static
     fn is_enabled_in_workspace(&self, kind: WorkspaceKind, _cx: &App) -> bool;
 }
 
-pub trait PanelHandle {
+pub trait PanelHandle: Send + Sync {
     fn panel_id(&self) -> EntityId;
     fn persistent_name(&self) -> &'static str;
     fn title(&self, cx: &App) -> SharedString;

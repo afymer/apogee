@@ -4,7 +4,7 @@ pub mod workbench;
 
 use std::sync::Arc;
 
-use gpui::{Entity, SharedString, div, prelude::*, rgb};
+use gpui::{Entity, SharedString, div, prelude::*};
 
 use crate::{
     dock::{Dock, DockPosition},
@@ -33,34 +33,13 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(kind: WorkspaceKind, cx: &mut Context<Self>) -> Self {
-        let left_dock = cx.new(|_cx| {
-            Dock::new(
-                SharedString::new("left_dock"),
-                rgb(0xff0000),
-                DockPosition::Left,
-            )
-        });
-        let center_dock = cx.new(|_cx| {
-            Dock::new(
-                SharedString::new("center_dock"),
-                rgb(0x00ff00),
-                DockPosition::Center,
-            )
-        });
-        let right_dock = cx.new(|_cx| {
-            Dock::new(
-                SharedString::new("right_dock"),
-                rgb(0x0000ff),
-                DockPosition::Right,
-            )
-        });
-        let bottom_dock = cx.new(|_cx| {
-            Dock::new(
-                SharedString::new("bottom_dock"),
-                rgb(0xff00ff),
-                DockPosition::Bottom,
-            )
-        });
+        let left_dock = cx.new(|_cx| Dock::new(SharedString::new("left_dock"), DockPosition::Left));
+        let center_dock =
+            cx.new(|_cx| Dock::new(SharedString::new("center_dock"), DockPosition::Center));
+        let right_dock =
+            cx.new(|_cx| Dock::new(SharedString::new("right_dock"), DockPosition::Right));
+        let bottom_dock =
+            cx.new(|_cx| Dock::new(SharedString::new("bottom_dock"), DockPosition::Bottom));
         Workspace {
             kind,
             left_dock,
@@ -89,7 +68,7 @@ impl Workspace {
             return;
         }
         let dock = self.dock(panel.position(cx));
-        dock.update(cx, |dock, cx| dock.add_panel(panel, cx));
+        dock.update(cx, |dock, _cx| dock.add_panel(panel));
     }
 }
 

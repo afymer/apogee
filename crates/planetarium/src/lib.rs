@@ -28,6 +28,7 @@ struct PlanetariumCameraMarker;
 
 pub struct PlanetariumRenderer;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportCommand {
     Resize(u32, u32),
 }
@@ -149,6 +150,15 @@ impl PlanetariumRenderer {
                 let height = initial_height.max(1);
                 let adapter_info = adapter.get_info();
 
+                {
+                    let mut guard = bridge
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    guard.last_size = Some((width, height));
+                }
+
                 app.add_plugins(
                     DefaultPlugins
                         .set(WindowPlugin {
@@ -261,31 +271,30 @@ impl PlanetariumRenderer {
                     let commands = std::mem::take(&mut guard.pending_commands);
                     drop(guard);
 
-                    for cmd in commands {
-                        match cmd {
-                            ViewportCommand::Resize(new_width, new_height) => {
-                                let new_size = Extent3d {
-                                    width: new_width.max(1),
-                                    height: new_height.max(1),
-                                    depth_or_array_layers: 1,
-                                };
-                                if let Some(mut images) =
-                                    app.world_mut().get_resource_mut::<Assets<Image>>()
-                                {
-                                    if let Some(mut image) = images.get_mut(&render_target_handle) {
-                                        if image.texture_descriptor.size != new_size {
-                                            image.resize(new_size);
-                                            frames_remaining = 3;
-                                            let mut guard = bridge
-                                                .inner
-                                                .state
-                                                .lock()
-                                                .unwrap_or_else(PoisonError::into_inner);
-                                            guard.last_size =
-                                                Some((new_size.width, new_size.height));
-                                        }
-                                    }
+                    let latest_resize = commands
+                        .last()
+                        .map(|&ViewportCommand::Resize(w, h)| (w.max(1), h.max(1)));
+
+                    if let Some((new_width, new_height)) = latest_resize {
+                        let new_size = Extent3d {
+                            width: new_width,
+                            height: new_height,
+                            depth_or_array_layers: 1,
+                        };
+                        if let Some(mut images) =
+                            app.world_mut().get_resource_mut::<Assets<Image>>()
+                        {
+                            if let Some(mut image) = images.get_mut(&render_target_handle) {
+                                if image.texture_descriptor.size != new_size {
+                                    image.resize(new_size);
+                                    frames_remaining = 3;
                                 }
+                                let mut guard = bridge
+                                    .inner
+                                    .state
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner);
+                                guard.last_size = Some((new_size.width, new_size.height));
                             }
                         }
                     }
@@ -327,7 +336,6 @@ impl PlanetariumRenderer {
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner);
                         guard.is_dirty = true;
-                        bridge.inner.cvar.notify_one();
                     }
 
                     bridge.notify_frame_ready();

@@ -28,7 +28,7 @@ impl Workbench {
 
         Self {
             workspaces,
-            active_workspace_kind: WorkspaceKind::all()[0],
+            active_workspace_kind: WorkspaceKind::default(),
             registered_panels: Vec::new(),
             status_bar,
         }
@@ -68,7 +68,7 @@ impl Render for Workbench {
                 div()
                     .flex_1()
                     .relative()
-                    .children(active_ws.map(|ws| ws.into_any_element())),
+                    .children(active_ws.map(IntoElement::into_any_element)),
             )
             .child(self.status_bar.clone())
     }
