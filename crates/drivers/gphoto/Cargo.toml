@@ -1,0 +1,25 @@
+[package]
+name = "gphoto"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "gphoto"
+path = "src/gphoto.rs"
+
+[dependencies]
+tracing.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+
+gphoto2 = "3.4.1"
+rawloader = "0.37.2"
+
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+wgpu.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true
