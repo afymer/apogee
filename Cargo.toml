@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/apogee",
     "crates/daemon",
+    "crates/protocol",
     "crates/sequencer",
     "crates/planetarium",
     "crates/workspace",
@@ -18,8 +19,10 @@ default-members = ["crates/apogee"]
 edition = "2024"
 
 [workspace.dependencies]
+thiserror = "2.0.20"
 futures = "0.3.34"
 tracing = "0.1.44"
+serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["full"] }
 anyhow = "1.0"
 wgpu = "29.0.4"

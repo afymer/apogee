@@ -11,6 +11,9 @@ path = "src/gphoto.rs"
 tracing.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+
+protocol.path = "../../protocol"
 
 gphoto2 = "3.4.1"
 rawloader = "0.37.2"

@@ -2467,6 +2467,8 @@ dependencies = [
 name = "daemon"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "gphoto",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3412,7 +3414,9 @@ dependencies = [
  "gphoto2",
  "gpui",
  "image",
+ "protocol",
  "rawloader",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wgpu",
@@ -6352,6 +6356,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tracing",
 ]
 
 [[package]]

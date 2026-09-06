@@ -1,8 +1,12 @@
+use std::time::Duration;
+
+use gphoto::actor::CameraActor;
+use tokio::time::sleep;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::fmt()
@@ -13,4 +17,8 @@ async fn main() {
         .init();
 
     info!("Starting server...");
+
+    let camera_handle = CameraActor::spawn();
+
+    Ok(())
 }
