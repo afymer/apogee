@@ -1,7 +1,5 @@
-use std::time::Duration;
-
 use gphoto::actor::CameraActor;
-use tokio::time::sleep;
+use sequencer::Sequencer;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -19,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting server...");
 
     let camera_handle = CameraActor::spawn();
+    let sequencer = Sequencer::new(camera_handle);
 
     Ok(())
 }
