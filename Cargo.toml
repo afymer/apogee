@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/apogee",
     "crates/daemon",
+    "crates/sequencer",
     "crates/planetarium",
     "crates/workspace",
     "crates/theme",

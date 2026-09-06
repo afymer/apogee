@@ -1,0 +1,17 @@
+[package]
+name = "sequencer"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "sequencer"
+path = "src/sequencer.rs"
+
+[dependencies]
+tracing.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+gphoto.path = "../drivers/gphoto"
+
+[lints]
+workspace = true
