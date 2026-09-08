@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use gpui::{Pixels, SharedString, div, prelude::*, px};
+use gpui::{Pixels, SharedString, div, px};
+use ui::prelude::*;
 
 use crate::panel::PanelHandle;
 
@@ -49,8 +50,8 @@ impl Dock {
 impl Render for Dock {
     fn render(
         &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut gpui::prelude::Context<Self>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         if self.panels.is_empty() {
             return div();
@@ -66,6 +67,17 @@ impl Render for Dock {
             .active_index
             .and_then(|i| self.panels.get(i))
             .map(|panel| div().flex_1().overflow_hidden().child(panel.to_any()));
-        root.child(self.title.clone()).children(active_panel)
+        root.child(
+            h_flex()
+                .px_2()
+                .py_1()
+                .bg(cx.theme().colors().panel_background)
+                .child(
+                    Label::new(self.title.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+        )
+        .children(active_panel)
     }
 }

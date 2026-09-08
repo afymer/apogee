@@ -8,8 +8,6 @@ members = [
     "crates/sequencer",
     "crates/planetarium",
     "crates/workspace",
-    "crates/theme",
-    "crates/ui",
     "crates/status_bar",
     "crates/drivers/gphoto"
 ]
@@ -30,7 +28,9 @@ wgpu = "29.0.4"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", features = ["font-kit", "wayland", "x11", "wgpu"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+ui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
+theme = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
+assets = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 bevy = { version = "0.19.1", default-features = false, features = [
     "bevy_render",
     "bevy_core_pipeline",
@@ -101,6 +101,9 @@ debug = 0
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", version = "0.2.2" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_macros = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
+ui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
+theme = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
+assets = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 
 [patch.crates-io]
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", version = "0.2.2" }

@@ -1,7 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use gpui::{Entity, Window, div, prelude::*};
+use gpui::Entity;
 use status_bar::StatusBar;
+use ui::prelude::*;
 
 use crate::{
     Workspace, WorkspaceKind,
@@ -58,12 +59,11 @@ impl Workbench {
 }
 
 impl Render for Workbench {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active_ws = self.workspaces.get(&self.active_workspace_kind).cloned();
-        div()
+        v_flex()
             .size_full()
-            .flex()
-            .flex_col()
+            .bg(cx.theme().colors().background)
             .child(
                 div()
                     .flex_1()

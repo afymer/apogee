@@ -9,6 +9,8 @@ path = "src/workspace.rs"
 
 [dependencies]
 gpui.workspace = true
+ui.workspace = true
+theme.workspace = true
 tracing.workspace = true
 status_bar.path = "../status_bar"
 

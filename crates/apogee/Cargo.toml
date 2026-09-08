@@ -6,10 +6,12 @@ edition.workspace = true
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+ui.workspace = true
+theme.workspace = true
+assets.workspace = true
 wgpu.workspace = true
 planetarium = { path = "../planetarium" }
 workspace = { path = "../workspace" }
-theme = { path = "../theme" }
 futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

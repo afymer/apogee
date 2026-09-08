@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*, px, rems, rgb, text};
+use ui::prelude::*;
 
 pub struct StatusBar {}
 
@@ -11,17 +11,37 @@ impl StatusBar {
 impl Render for StatusBar {
     fn render(
         &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut gpui::prelude::Context<Self>,
-    ) -> impl gpui::prelude::IntoElement {
-        div()
-            .flex() // Make it into a component
-            .flex_row()
-            .items_center()
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
             .w_full()
-            .gap(rems(0.8))
-            .p(rems(0.4))
-            .bg(rgb(0xffffff))
-            .child(div().line_height(px(12.)).child(text!("Status...")))
+            .h_7()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .bg(cx.theme().colors().status_bar_background)
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Label::new("Ready")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new("status_button", "Apogee")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle),
+                    ),
+            )
     }
 }
