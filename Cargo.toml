@@ -8,6 +8,7 @@ members = [
     "crates/sequencer",
     "crates/planetarium",
     "crates/workspace",
+    "crates/title_bar",
     "crates/status_bar",
     "crates/drivers/gphoto"
 ]

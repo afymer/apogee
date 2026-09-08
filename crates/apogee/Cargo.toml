@@ -12,6 +12,7 @@ assets.workspace = true
 wgpu.workspace = true
 planetarium = { path = "../planetarium" }
 workspace = { path = "../workspace" }
+title_bar = { path = "../title_bar" }
 futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

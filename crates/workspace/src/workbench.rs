@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use gpui::Entity;
+use gpui::{AnyView, Entity};
 use status_bar::StatusBar;
 use ui::prelude::*;
 
@@ -12,6 +12,7 @@ use crate::{
 pub struct Workbench {
     workspaces: HashMap<WorkspaceKind, Entity<Workspace>>,
     active_workspace_kind: WorkspaceKind,
+    title_bar: Option<AnyView>,
     status_bar: Entity<StatusBar>,
     registered_panels: Vec<Arc<dyn PanelHandle>>,
 }
@@ -30,9 +31,19 @@ impl Workbench {
         Self {
             workspaces,
             active_workspace_kind: WorkspaceKind::default(),
+            title_bar: None,
             registered_panels: Vec::new(),
             status_bar,
         }
+    }
+
+    pub fn set_title_bar(&mut self, title_bar: AnyView, cx: &mut Context<Self>) {
+        self.title_bar = Some(title_bar);
+        cx.notify();
+    }
+
+    pub fn active_workspace_kind(&self) -> WorkspaceKind {
+        self.active_workspace_kind
     }
 
     pub fn switch_workspace(&mut self, kind: WorkspaceKind, cx: &mut Context<Self>) {
@@ -64,6 +75,7 @@ impl Render for Workbench {
         v_flex()
             .size_full()
             .bg(cx.theme().colors().background)
+            .children(self.title_bar.clone().map(IntoElement::into_any_element))
             .child(
                 div()
                     .flex_1()

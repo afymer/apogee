@@ -11,15 +11,23 @@ use crate::{
     panel::PanelHandle,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum WorkspaceKind {
     #[default]
     Explore,
+    Capture,
 }
 
 impl WorkspaceKind {
     pub fn all() -> &'static [Self] {
-        &[Self::Explore]
+        &[Self::Explore, Self::Capture]
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Explore => "Explore",
+            Self::Capture => "Capture",
+        }
     }
 }
 

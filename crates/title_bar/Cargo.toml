@@ -1,0 +1,17 @@
+[package]
+name = "title_bar"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+gpui.workspace = true
+ui.workspace = true
+theme.workspace = true
+workspace = { path = "../workspace" }
+
+[lib]
+name = "title_bar"
+path = "src/title_bar.rs"
+
+[lints]
+workspace = true

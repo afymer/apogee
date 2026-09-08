@@ -19,6 +19,7 @@ fn main() {
             theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
             theme_provider::init(cx);
 
+            title_bar::init(cx);
             bevy_viewport::init(cx);
 
             cx.set_global(AppState::new());
