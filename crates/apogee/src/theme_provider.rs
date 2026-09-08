@@ -1,5 +1,8 @@
 use gpui::{App, Font, Pixels, font, px};
 use theme::{ThemeSettingsProvider, UiDensity, set_theme_settings_provider};
+use tracing::{info, warn};
+
+use crate::theme_loader::{DEFAULT_THEME_NAME, built_in_themes};
 
 pub struct DefaultThemeSettingsProvider {
     pub ui_font: Font,
@@ -45,4 +48,17 @@ impl ThemeSettingsProvider for DefaultThemeSettingsProvider {
 
 pub fn init(cx: &mut App) {
     set_theme_settings_provider(Box::new(DefaultThemeSettingsProvider::default()), cx);
+
+    let registry = theme::ThemeRegistry::global(cx);
+    info!("Registering themes");
+    registry.insert_theme_families(built_in_themes());
+
+    if let Ok(theme) = registry.get(DEFAULT_THEME_NAME) {
+        theme::GlobalTheme::update_theme(cx, theme);
+    } else {
+        warn!(
+            "Theme '{}' not found, keeping fallback theme",
+            DEFAULT_THEME_NAME
+        );
+    }
 }

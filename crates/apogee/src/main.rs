@@ -1,5 +1,6 @@
 mod app_state;
 mod bevy_viewport;
+mod theme_loader;
 mod theme_provider;
 
 use assets::Assets;

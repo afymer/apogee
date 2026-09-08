@@ -16,6 +16,10 @@ title_bar = { path = "../title_bar" }
 futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+refineable.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
