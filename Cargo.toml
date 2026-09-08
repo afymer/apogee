@@ -4,6 +4,7 @@ members = [
     "crates/apogee",
     "crates/daemon",
     "crates/protocol",
+    "crates/controller",
     "crates/sequencer",
     "crates/planetarium",
     "crates/workspace",

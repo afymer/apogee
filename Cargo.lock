@@ -2165,6 +2165,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "controller"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gphoto",
+ "sequencer",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7338,6 +7349,7 @@ name = "sequencer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "enumflags2",
  "gphoto",
  "tokio",
  "tracing",
