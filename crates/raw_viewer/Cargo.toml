@@ -1,0 +1,24 @@
+[package]
+name = "raw_viewer"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+gpui = { workspace = true, features = ["wgpu"] }
+ui.workspace = true
+theme.workspace = true
+workspace = { path = "../workspace" }
+wgpu.workspace = true
+tracing.workspace = true
+bytemuck.workspace = true
+rawloader.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+glam.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+pollster = "0.4"
+
+[lints]
+workspace = true

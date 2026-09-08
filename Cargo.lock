@@ -231,6 +231,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "planetarium",
+ "raw_viewer",
  "refineable",
  "serde",
  "serde_json",
@@ -6050,6 +6051,24 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+]
+
+[[package]]
+name = "raw_viewer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "futures",
+ "glam",
+ "gpui",
+ "pollster 0.4.0",
+ "rawloader",
+ "theme",
+ "thiserror 2.0.20",
+ "tracing",
+ "ui",
+ "wgpu",
+ "workspace",
 ]
 
 [[package]]

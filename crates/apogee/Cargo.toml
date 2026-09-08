@@ -13,6 +13,7 @@ wgpu.workspace = true
 planetarium = { path = "../planetarium" }
 workspace = { path = "../workspace" }
 title_bar = { path = "../title_bar" }
+raw_viewer = { path = "../raw_viewer" }
 futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

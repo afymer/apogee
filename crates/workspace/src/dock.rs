@@ -24,7 +24,7 @@ pub(crate) struct Dock {
 impl Dock {
     pub(crate) fn new(title: SharedString, position: DockPosition) -> Self {
         let size = match position {
-            DockPosition::Left | DockPosition::Right => px(100.),
+            DockPosition::Left | DockPosition::Right => px(240.),
             DockPosition::Bottom | DockPosition::Center => px(50.),
         };
         Self {

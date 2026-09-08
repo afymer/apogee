@@ -10,7 +10,8 @@ members = [
     "crates/workspace",
     "crates/title_bar",
     "crates/status_bar",
-    "crates/drivers/gphoto"
+    "crates/drivers/gphoto",
+    "crates/raw_viewer"
 ]
 default-members = ["crates/apogee"]
 # exclude = ["vendor/zed"]
@@ -27,6 +28,9 @@ serde_json = "1.0"
 tokio = { version = "1.53.1", features = ["full"] }
 anyhow = "1.0"
 wgpu = "29.0.4"
+bytemuck = { version = "1.25", features = ["derive"] }
+rawloader = "0.37.2"
+glam = { version = "0.32", features = ["bytemuck"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", features = ["font-kit", "wayland", "x11", "wgpu"] }

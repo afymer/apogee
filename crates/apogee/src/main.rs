@@ -22,6 +22,7 @@ fn main() {
 
             title_bar::init(cx);
             bevy_viewport::init(cx);
+            raw_viewer::init(cx);
 
             cx.set_global(AppState::new());
 
