@@ -43,4 +43,8 @@ impl CameraHandle {
             .map_err(|_| CaptureError::ActorDisconnected)?;
         Ok(())
     }
+
+    pub fn status(&self) -> watch::Receiver<CameraStatus> {
+        self.status_rx.clone()
+    }
 }
