@@ -1,6 +1,7 @@
 // Custom WGSL shader for CR2 RAW display with optional demosaicing
 
-struct Uniforms {
+// Static per-image
+struct ImageUniforms {
     image_size: vec2<u32>,
     demosaic_enabled: u32,
     _pad0: u32,
@@ -8,15 +9,29 @@ struct Uniforms {
     black_levels: vec4<f32>,
     white_levels: vec4<f32>,
     wb_coeffs: vec4<f32>,
+};
+
+// Interactive uniforms
+// Binding 0: view / display transformation
+struct ViewUniforms {
     screen_size: vec2<f32>,
-    range_min_max: vec2<f32>,
     pan: vec2<f32>,
     zoom: f32,
-    _pad1: f32,
+    _pad0: f32,
+    _pad1: vec2<f32>,
+};
+
+// Binding 1: tone stretching / display range
+struct StretchUniforms {
+    range_min_max: vec2<f32>,
+    _pad: vec2<f32>,
 };
 
 @group(0) @binding(0) var raw_texture: texture_2d<u32>;
-@group(0) @binding(1) var<uniform> u: Uniforms;
+@group(0) @binding(1) var<uniform> img: ImageUniforms;
+
+@group(1) @binding(0) var<uniform> view: ViewUniforms;
+@group(1) @binding(1) var<uniform> stretch: StretchUniforms;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -36,8 +51,8 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
 
 // Fetch raw 16-bit integer sensor value with border clamping
 fn get_raw(x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(u.image_size.x) - 1);
-    let cy = clamp(y, 0, i32(u.image_size.y) - 1);
+    let cx = clamp(x, 0, i32(img.image_size.x) - 1);
+    let cy = clamp(y, 0, i32(img.image_size.y) - 1);
     return f32(textureLoad(raw_texture, vec2<i32>(cx, cy), 0).r);
 }
 
@@ -46,13 +61,13 @@ fn get_cfa_color(x: i32, y: i32) -> u32 {
     let r = u32((y % 2 + 2) % 2);
     let c = u32((x % 2 + 2) % 2);
     let idx = r * 2u + c;
-    return u.cfa_pattern[idx];
+    return img.cfa_pattern[idx];
 }
 
 // Subtract black level and scale by white level
 fn clean_val(raw_val: f32, color_channel: u32) -> f32 {
-    let bl = u.black_levels[color_channel];
-    let wl = u.white_levels[color_channel];
+    let bl = img.black_levels[color_channel];
+    let wl = img.white_levels[color_channel];
     return max((raw_val - bl) / max(wl - bl, 1.0), 0.0);
 }
 
@@ -115,13 +130,13 @@ fn get_bayer_mosaic(x: i32, y: i32, c_center: u32) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    if (u.image_size.x == 0u || u.image_size.y == 0u) {
+    if (img.image_size.x == 0u || img.image_size.y == 0u) {
         return vec4<f32>(0.04, 0.04, 0.05, 1.0);
     }
 
     // Screen aspect vs Image aspect
-    let screen_aspect = u.screen_size.x / max(u.screen_size.y, 1.0);
-    let img_aspect = f32(u.image_size.x) / max(f32(u.image_size.y), 1.0);
+    let screen_aspect = view.screen_size.x / max(view.screen_size.y, 1.0);
+    let img_aspect = f32(img.image_size.x) / max(f32(img.image_size.y), 1.0);
 
     var p = in.uv - vec2<f32>(0.5, 0.5);
     if (screen_aspect > img_aspect) {
@@ -130,7 +145,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         p.y *= img_aspect / screen_aspect;
     }
 
-    let img_uv = (p - u.pan) / max(u.zoom, 1e-4) + vec2<f32>(0.5, 0.5);
+    let img_uv = (p - view.pan) / max(view.zoom, 1e-4) + vec2<f32>(0.5, 0.5);
 
     // Outside bounds border check
     if (img_uv.x < 0.0 || img_uv.x >= 1.0 || img_uv.y < 0.0 || img_uv.y >= 1.0) {
@@ -138,25 +153,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.04, 0.04, 0.05, 1.0);
     }
 
-    let pixel_coords = img_uv * vec2<f32>(f32(u.image_size.x), f32(u.image_size.y));
+    let pixel_coords = img_uv * vec2<f32>(f32(img.image_size.x), f32(img.image_size.y));
     let x = i32(floor(pixel_coords.x));
     let y = i32(floor(pixel_coords.y));
 
     let c_center = get_cfa_color(x, y);
 
     var rgb_raw: vec3<f32>;
-    if (u.demosaic_enabled == 0u) {
+    if (img.demosaic_enabled == 0u) {
         rgb_raw = get_bayer_mosaic(x, y, c_center);
     } else {
         rgb_raw = demosaic_bilinear(x, y, c_center);
     }
 
     // Apply camera White Balance multipliers (linear raw display)
-    var rgb = rgb_raw * u.wb_coeffs.rgb;
+    var rgb = rgb_raw * img.wb_coeffs.rgb;
 
     // Apply min-max range scaling (contrast window)
-    let range_min = u.range_min_max.x;
-    let range_max = max(u.range_min_max.y, range_min + 1e-4);
+    let range_min = stretch.range_min_max.x;
+    let range_max = max(stretch.range_min_max.y, range_min + 1e-4);
     rgb = clamp((rgb - vec3<f32>(range_min)) / (range_max - range_min), vec3<f32>(0.0), vec3<f32>(1.0));
 
     return vec4<f32>(rgb, 1.0);

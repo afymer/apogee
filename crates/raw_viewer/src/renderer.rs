@@ -12,34 +12,51 @@ pub const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSr
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct ShaderUniforms {
-    image_size: [u32; 2],
-    demosaic_enabled: u32,
+pub struct ImageUniforms {
+    pub image_size: [u32; 2],
+    pub demosaic_enabled: u32,
     _pad0: u32,
-    cfa_pattern: [u32; 4],
-    black_levels: [f32; 4],
-    white_levels: [f32; 4],
-    wb_coeffs: [f32; 4],
-    screen_size: [f32; 2],
-    range_min_max: [f32; 2],
-    pan: [f32; 2],
-    zoom: f32,
-    _pad1: f32,
+    pub cfa_pattern: [u32; 4],
+    pub black_levels: [f32; 4],
+    pub white_levels: [f32; 4],
+    pub wb_coeffs: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct ViewUniforms {
+    pub screen_size: [f32; 2],
+    pub pan: [f32; 2],
+    pub zoom: f32,
+    _pad0: f32,
+    _pad1: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct StretchUniforms {
+    pub range_min_max: [f32; 2],
+    _pad: [f32; 2],
 }
 
 pub struct RawViewerRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     render_pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    image_bind_group_layout: wgpu::BindGroupLayout,
+    image_uniform_buffer: wgpu::Buffer,
+    view_uniform_buffer: wgpu::Buffer,
+    stretch_uniform_buffer: wgpu::Buffer,
+    image_bind_group: wgpu::BindGroup,
+    view_bind_group: wgpu::BindGroup,
     raw_texture: Option<(wgpu::Texture, u32, u32)>,
     target_texture: Option<(wgpu::Texture, Arc<wgpu::TextureView>, u32, u32)>,
     current_image: Option<Arc<RawImage>>,
     demosaic_enabled: bool,
     display_range: DisplayRange,
     view_transform: ViewTransform,
+    image_uniforms_dirty: bool,
+    stretch_uniforms_dirty: bool,
 }
 
 impl RawViewerRenderer {
@@ -50,39 +67,118 @@ impl RawViewerRenderer {
             source: wgpu::ShaderSource::Wgsl(shader_code.into()),
         });
 
-        let uniform_size = std::mem::size_of::<ShaderUniforms>() as u64;
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Raw Viewer Uniform Buffer"),
-            size: uniform_size,
+        let image_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Raw Viewer Image Uniform Buffer"),
+            size: std::mem::size_of::<ImageUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Raw Viewer Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Uint,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+        let view_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Raw Viewer View Uniform Buffer"),
+            size: std::mem::size_of::<ViewUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+
+        let stretch_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Raw Viewer Stretch Uniform Buffer"),
+            size: std::mem::size_of::<StretchUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let default_image_uniforms = ImageUniforms {
+            image_size: [0, 0],
+            demosaic_enabled: 0,
+            _pad0: 0,
+            cfa_pattern: [0, 1, 1, 2],
+            black_levels: [0.0; 4],
+            white_levels: [16383.0; 4],
+            wb_coeffs: [1.0; 4],
+        };
+        queue.write_buffer(
+            &image_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[default_image_uniforms]),
+        );
+
+        let default_view_uniforms = ViewUniforms {
+            screen_size: [1.0, 1.0],
+            pan: [0.0, 0.0],
+            zoom: 1.0,
+            _pad0: 0.0,
+            _pad1: [0.0, 0.0],
+        };
+        queue.write_buffer(
+            &view_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[default_view_uniforms]),
+        );
+
+        let default_stretch_uniforms = StretchUniforms {
+            range_min_max: DisplayRange::DEFAULT.as_array(),
+            _pad: [0.0, 0.0],
+        };
+        queue.write_buffer(
+            &stretch_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[default_stretch_uniforms]),
+        );
+
+        let image_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Raw Viewer Image Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let view_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Raw Viewer View Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         // dummy
         let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -101,9 +197,9 @@ impl RawViewerRenderer {
         });
         let dummy_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Raw Viewer Bind Group"),
-            layout: &bind_group_layout,
+        let image_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Raw Viewer Image Bind Group"),
+            layout: &image_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -111,14 +207,32 @@ impl RawViewerRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: image_uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let view_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Raw Viewer View Bind Group"),
+            layout: &view_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: view_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: stretch_uniform_buffer.as_entire_binding(),
                 },
             ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Raw Viewer Pipeline Layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[
+                Some(&image_bind_group_layout),
+                Some(&view_bind_group_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -160,15 +274,20 @@ impl RawViewerRenderer {
             device,
             queue,
             render_pipeline,
-            bind_group_layout,
-            uniform_buffer,
-            bind_group,
+            image_bind_group_layout,
+            image_uniform_buffer,
+            view_uniform_buffer,
+            stretch_uniform_buffer,
+            image_bind_group,
+            view_bind_group,
             raw_texture: None,
             target_texture: None,
             current_image: None,
             demosaic_enabled: true,
             display_range: DisplayRange::DEFAULT,
             view_transform: ViewTransform::DEFAULT,
+            image_uniforms_dirty: false,
+            stretch_uniforms_dirty: false,
         }
     }
 
@@ -198,9 +317,9 @@ impl RawViewerRenderer {
             });
 
             let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            self.image_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Raw Sensor Bind Group"),
-                layout: &self.bind_group_layout,
+                layout: &self.image_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -208,7 +327,7 @@ impl RawViewerRenderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: self.uniform_buffer.as_entire_binding(),
+                        resource: self.image_uniform_buffer.as_entire_binding(),
                     },
                 ],
             });
@@ -238,11 +357,15 @@ impl RawViewerRenderer {
         }
 
         self.current_image = Some(image);
+        self.image_uniforms_dirty = true;
         info!("Updated RawViewerRenderer with image {}x{}", width, height);
     }
 
     pub fn set_demosaic(&mut self, enabled: bool) {
-        self.demosaic_enabled = enabled;
+        if self.demosaic_enabled != enabled {
+            self.demosaic_enabled = enabled;
+            self.image_uniforms_dirty = true;
+        }
     }
 
     pub fn demosaic(&self) -> bool {
@@ -250,11 +373,14 @@ impl RawViewerRenderer {
     }
 
     pub fn set_display_range(&mut self, min: f32, max: f32) {
-        self.display_range = DisplayRange::new(min, max);
+        self.set_range(DisplayRange::new(min, max));
     }
 
     pub fn set_range(&mut self, range: DisplayRange) {
-        self.display_range = range;
+        if self.display_range != range {
+            self.display_range = range;
+            self.stretch_uniforms_dirty = true;
+        }
     }
 
     pub fn display_range(&self) -> (f32, f32) {
@@ -312,40 +438,61 @@ impl RawViewerRenderer {
 
         let target_view = self.target_texture.as_ref().unwrap().1.clone();
 
-        let uniforms = if let Some(raw) = &self.current_image {
-            ShaderUniforms {
-                image_size: [raw.width, raw.height],
-                demosaic_enabled: u32::from(self.demosaic_enabled),
-                _pad0: 0,
-                cfa_pattern: raw.cfa_pattern,
-                black_levels: raw.black_levels,
-                white_levels: raw.white_levels,
-                wb_coeffs: raw.wb_coeffs,
-                screen_size: [width as f32, height as f32],
-                range_min_max: self.display_range.as_array(),
-                pan: self.view_transform.pan.to_array(),
-                zoom: self.view_transform.zoom,
-                _pad1: 0.0,
-            }
-        } else {
-            ShaderUniforms {
-                image_size: [0, 0],
-                demosaic_enabled: 0,
-                _pad0: 0,
-                cfa_pattern: [0, 1, 1, 2],
-                black_levels: [0.0; 4],
-                white_levels: [16383.0; 4],
-                wb_coeffs: [1.0; 4],
-                screen_size: [width as f32, height as f32],
-                range_min_max: [0.0, 1.0],
-                pan: [0.0, 0.0],
-                zoom: 1.0,
-                _pad1: 0.0,
-            }
-        };
+        if self.image_uniforms_dirty {
+            let image_uniforms = if let Some(raw) = &self.current_image {
+                ImageUniforms {
+                    image_size: [raw.width, raw.height],
+                    demosaic_enabled: u32::from(self.demosaic_enabled),
+                    _pad0: 0,
+                    cfa_pattern: raw.cfa_pattern,
+                    black_levels: raw.black_levels,
+                    white_levels: raw.white_levels,
+                    wb_coeffs: raw.wb_coeffs,
+                }
+            } else {
+                ImageUniforms {
+                    image_size: [0, 0],
+                    demosaic_enabled: 0,
+                    _pad0: 0,
+                    cfa_pattern: [0, 1, 1, 2],
+                    black_levels: [0.0; 4],
+                    white_levels: [16383.0; 4],
+                    wb_coeffs: [1.0; 4],
+                }
+            };
+            self.queue.write_buffer(
+                &self.image_uniform_buffer,
+                0,
+                bytemuck::cast_slice(&[image_uniforms]),
+            );
+            self.image_uniforms_dirty = false;
+        }
 
-        self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        if self.stretch_uniforms_dirty {
+            let stretch_uniforms = StretchUniforms {
+                range_min_max: self.display_range.as_array(),
+                _pad: [0.0, 0.0],
+            };
+            self.queue.write_buffer(
+                &self.stretch_uniform_buffer,
+                0,
+                bytemuck::cast_slice(&[stretch_uniforms]),
+            );
+            self.stretch_uniforms_dirty = false;
+        }
+
+        let view_uniforms = ViewUniforms {
+            screen_size: [width as f32, height as f32],
+            pan: self.view_transform.pan.to_array(),
+            zoom: self.view_transform.zoom,
+            _pad0: 0.0,
+            _pad1: [0.0, 0.0],
+        };
+        self.queue.write_buffer(
+            &self.view_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[view_uniforms]),
+        );
 
         let mut encoder = self
             .device
@@ -378,7 +525,8 @@ impl RawViewerRenderer {
 
             if self.current_image.is_some() {
                 rpass.set_pipeline(&self.render_pipeline);
-                rpass.set_bind_group(0, &self.bind_group, &[]);
+                rpass.set_bind_group(0, &self.image_bind_group, &[]);
+                rpass.set_bind_group(1, &self.view_bind_group, &[]);
                 rpass.draw(0..3, 0..1);
             }
         }
