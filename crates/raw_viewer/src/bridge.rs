@@ -367,10 +367,8 @@ impl RawViewerBridge {
                             .unwrap_or_else(PoisonError::into_inner);
                         guard.histogram = hist.map(Arc::new);
                     } else if let Some((x_mode, y_mode)) = pending.histogram_scale_modes {
-                        let hist = renderer.compute_histogram(
-                            x_mode == ScaleMode::Log,
-                            y_mode == ScaleMode::Log,
-                        );
+                        let hist = renderer
+                            .compute_histogram(x_mode == ScaleMode::Log, y_mode == ScaleMode::Log);
                         let mut guard = bridge
                             .inner
                             .state

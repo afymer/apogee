@@ -13,23 +13,21 @@ use crate::app_state::AppState;
 fn main() {
     tracing_subscriber::fmt::init();
 
-    application()
-        .with_assets(Assets)
-        .run(|cx: &mut App| {
-            Assets.load_fonts(cx).expect("failed to load fonts");
-            theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
-            theme_provider::init(cx);
+    application().with_assets(Assets).run(|cx: &mut App| {
+        Assets.load_fonts(cx).expect("failed to load fonts");
+        theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
+        theme_provider::init(cx);
 
-            title_bar::init(cx);
-            bevy_viewport::init(cx);
-            raw_viewer::init(cx);
+        title_bar::init(cx);
+        bevy_viewport::init(cx);
+        raw_viewer::init(cx);
 
-            cx.set_global(AppState::new());
+        cx.set_global(AppState::new());
 
-            if let Err(e) = cx.open_window(WindowOptions::default(), |window, cx| {
-                cx.new(|cx| Workbench::new(window, cx))
-            }) {
-                tracing::error!("Failed to open main window: {e:?}");
-            }
-        });
+        if let Err(e) = cx.open_window(WindowOptions::default(), |window, cx| {
+            cx.new(|cx| Workbench::new(window, cx))
+        }) {
+            tracing::error!("Failed to open main window: {e:?}");
+        }
+    });
 }

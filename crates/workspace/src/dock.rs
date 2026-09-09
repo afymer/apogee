@@ -48,11 +48,7 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.panels.is_empty() {
             return div();
         }
