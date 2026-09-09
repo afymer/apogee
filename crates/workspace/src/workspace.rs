@@ -1,9 +1,6 @@
 pub mod dock;
 pub mod panel;
-pub mod theme;
 pub mod workbench;
-
-pub use theme::{SliderColors, SliderThemeExt};
 
 use std::sync::Arc;
 

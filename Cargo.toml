@@ -11,7 +11,8 @@ members = [
     "crates/title_bar",
     "crates/status_bar",
     "crates/drivers/gphoto",
-    "crates/raw_viewer"
+    "crates/raw_viewer",
+    "crates/controls"
 ]
 default-members = ["crates/apogee"]
 # exclude = ["vendor/zed"]

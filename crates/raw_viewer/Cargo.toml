@@ -8,6 +8,7 @@ gpui = { workspace = true, features = ["wgpu"] }
 ui.workspace = true
 theme.workspace = true
 workspace = { path = "../workspace" }
+controls = { path = "../controls" }
 wgpu.workspace = true
 tracing.workspace = true
 bytemuck.workspace = true

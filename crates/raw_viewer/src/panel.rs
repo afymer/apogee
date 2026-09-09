@@ -15,9 +15,10 @@ use workspace::{
     panel::{Panel, PanelEvent},
 };
 
+use controls::{ActiveKnob, DoubleSlider, DoubleSliderEvent};
+
 use crate::{
     bridge::RawViewerBridge,
-    double_slider::DoubleSlider,
     histogram::HistogramWidget,
     raw_image::{RawError, RawImage},
 };
@@ -77,17 +78,39 @@ impl RawViewerPanel {
             .spawn_renderer(device, queue, initial_width, initial_height)
             .expect("Failed to spawn RawViewerRenderer thread");
 
-        let slider = DoubleSlider::build(bridge.clone(), cx);
+        let (min_range, max_range) = bridge.display_range();
+        let slider = DoubleSlider::build(min_range, max_range, cx);
         let histogram = HistogramWidget::build(bridge.clone(), cx);
 
         cx.new(|cx| {
             cx.spawn(async move |this, cx| {
                 while let Some(()) = rx.next().await {
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    if this
+                        .update(cx, |this: &mut Self, cx| {
+                            if this.slider.read(cx).active_knob() == ActiveKnob::None {
+                                let (range_min, range_max) = this.bridge.display_range();
+                                this.slider.update(cx, |slider, cx| {
+                                    slider.set_range(range_min, range_max, cx);
+                                });
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
             })
+            .detach();
+
+            cx.subscribe(
+                &slider,
+                |this, _slider, event: &DoubleSliderEvent, _cx| match *event {
+                    DoubleSliderEvent::Change { min, max } => {
+                        this.bridge.set_display_range(min, max);
+                    }
+                },
+            )
             .detach();
 
             cx.observe(&slider, |_this, _slider, cx| {
@@ -498,6 +521,7 @@ impl Render for RawViewerPanel {
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::Small)
                             .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.bridge.reset_display_range();
                                 this.slider.update(cx, |slider, cx| {
                                     slider.set_range(0.0, 1.0, cx);
                                 });
