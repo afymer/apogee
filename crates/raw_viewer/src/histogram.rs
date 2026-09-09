@@ -170,7 +170,6 @@ impl Render for HistogramWidget {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
 
-        // Header
         let x_scale_label = if x_scale_mode == ScaleMode::Log {
             "X: Log"
         } else {
@@ -286,8 +285,7 @@ impl Render for HistogramWidget {
                     return;
                 }
 
-                // Horizontal grid lines (25%, 50%, 75%)
-                let grid_color = rgba(0xffffff0d); // ~5% opacity
+                let grid_color = rgba(0xffffff0d);
                 for factor in [0.25f32, 0.5, 0.75] {
                     let y = bounds.origin.y + px(h * factor);
                     window.paint_quad(gpui::fill(
@@ -302,7 +300,6 @@ impl Render for HistogramWidget {
                     ));
                 }
 
-                // Vertical grid lines (showing linear vs log intervals)
                 let vert_factors: &[f32] = match x_scale_mode {
                     ScaleMode::Linear => &[0.25, 0.5, 0.75],
                     ScaleMode::Log => &[0.01, 0.05, 0.20, 0.50],
@@ -348,7 +345,6 @@ impl Render for HistogramWidget {
                     bounds.origin.x + px(t * w)
                 };
 
-                // Draw helper for filled channels
                 let draw_channel_fill =
                     |bins: &[f32; 256], fill_color: gpui::Rgba, window: &mut Window| {
                         let mut builder = PathBuilder::fill();
@@ -363,7 +359,6 @@ impl Render for HistogramWidget {
                         }
                     };
 
-                // Draw helper for stroked channels
                 let draw_channel_stroke =
                     |bins: &[f32; 256],
                      stroke_color: gpui::Rgba,
@@ -379,25 +374,21 @@ impl Render for HistogramWidget {
                         }
                     };
 
-                // 1. Red fill & stroke
                 if show_r {
                     draw_channel_fill(&data.r, rgba(0xef444433), window);
                     draw_channel_stroke(&data.r, rgba(0xef444488), 1.0, window);
                 }
 
-                // 2. Green fill & stroke
                 if show_g {
                     draw_channel_fill(&data.g, rgba(0x22c55e33), window);
                     draw_channel_stroke(&data.g, rgba(0x22c55e88), 1.0, window);
                 }
 
-                // 3. Blue fill & stroke
                 if show_b {
                     draw_channel_fill(&data.b, rgba(0x3b82f633), window);
                     draw_channel_stroke(&data.b, rgba(0x3b82f688), 1.0, window);
                 }
 
-                // 4. Luminance stroke on top (White curve)
                 if show_l {
                     draw_channel_stroke(&data.l, rgba(0xffffffdd), 1.5, window);
                 }

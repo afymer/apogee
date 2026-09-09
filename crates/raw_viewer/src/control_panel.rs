@@ -28,9 +28,7 @@ impl CaptureControlPanel {
         })
     }
 
-    /// Resolves the expected location of test.cr2 next to the binary or in the current directory.
     pub fn locate_test_cr2() -> PathBuf {
-        // 1. Next to the current executable
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
                 let candidate = parent.join("test.cr2");
@@ -39,12 +37,10 @@ impl CaptureControlPanel {
                 }
             }
         }
-        // 2. In current working directory
         let cwd_candidate = PathBuf::from("test.cr2");
         if cwd_candidate.exists() {
             return cwd_candidate;
         }
-        // 3. Fallback: standard location next to executable
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
                 return parent.join("test.cr2");
