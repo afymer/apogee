@@ -4,18 +4,29 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::{
+    histogram::HistogramData,
     raw_image::RawImage,
     types::{DisplayRange, ViewTransform},
 };
 
 pub const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
+const VIEWER_SHADER_CODE: &str = concat!(
+    include_str!("shader/common.wgsl"),
+    include_str!("shader/viewer.wgsl")
+);
+
+const HISTOGRAM_SHADER_CODE: &str = concat!(
+    include_str!("shader/common.wgsl"),
+    include_str!("shader/histogram.wgsl")
+);
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct ImageUniforms {
     pub image_size: [u32; 2],
     pub demosaic_enabled: u32,
-    _pad0: u32,
+    pub pad0: u32,
     pub cfa_pattern: [u32; 4],
     pub black_levels: [f32; 4],
     pub white_levels: [f32; 4],
@@ -39,6 +50,15 @@ pub struct StretchUniforms {
     _pad: [f32; 2],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct HistogramParams {
+    pub x_log: u32,
+    pub y_log: u32,
+    pub pad0: u32,
+    pub pad1: u32,
+}
+
 pub struct RawViewerRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -57,14 +77,21 @@ pub struct RawViewerRenderer {
     view_transform: ViewTransform,
     image_uniforms_dirty: bool,
     stretch_uniforms_dirty: bool,
+    histogram_accum_pipeline: wgpu::ComputePipeline,
+    histogram_postprocess_pipeline: wgpu::ComputePipeline,
+    histogram_bind_group_layout: wgpu::BindGroupLayout,
+    histogram_params_buffer: wgpu::Buffer,
+    histogram_accum_buffer: wgpu::Buffer,
+    histogram_output_buffer: wgpu::Buffer,
+    histogram_staging_buffer: wgpu::Buffer,
+    histogram_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl RawViewerRenderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        let shader_code = include_str!("shader.wgsl");
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Raw Viewer Shader"),
-            source: wgpu::ShaderSource::Wgsl(shader_code.into()),
+            source: wgpu::ShaderSource::Wgsl(VIEWER_SHADER_CODE.into()),
         });
 
         let image_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -91,7 +118,7 @@ impl RawViewerRenderer {
         let default_image_uniforms = ImageUniforms {
             image_size: [0, 0],
             demosaic_enabled: 0,
-            _pad0: 0,
+            pad0: 0,
             cfa_pattern: [0, 1, 1, 2],
             black_levels: [0.0; 4],
             white_levels: [16383.0; 4],
@@ -270,6 +297,123 @@ impl RawViewerRenderer {
             cache: None,
         });
 
+        let histogram_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Histogram Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(HISTOGRAM_SHADER_CODE.into()),
+        });
+
+        let histogram_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Histogram Params Buffer"),
+            size: std::mem::size_of::<HistogramParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let histogram_accum_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Histogram Accum Buffer"),
+            size: (1024 * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let histogram_output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Histogram Output Buffer"),
+            size: (1024 * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let histogram_staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Histogram Staging Buffer"),
+            size: (1024 * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let histogram_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Histogram Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let histogram_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Histogram Pipeline Layout"),
+                bind_group_layouts: &[Some(&histogram_bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let histogram_accum_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Histogram Accum Compute Pipeline"),
+                layout: Some(&histogram_pipeline_layout),
+                module: &histogram_shader_module,
+                entry_point: Some("cs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let histogram_postprocess_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Histogram Postprocess Compute Pipeline"),
+                layout: Some(&histogram_pipeline_layout),
+                module: &histogram_shader_module,
+                entry_point: Some("cs_postprocess"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
         Self {
             device,
             queue,
@@ -288,10 +432,23 @@ impl RawViewerRenderer {
             view_transform: ViewTransform::DEFAULT,
             image_uniforms_dirty: false,
             stretch_uniforms_dirty: false,
+            histogram_accum_pipeline,
+            histogram_postprocess_pipeline,
+            histogram_bind_group_layout,
+            histogram_params_buffer,
+            histogram_accum_buffer,
+            histogram_output_buffer,
+            histogram_staging_buffer,
+            histogram_bind_group: None,
         }
     }
 
-    pub fn set_image(&mut self, image: Arc<RawImage>) {
+    pub fn set_image(
+        &mut self,
+        image: Arc<RawImage>,
+        x_log: bool,
+        y_log: bool,
+    ) -> Option<HistogramData> {
         let width = image.width;
         let height = image.height;
 
@@ -331,6 +488,34 @@ impl RawViewerRenderer {
                     },
                 ],
             });
+
+            self.histogram_bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Histogram Bind Group"),
+                layout: &self.histogram_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.image_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.histogram_params_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.histogram_accum_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.histogram_output_buffer.as_entire_binding(),
+                    },
+                ],
+            }));
+
             self.raw_texture = Some((texture, width, height));
         }
 
@@ -358,7 +543,123 @@ impl RawViewerRenderer {
 
         self.current_image = Some(image);
         self.image_uniforms_dirty = true;
+        let hist = self.compute_histogram(x_log, y_log);
         info!("Updated RawViewerRenderer with image {}x{}", width, height);
+        hist
+    }
+
+    fn flush_image_uniforms(&mut self) {
+        if !self.image_uniforms_dirty {
+            return;
+        }
+        let image_uniforms = if let Some(raw) = &self.current_image {
+            ImageUniforms {
+                image_size: [raw.width, raw.height],
+                demosaic_enabled: u32::from(self.demosaic_enabled),
+                pad0: 0,
+                cfa_pattern: raw.cfa_pattern,
+                black_levels: raw.black_levels,
+                white_levels: raw.white_levels,
+                wb_coeffs: raw.wb_coeffs,
+            }
+        } else {
+            ImageUniforms {
+                image_size: [0, 0],
+                demosaic_enabled: 0,
+                pad0: 0,
+                cfa_pattern: [0, 1, 1, 2],
+                black_levels: [0.0; 4],
+                white_levels: [16383.0; 4],
+                wb_coeffs: [1.0; 4],
+            }
+        };
+        self.queue.write_buffer(
+            &self.image_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[image_uniforms]),
+        );
+        self.image_uniforms_dirty = false;
+    }
+
+    pub fn compute_histogram(&mut self, x_log: bool, y_log: bool) -> Option<HistogramData> {
+        self.flush_image_uniforms();
+
+        let image = self.current_image.as_ref()?;
+        let bind_group = self.histogram_bind_group.as_ref()?;
+
+        let params = HistogramParams {
+            x_log: u32::from(x_log),
+            y_log: u32::from(y_log),
+            pad0: 0,
+            pad1: 0,
+        };
+        self.queue.write_buffer(
+            &self.histogram_params_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        let zeros = [0u32; 1024];
+        self.queue.write_buffer(
+            &self.histogram_accum_buffer,
+            0,
+            bytemuck::cast_slice(&zeros),
+        );
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Histogram Compute Encoder"),
+        });
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Histogram Accumulate Compute Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.histogram_accum_pipeline);
+            cpass.set_bind_group(0, bind_group, &[]);
+            let dispatch_x = image.width.div_ceil(32);
+            let dispatch_y = image.height.div_ceil(32);
+            cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+        }
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Histogram Postprocess Compute Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.histogram_postprocess_pipeline);
+            cpass.set_bind_group(0, bind_group, &[]);
+            cpass.dispatch_workgroups(4, 1, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(
+            &self.histogram_output_buffer,
+            0,
+            &self.histogram_staging_buffer,
+            0,
+            (1024 * std::mem::size_of::<f32>()) as u64,
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = self.histogram_staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let Ok(Ok(())) = rx.recv() else {
+            return None;
+        };
+
+        let mapped_range = slice.get_mapped_range();
+        let bins_slice: &[f32] = bytemuck::cast_slice(&mapped_range);
+        let mut raw_bins = [0.0f32; 1024];
+        raw_bins.copy_from_slice(bins_slice);
+        drop(mapped_range);
+        self.histogram_staging_buffer.unmap();
+
+        Some(HistogramData::from_raw_bins(&raw_bins))
     }
 
     pub fn set_demosaic(&mut self, enabled: bool) {
@@ -438,35 +739,7 @@ impl RawViewerRenderer {
 
         let target_view = self.target_texture.as_ref().unwrap().1.clone();
 
-        if self.image_uniforms_dirty {
-            let image_uniforms = if let Some(raw) = &self.current_image {
-                ImageUniforms {
-                    image_size: [raw.width, raw.height],
-                    demosaic_enabled: u32::from(self.demosaic_enabled),
-                    _pad0: 0,
-                    cfa_pattern: raw.cfa_pattern,
-                    black_levels: raw.black_levels,
-                    white_levels: raw.white_levels,
-                    wb_coeffs: raw.wb_coeffs,
-                }
-            } else {
-                ImageUniforms {
-                    image_size: [0, 0],
-                    demosaic_enabled: 0,
-                    _pad0: 0,
-                    cfa_pattern: [0, 1, 1, 2],
-                    black_levels: [0.0; 4],
-                    white_levels: [16383.0; 4],
-                    wb_coeffs: [1.0; 4],
-                }
-            };
-            self.queue.write_buffer(
-                &self.image_uniform_buffer,
-                0,
-                bytemuck::cast_slice(&[image_uniforms]),
-            );
-            self.image_uniforms_dirty = false;
-        }
+        self.flush_image_uniforms();
 
         if self.stretch_uniforms_dirty {
             let stretch_uniforms = StretchUniforms {

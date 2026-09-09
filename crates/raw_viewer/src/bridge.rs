@@ -9,6 +9,7 @@ use std::{
 use glam::Vec2;
 
 use crate::{
+    histogram::{HistogramData, ScaleMode},
     raw_image::{RawError, RawImage},
     renderer::RawViewerRenderer,
     types::{DisplayRange, ViewTransform},
@@ -21,9 +22,9 @@ pub struct PendingChanges {
     pub resize: Option<(u32, u32)>,
     pub range: Option<DisplayRange>,
     pub view_transform: Option<ViewTransform>,
+    pub histogram_scale_modes: Option<(ScaleMode, ScaleMode)>,
 }
 
-#[derive(Default)]
 pub struct RawViewerBridgeState {
     pub is_dirty: bool,
     pub latest_texture: Option<Arc<wgpu::TextureView>>,
@@ -33,6 +34,25 @@ pub struct RawViewerBridgeState {
     pub demosaic: bool,
     pub display_range: DisplayRange,
     pub view_transform: ViewTransform,
+    pub histogram_scale_modes: (ScaleMode, ScaleMode),
+    pub histogram: Option<Arc<HistogramData>>,
+}
+
+impl Default for RawViewerBridgeState {
+    fn default() -> Self {
+        Self {
+            is_dirty: true,
+            latest_texture: None,
+            last_size: None,
+            image_size: None,
+            pending: PendingChanges::default(),
+            demosaic: true,
+            display_range: DisplayRange::DEFAULT,
+            view_transform: ViewTransform::DEFAULT,
+            histogram_scale_modes: (ScaleMode::Log, ScaleMode::Log),
+            histogram: None,
+        }
+    }
 }
 
 struct BridgeInner {
@@ -51,16 +71,7 @@ impl RawViewerBridge {
     pub fn new(notify_ui: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
             inner: Arc::new(BridgeInner {
-                state: Mutex::new(RawViewerBridgeState {
-                    is_dirty: true,
-                    latest_texture: None,
-                    last_size: None,
-                    image_size: None,
-                    pending: PendingChanges::default(),
-                    demosaic: true,
-                    display_range: DisplayRange::DEFAULT,
-                    view_transform: ViewTransform::DEFAULT,
-                }),
+                state: Mutex::new(RawViewerBridgeState::default()),
                 cvar: Condvar::new(),
                 shutdown: AtomicBool::new(false),
                 notify_ui_fn: Box::new(notify_ui),
@@ -75,6 +86,38 @@ impl RawViewerBridge {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         guard.latest_texture.clone()
+    }
+
+    pub fn histogram(&self) -> Option<Arc<HistogramData>> {
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.histogram.clone()
+    }
+
+    pub fn histogram_scale_modes(&self) -> (ScaleMode, ScaleMode) {
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.histogram_scale_modes
+    }
+
+    pub fn set_histogram_scale_modes(&self, x_mode: ScaleMode, y_mode: ScaleMode) {
+        {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.histogram_scale_modes = (x_mode, y_mode);
+            guard.pending.histogram_scale_modes = Some((x_mode, y_mode));
+            guard.is_dirty = true;
+        }
+        self.inner.cvar.notify_one();
     }
 
     pub fn last_size(&self) -> Option<(u32, u32)> {
@@ -304,7 +347,36 @@ impl RawViewerBridge {
                     drop(guard);
 
                     if let Some(image) = pending.image {
-                        renderer.set_image(image);
+                        let (x_mode, y_mode) = {
+                            let guard = bridge
+                                .inner
+                                .state
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            guard.histogram_scale_modes
+                        };
+                        let hist = renderer.set_image(
+                            image,
+                            x_mode == ScaleMode::Log,
+                            y_mode == ScaleMode::Log,
+                        );
+                        let mut guard = bridge
+                            .inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        guard.histogram = hist.map(Arc::new);
+                    } else if let Some((x_mode, y_mode)) = pending.histogram_scale_modes {
+                        let hist = renderer.compute_histogram(
+                            x_mode == ScaleMode::Log,
+                            y_mode == ScaleMode::Log,
+                        );
+                        let mut guard = bridge
+                            .inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        guard.histogram = hist.map(Arc::new);
                     }
 
                     if let Some(demosaic) = pending.demosaic {

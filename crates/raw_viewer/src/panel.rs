@@ -18,6 +18,7 @@ use workspace::{
 use crate::{
     bridge::RawViewerBridge,
     double_slider::DoubleSlider,
+    histogram::HistogramWidget,
     raw_image::{RawError, RawImage},
 };
 use ui::{Button, ButtonStyle, Color, Label, LabelSize, prelude::*};
@@ -39,6 +40,7 @@ enum DragMode {
 pub struct RawViewerPanel {
     bridge: RawViewerBridge,
     slider: Entity<DoubleSlider>,
+    histogram: Entity<HistogramWidget>,
     drag_mode: DragMode,
     viewport_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     cached_texture: Option<Arc<wgpu::TextureView>>,
@@ -76,6 +78,7 @@ impl RawViewerPanel {
             .expect("Failed to spawn RawViewerRenderer thread");
 
         let slider = DoubleSlider::build(bridge.clone(), cx);
+        let histogram = HistogramWidget::build(bridge.clone(), cx);
 
         cx.new(|cx| {
             cx.spawn(async move |this, cx| {
@@ -92,9 +95,15 @@ impl RawViewerPanel {
             })
             .detach();
 
+            cx.observe(&histogram, |_this, _histogram, cx| {
+                cx.notify();
+            })
+            .detach();
+
             Self {
                 bridge,
                 slider,
+                histogram,
                 drag_mode: DragMode::None,
                 viewport_bounds: Arc::new(Mutex::new(None)),
                 cached_texture: None,
@@ -499,6 +508,14 @@ impl Render for RawViewerPanel {
             .child(self.slider.clone());
 
         root = root.child(overlay);
+
+        let histogram_overlay = div()
+            .absolute()
+            .bottom_3()
+            .right_3()
+            .child(self.histogram.clone());
+
+        root = root.child(histogram_overlay);
 
         root
     }

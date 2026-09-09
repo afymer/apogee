@@ -1,18 +1,5 @@
-// Custom WGSL shader for CR2 RAW display with optional demosaicing
+// Custom WGSL fragment shader for RAW display with optional demosaicing
 
-// Static per-image
-struct ImageUniforms {
-    image_size: vec2<u32>,
-    demosaic_enabled: u32,
-    _pad0: u32,
-    cfa_pattern: vec4<u32>,       // Color channel IDs: (0,0), (0,1), (1,0), (1,1) [0=R, 1=G, 2=B]
-    black_levels: vec4<f32>,
-    white_levels: vec4<f32>,
-    wb_coeffs: vec4<f32>,
-};
-
-// Interactive uniforms
-// Binding 0: view / display transformation
 struct ViewUniforms {
     screen_size: vec2<f32>,
     pan: vec2<f32>,
@@ -21,7 +8,6 @@ struct ViewUniforms {
     _pad1: vec2<f32>,
 };
 
-// Binding 1: tone stretching / display range
 struct StretchUniforms {
     range_min_max: vec2<f32>,
     _pad: vec2<f32>,
@@ -56,19 +42,14 @@ fn get_raw(x: i32, y: i32) -> f32 {
     return f32(textureLoad(raw_texture, vec2<i32>(cx, cy), 0).r);
 }
 
-// Determine CFA color channel for coordinate (x, y): 0=Red, 1=Green, 2=Blue
+// Determine CFA color channel for coordinate (x, y)
 fn get_cfa_color(x: i32, y: i32) -> u32 {
-    let r = u32((y % 2 + 2) % 2);
-    let c = u32((x % 2 + 2) % 2);
-    let idx = r * 2u + c;
-    return img.cfa_pattern[idx];
+    return get_cfa_color_at(x, y, img.cfa_pattern);
 }
 
 // Subtract black level and scale by white level
 fn clean_val(raw_val: f32, color_channel: u32) -> f32 {
-    let bl = img.black_levels[color_channel];
-    let wl = img.white_levels[color_channel];
-    return max((raw_val - bl) / max(wl - bl, 1.0), 0.0);
+    return calibrate_raw_val(raw_val, color_channel, img.black_levels, img.white_levels);
 }
 
 // Interpolate Red or Blue channel using diagonal 4-point, 2-point cross, or direct value

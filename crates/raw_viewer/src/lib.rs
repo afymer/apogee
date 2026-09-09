@@ -1,6 +1,7 @@
 pub(crate) mod bridge;
 pub mod control_panel;
 pub mod double_slider;
+pub mod histogram;
 pub mod panel;
 pub mod raw_image;
 pub mod renderer;
@@ -8,6 +9,7 @@ pub mod types;
 
 pub use control_panel::CaptureControlPanel;
 pub use double_slider::{ActiveKnob, DoubleSlider};
+pub use histogram::{HistogramData, HistogramWidget, ScaleMode};
 pub use panel::RawViewerPanel;
 pub use raw_image::{RawError, RawImage};
 pub use renderer::{
