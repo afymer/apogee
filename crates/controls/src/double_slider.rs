@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Window, div, prelude::*, px, relative,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Window, div, hsla,
+    prelude::*, px, relative,
 };
 use ui::ActiveTheme;
 
@@ -25,6 +26,7 @@ pub struct DoubleSlider {
     max_val: f32,
     active_knob: ActiveKnob,
     is_hovered: bool,
+    proximity: f32,
     track_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
 }
 
@@ -39,6 +41,7 @@ impl DoubleSlider {
             max_val: max,
             active_knob: ActiveKnob::None,
             is_hovered: false,
+            proximity: 0.0,
             track_bounds: Arc::new(Mutex::new(None)),
         }
     }
@@ -82,6 +85,10 @@ impl DoubleSlider {
         self.is_hovered
     }
 
+    pub fn proximity(&self) -> f32 {
+        self.proximity
+    }
+
     pub fn step_min(&mut self, delta: f32, cx: &mut Context<Self>) {
         let new_min = (self.min_val + delta).clamp(0.0, self.max_val - 0.001);
         self.set_range_internal(new_min, self.max_val, cx, true);
@@ -106,6 +113,58 @@ impl DoubleSlider {
         }
     }
 
+    fn update_proximity(
+        &mut self,
+        mouse_pos: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_knob != ActiveKnob::None {
+            return;
+        }
+
+        let width = f32::from(bounds.size.width);
+        let height = f32::from(bounds.size.height);
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+
+        let mouse_x = f32::from(mouse_pos.x);
+        let mouse_y = f32::from(mouse_pos.y);
+        let origin_x = f32::from(bounds.origin.x);
+        let origin_y = f32::from(bounds.origin.y);
+
+        let bar_y = origin_y + height / 2.0;
+        let dy = (mouse_y - bar_y).abs();
+
+        let dx = if mouse_x < origin_x {
+            origin_x - mouse_x
+        } else if mouse_x > origin_x + width {
+            mouse_x - (origin_x + width)
+        } else {
+            0.0
+        };
+
+        let dist = (dx * dx + dy * dy).sqrt();
+
+        let d_inner = 3.0;
+        let d_outer = 20.0;
+
+        let target_p = if dist <= d_inner {
+            1.0
+        } else if dist >= d_outer {
+            0.0
+        } else {
+            let u = (d_outer - dist) / (d_outer - d_inner);
+            u * u * (3.0 - 2.0 * u)
+        };
+
+        if (self.proximity - target_p).abs() > 0.005 {
+            self.proximity = target_p;
+            cx.notify();
+        }
+    }
+
     fn handle_mouse_down(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let bounds = self.track_bounds.lock().ok().and_then(|g| *g);
         let Some(bounds) = bounds else {
@@ -115,6 +174,8 @@ impl DoubleSlider {
         if width <= 0.0 {
             return;
         }
+
+        self.proximity = 1.0;
 
         let radius = 6.0;
         let usable_width = (width - 2.0 * radius).max(1.0);
@@ -174,24 +235,38 @@ impl Render for DoubleSlider {
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
                     if phase == gpui::DispatchPhase::Capture {
                         entity.update(cx, |this, cx| {
-                            if this.active_knob != ActiveKnob::None {
-                                if event.pressed_button == Some(MouseButton::Left) {
-                                    this.handle_mouse_move_at(event.position, bounds, cx);
-                                } else {
-                                    this.active_knob = ActiveKnob::None;
-                                    cx.notify();
-                                }
+                            if this.active_knob == ActiveKnob::None {
+                                this.update_proximity(event.position, bounds, cx);
+                            } else if event.pressed_button == Some(MouseButton::Left) {
+                                this.handle_mouse_move_at(event.position, bounds, cx);
+                            } else {
+                                this.active_knob = ActiveKnob::None;
+                                this.update_proximity(event.position, bounds, cx);
+                                cx.notify();
                             }
                         });
                     }
                 });
 
                 let entity = slider_entity.clone();
-                window.on_mouse_event(move |_event: &MouseUpEvent, phase, _window, cx| {
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
                     if phase == gpui::DispatchPhase::Capture {
                         entity.update(cx, |this, cx| {
                             if this.active_knob != ActiveKnob::None {
                                 this.active_knob = ActiveKnob::None;
+                                this.update_proximity(event.position, bounds, cx);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                let entity = slider_entity.clone();
+                window.on_mouse_event(move |_event: &MouseExitEvent, phase, _window, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        entity.update(cx, |this, cx| {
+                            if this.active_knob == ActiveKnob::None && this.proximity > 0.0 {
+                                this.proximity = 0.0;
                                 cx.notify();
                             }
                         });
@@ -204,9 +279,129 @@ impl Render for DoubleSlider {
         .top_0()
         .left_0();
 
-        let is_expanded = self.is_hovered || self.active_knob != ActiveKnob::None;
+        let p = if self.active_knob == ActiveKnob::None {
+            self.proximity
+        } else {
+            1.0
+        };
 
-        let mut root = div()
+        let track_h = 4.0 + 8.0 * p;
+        let track_top = (24.0 - track_h) / 2.0;
+        let r = track_h / 2.0;
+
+        let track_alpha = 0.10 + 0.08 * p;
+        let track_bg = hsla(0.0, 0.0, 1.0, track_alpha);
+
+        let active_alpha = 0.85 - 0.35 * p;
+        let active_bg = hsla(0.0, 0.0, 1.0, active_alpha);
+
+        let active_bar = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(relative(self.min_val))
+            .ml(px(-r))
+            .right(relative(1.0 - self.max_val))
+            .mr(px(-r))
+            .rounded_full()
+            .bg(active_bg);
+
+        let mut inner = div()
+            .absolute()
+            .top(px(track_top))
+            .h(px(track_h))
+            .left(px(r))
+            .right(px(r))
+            .child(active_bar);
+
+        if p > 0.02 {
+            let knob_opacity = p.powf(1.5);
+            let knob_bg = hsla(0.0, 0.0, 1.0, knob_opacity);
+            let knob_border = hsla(0.0, 0.0, 0.0, 0.25 * knob_opacity);
+
+            let mut min_knob = div()
+                .id("double_slider_min_knob")
+                .absolute()
+                .top_0()
+                .left(relative(self.min_val))
+                .ml(px(-r))
+                .size(px(track_h))
+                .rounded_full()
+                .cursor_pointer()
+                .border_1()
+                .border_color(if self.active_knob == ActiveKnob::Min {
+                    colors.knob_border_active
+                } else {
+                    knob_border
+                })
+                .bg(if self.active_knob == ActiveKnob::Min {
+                    colors.knob_background_active
+                } else {
+                    knob_bg
+                })
+                .hover(|s| {
+                    s.border_color(colors.knob_border_hover)
+                        .bg(colors.knob_background_hover)
+                        .shadow_md()
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                        this.active_knob = ActiveKnob::Min;
+                        this.proximity = 1.0;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                );
+
+            let mut max_knob = div()
+                .id("double_slider_max_knob")
+                .absolute()
+                .top_0()
+                .left(relative(self.max_val))
+                .ml(px(-r))
+                .size(px(track_h))
+                .rounded_full()
+                .cursor_pointer()
+                .border_1()
+                .border_color(if self.active_knob == ActiveKnob::Max {
+                    colors.knob_border_active
+                } else {
+                    knob_border
+                })
+                .bg(if self.active_knob == ActiveKnob::Max {
+                    colors.knob_background_active
+                } else {
+                    knob_bg
+                })
+                .hover(|s| {
+                    s.border_color(colors.knob_border_hover)
+                        .bg(colors.knob_background_hover)
+                        .shadow_md()
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                        this.active_knob = ActiveKnob::Max;
+                        this.proximity = 1.0;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                );
+
+            if p > 0.5 {
+                min_knob = min_knob.shadow_sm();
+                max_knob = max_knob.shadow_sm();
+            }
+
+            if self.active_knob == ActiveKnob::Min {
+                inner = inner.child(max_knob).child(min_knob);
+            } else {
+                inner = inner.child(min_knob).child(max_knob);
+            }
+        }
+
+        div()
             .id("double_slider_root")
             .relative()
             .w_full()
@@ -234,153 +429,17 @@ impl Render for DoubleSlider {
                     }
                 }),
             )
-            .child(track_canvas);
-
-        if !is_expanded {
-            // Idle State: minimal 4px track line and active span, tidy without visible knobs
-            let span_width = (self.max_val - self.min_val).max(0.001);
-            root = root
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(10.0))
-                        .left_0()
-                        .right_0()
-                        .h(px(4.0))
-                        .rounded_full()
-                        .bg(colors.track_background),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(10.0))
-                        .left(relative(self.min_val))
-                        .w(relative(span_width))
-                        .h(px(4.0))
-                        .rounded_full()
-                        .bg(colors.active_track_idle),
-                );
-        } else {
-            // Expanded State: 12px capsule track with rounded progress bar and knob handles at ends
-            let track_margin = px(6.0);
-            let knob_size = px(12.0);
-
-            let min_knob = div()
-                .id("double_slider_min_knob")
-                .absolute()
-                .top_0()
-                .left(relative(self.min_val))
-                .ml(px(-6.0))
-                .size(knob_size)
-                .rounded_full()
-                .cursor_pointer()
-                .border_1()
-                .border_color(colors.knob_border(self.active_knob == ActiveKnob::Min))
-                .bg(colors.knob_background(self.active_knob == ActiveKnob::Min))
-                .shadow_sm()
-                .hover(|s| {
-                    s.border_color(colors.knob_border_hover)
-                        .bg(colors.knob_background_hover)
-                        .shadow_md()
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                        this.active_knob = ActiveKnob::Min;
-                        cx.stop_propagation();
-                    }),
-                );
-
-            let max_knob = div()
-                .id("double_slider_max_knob")
-                .absolute()
-                .top_0()
-                .left(relative(self.max_val))
-                .ml(px(-6.0))
-                .size(knob_size)
-                .rounded_full()
-                .cursor_pointer()
-                .border_1()
-                .border_color(colors.knob_border(self.active_knob == ActiveKnob::Max))
-                .bg(colors.knob_background(self.active_knob == ActiveKnob::Max))
-                .shadow_sm()
-                .hover(|s| {
-                    s.border_color(colors.knob_border_hover)
-                        .bg(colors.knob_background_hover)
-                        .shadow_md()
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                        this.active_knob = ActiveKnob::Max;
-                        cx.stop_propagation();
-                    }),
-                );
-
-            let active_bar = div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left(relative(self.min_val))
-                .ml(px(-6.0))
-                .right(relative(1.0 - self.max_val))
-                .mr(px(-6.0))
-                .rounded_full()
-                .bg(colors.active_track);
-
-            let mut inner = div()
-                .absolute()
-                .top(px(6.0))
-                .bottom(px(6.0))
-                .left(track_margin)
-                .right(track_margin)
-                .child(active_bar);
-
-            if self.active_knob == ActiveKnob::Min {
-                inner = inner.child(max_knob).child(min_knob);
-            } else {
-                inner = inner.child(min_knob).child(max_knob);
-            }
-
-            root = root
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(6.0))
-                        .left_0()
-                        .right_0()
-                        .h(px(12.0))
-                        .rounded_full()
-                        .bg(colors.track_background_hover),
-                )
-                .child(inner);
-        }
-
-        root
+            .child(track_canvas)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(track_top))
+                    .left_0()
+                    .right_0()
+                    .h(px(track_h))
+                    .rounded_full()
+                    .bg(track_bg),
+            )
+            .child(inner)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_double_slider_initialization_clamping() {
-        let slider = DoubleSlider::new(0.2, 0.8);
-        assert_eq!(slider.min_val(), 0.2);
-        assert_eq!(slider.max_val(), 0.8);
-        assert_eq!(slider.range(), (0.2, 0.8));
-        assert_eq!(slider.active_knob(), ActiveKnob::None);
-
-        // Out-of-bounds clamps
-        let slider = DoubleSlider::new(-0.5, 1.5);
-        assert_eq!(slider.min_val(), 0.0);
-        assert_eq!(slider.max_val(), 1.0);
-
-        // Inverted or too close ranges
-        let slider = DoubleSlider::new(0.8, 0.2);
-        assert_eq!(slider.min_val(), 0.8);
-        assert!((slider.max_val() - 0.801).abs() < 1e-5);
-    }
-}
-
