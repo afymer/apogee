@@ -5,13 +5,29 @@ use protocol::{CameraStatus, ConnectionState, DaemonMessage, DaemonState, Viewer
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender, channel, unbounded_channel};
 use tracing::{error, info, warn};
 
+#[derive(Clone, Debug)]
+pub struct CapturedFrame {
+    pub frame_id: u64,
+    pub data: std::sync::Arc<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ClientModelUpdate {
+    State(DaemonState),
+    Frame(CapturedFrame),
+}
+
 pub struct DaemonStateModel {
     pub state: DaemonState,
+    pub latest_frame: Option<CapturedFrame>,
 }
 
 impl DaemonStateModel {
     pub fn new(state: DaemonState) -> Self {
-        Self { state }
+        Self {
+            state,
+            latest_frame: None,
+        }
     }
 }
 
@@ -57,14 +73,21 @@ pub fn init(cx: &mut App) {
     let (cmd_tx, cmd_rx) = channel::<ViewerMessage>(32);
     cx.set_global(DaemonCommandSender(cmd_tx));
 
-    let (status_tx, mut status_rx) = unbounded_channel::<DaemonState>();
+    let (update_tx, mut update_rx) = unbounded_channel::<ClientModelUpdate>();
 
     let state_model = cx.new(|cx| {
         cx.spawn(async move |this, cx| {
-            while let Some(new_state) = status_rx.recv().await {
+            while let Some(update) = update_rx.recv().await {
                 if this
                     .update(cx, |model: &mut DaemonStateModel, cx| {
-                        model.state = new_state;
+                        match update {
+                            ClientModelUpdate::State(new_state) => {
+                                model.state = new_state;
+                            }
+                            ClientModelUpdate::Frame(frame) => {
+                                model.latest_frame = Some(frame);
+                            }
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -81,13 +104,13 @@ pub fn init(cx: &mut App) {
     cx.set_global(GlobalDaemonState(state_model));
 
     tokio::spawn(async move {
-        run_connection_supervisor(address_rx, status_tx, cmd_rx).await;
+        run_connection_supervisor(address_rx, update_tx, cmd_rx).await;
     });
 }
 
 async fn run_connection_supervisor(
     mut address_rx: tokio::sync::watch::Receiver<String>,
-    status_tx: UnboundedSender<DaemonState>,
+    update_tx: UnboundedSender<ClientModelUpdate>,
     mut cmd_rx: Receiver<ViewerMessage>,
 ) {
     let mut attempt: u32 = 0;
@@ -107,7 +130,7 @@ async fn run_connection_supervisor(
             };
         }
         current_state.camera = CameraStatus::Disconnected;
-        let _ = status_tx.send(current_state.clone());
+        let _ = update_tx.send(ClientModelUpdate::State(current_state.clone()));
 
         info!("Connecting to daemon at {current_url} (attempt {attempt})...");
 
@@ -129,11 +152,11 @@ async fn run_connection_supervisor(
                 info!("Successfully connected to daemon at {current_url}");
                 attempt = 0;
                 current_state.connection = ConnectionState::Connected;
-                let _ = status_tx.send(current_state.clone());
+                let _ = update_tx.send(ClientModelUpdate::State(current_state.clone()));
 
                 let disconnect_reason = run_message_pump(
                     ws_stream,
-                    &status_tx,
+                    &update_tx,
                     &mut current_state,
                     &mut cmd_rx,
                     &mut address_rx,
@@ -157,7 +180,7 @@ async fn run_connection_supervisor(
             next_retry_ms,
         };
         current_state.camera = CameraStatus::Disconnected;
-        let _ = status_tx.send(current_state.clone());
+        let _ = update_tx.send(ClientModelUpdate::State(current_state.clone()));
 
         info!(
             "Waiting {:.1}s before reconnect attempt {}...",
@@ -179,7 +202,7 @@ async fn run_message_pump(
     ws_stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    status_tx: &UnboundedSender<DaemonState>,
+    update_tx: &UnboundedSender<ClientModelUpdate>,
     current_state: &mut DaemonState,
     cmd_rx: &mut Receiver<ViewerMessage>,
     address_rx: &mut tokio::sync::watch::Receiver<String>,
@@ -232,16 +255,57 @@ async fn run_message_pump(
                                 match daemon_msg {
                                     DaemonMessage::Status(daemon_status) => {
                                         current_state.daemon = daemon_status;
-                                        let _ = status_tx.send(current_state.clone());
+                                        let _ = update_tx.send(ClientModelUpdate::State(current_state.clone()));
                                     }
                                     DaemonMessage::CameraStatus(camera_status) => {
                                         current_state.camera = camera_status;
-                                        let _ = status_tx.send(current_state.clone());
+                                        let _ = update_tx.send(ClientModelUpdate::State(current_state.clone()));
                                     }
                                     DaemonMessage::SequenceProgress { .. } => {}
                                     DaemonMessage::PreviewAvailable { .. } => {}
-                                    DaemonMessage::FrameReady { .. } => {}
-                                    DaemonMessage::CaptureError { .. } => {}
+                                    DaemonMessage::FrameReady { frame_id, url } => {
+                                        info!("Daemon reported frame {frame_id} ready at {url}. Streaming...");
+                                        let ws_url = address_rx.borrow().clone();
+                                        let mut http_base = if ws_url.starts_with("wss://") {
+                                            ws_url.replacen("wss://", "https://", 1)
+                                        } else if ws_url.starts_with("ws://") {
+                                            ws_url.replacen("ws://", "http://", 1)
+                                        } else {
+                                            format!("http://{ws_url}")
+                                        };
+
+                                        if let Some(pos) = http_base.find("/ws") {
+                                            http_base.truncate(pos);
+                                        }
+                                        while http_base.ends_with('/') {
+                                            http_base.pop();
+                                        }
+
+                                        let full_url = if url.starts_with('/') {
+                                            format!("{http_base}{url}")
+                                        } else {
+                                            format!("{http_base}/{url}")
+                                        };
+
+                                        let tx = update_tx.clone();
+                                        tokio::spawn(async move {
+                                            match stream_frame_from_daemon(&full_url).await {
+                                                Ok(bytes) => {
+                                                    info!("Successfully streamed frame {frame_id} ({} bytes)", bytes.len());
+                                                    let _ = tx.send(ClientModelUpdate::Frame(CapturedFrame {
+                                                        frame_id,
+                                                        data: std::sync::Arc::new(bytes),
+                                                    }));
+                                                }
+                                                Err(err) => {
+                                                    error!("Failed to stream frame {frame_id} from {full_url}: {err}");
+                                                }
+                                            }
+                                        });
+                                    }
+                                    DaemonMessage::CaptureError { frame_id, message } => {
+                                        error!("Daemon reported capture error for frame {frame_id}: {message}");
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -288,4 +352,20 @@ fn calculate_backoff_duration(attempt: u32) -> Duration {
 
 fn calculate_backoff_ms(attempt: u32) -> u64 {
     calculate_backoff_duration(attempt).as_millis() as u64
+}
+
+async fn stream_frame_from_daemon(url: &str) -> anyhow::Result<Vec<u8>> {
+    use futures::StreamExt;
+
+    let response = reqwest::get(url).await?.error_for_status()?;
+    let content_length = response.content_length().unwrap_or(0) as usize;
+    let mut buffer = Vec::with_capacity(content_length);
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res?;
+        buffer.extend_from_slice(&chunk);
+    }
+
+    Ok(buffer)
 }

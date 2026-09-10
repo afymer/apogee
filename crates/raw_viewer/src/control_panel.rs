@@ -1,8 +1,11 @@
-use std::path::PathBuf;
-
+use client::{DaemonCommandSender, GlobalDaemonState};
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Window,
     prelude::*,
+};
+use protocol::{
+    CameraStatus, CaptureParams, ConnectionState, DaemonStatus, Frame, FrameType,
+    SaveLocationConfig, ViewerMessage,
 };
 use ui::{Button, ButtonStyle, Color, Label, LabelSize, prelude::*};
 use workspace::{
@@ -11,52 +14,80 @@ use workspace::{
     panel::{Panel, PanelEvent},
 };
 
-use crate::bridge::RawViewerBridge;
+use crate::{bridge::RawViewerBridge, raw_image::RawImage};
 
 pub struct CaptureControlPanel {
     bridge: RawViewerBridge,
     focus_handle: FocusHandle,
+    last_frame_id: Option<u64>,
 }
 
 impl EventEmitter<PanelEvent> for CaptureControlPanel {}
 
 impl CaptureControlPanel {
     pub fn build(bridge: RawViewerBridge, cx: &mut App) -> Entity<Self> {
-        cx.new(|cx| Self {
-            bridge,
-            focus_handle: cx.focus_handle(),
+        cx.new(|cx| {
+            let global_state = cx.try_global::<GlobalDaemonState>().map(|g| g.0.clone());
+            if let Some(state_entity) = global_state {
+                cx.observe(&state_entity, |this: &mut Self, model, cx| {
+                    let model_ref = model.read(cx);
+                    if let Some(frame) = &model_ref.latest_frame {
+                        if this.last_frame_id != Some(frame.frame_id) {
+                            this.last_frame_id = Some(frame.frame_id);
+                            let data = frame.data.clone();
+                            let bridge = this.bridge.clone();
+                            cx.background_executor()
+                                .spawn(async move {
+                                    match RawImage::decode_from_memory(&data) {
+                                        Ok(image) => {
+                                            bridge.set_image(image);
+                                        }
+                                        Err(err) => {
+                                            tracing::error!("Failed to decode raw image: {err}");
+                                        }
+                                    }
+                                })
+                                .detach();
+                        }
+                    }
+                    cx.notify();
+                })
+                .detach();
+            }
+
+            Self {
+                bridge,
+                focus_handle: cx.focus_handle(),
+                last_frame_id: None,
+            }
         })
     }
 
-    pub fn locate_test_cr2() -> PathBuf {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                let candidate = parent.join("test.cr2");
-                if candidate.exists() {
-                    return candidate;
-                }
-            }
-        }
-        let cwd_candidate = PathBuf::from("test.cr2");
-        if cwd_candidate.exists() {
-            return cwd_candidate;
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                return parent.join("test.cr2");
-            }
-        }
-        PathBuf::from("test.cr2")
-    }
+    pub fn trigger_capture(&mut self, cx: &mut Context<Self>) {
+        if let Some(sender) = cx.try_global::<DaemonCommandSender>() {
+            let frame_id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
 
-    pub fn load_test_cr2(&mut self, cx: &mut Context<Self>) {
-        let path = Self::locate_test_cr2();
-        if !path.exists() {
-            return;
-        }
+            let frame = Frame {
+                id: frame_id,
+                target_name: "capture".to_string(),
+                frame_type: FrameType::Light,
+                params: CaptureParams {
+                    exposure: std::time::Duration::from_secs(1),
+                    iso: None,
+                },
+                save_config: SaveLocationConfig::default(),
+            };
 
-        if let Ok(bytes) = std::fs::read(&path) {
-            let _ = self.bridge.load_from_memory(&bytes);
+            if sender
+                .0
+                .try_send(ViewerMessage::StartCapture(frame))
+                .is_err()
+            {
+                tracing::error!("Failed to send StartCapture command to daemon");
+            }
         }
         cx.notify();
     }
@@ -69,6 +100,26 @@ impl Render for CaptureControlPanel {
             "Demosaic: Bilinear (RGB)"
         } else {
             "Demosaic: Raw Bayer"
+        };
+
+        let daemon_model = cx.try_global::<GlobalDaemonState>().map(|g| g.0.read(cx));
+        let (_is_capturing, can_capture, capture_label) = if let Some(model) = daemon_model {
+            let capturing = model.state.daemon == DaemonStatus::Capturing;
+            let ready = model.state.connection == ConnectionState::Connected
+                && model.state.camera == CameraStatus::Ready
+                && !capturing;
+            let label = if capturing {
+                "Capturing..."
+            } else if model.state.connection != ConnectionState::Connected {
+                "Daemon Disconnected"
+            } else if model.state.camera != CameraStatus::Ready {
+                "Camera Offline"
+            } else {
+                "Capture Frame"
+            };
+            (capturing, ready, label)
+        } else {
+            (false, false, "Capture Frame")
         };
 
         v_flex()
@@ -84,10 +135,15 @@ impl Render for CaptureControlPanel {
                 ),
             )
             .child(
-                Button::new("load_test_cr2_btn", "Load test.cr2")
-                    .style(ButtonStyle::Filled)
+                Button::new("capture_frame_btn", capture_label)
+                    .style(if can_capture {
+                        ButtonStyle::Filled
+                    } else {
+                        ButtonStyle::Subtle
+                    })
+                    .disabled(!can_capture)
                     .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.load_test_cr2(cx);
+                        this.trigger_capture(cx);
                     })),
             )
             .child(

@@ -1,7 +1,7 @@
 use protocol::camera::CameraStatus;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::types::{CameraCommand, CaptureError};
+use crate::types::{CameraCommand, CaptureError, CapturedImage};
 
 #[derive(Clone)]
 pub struct CameraHandle {
@@ -17,7 +17,7 @@ impl CameraHandle {
         Self { cmd_tx, status_rx }
     }
 
-    pub async fn capture(&self, exposure_secs: u32) -> Result<(), CaptureError> {
+    pub async fn capture(&self, exposure_secs: u32) -> Result<CapturedImage, CaptureError> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         let cmd = CameraCommand::Capture {

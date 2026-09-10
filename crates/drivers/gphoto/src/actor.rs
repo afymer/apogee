@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 use crate::{
     Driver, Initialized, Uninitialized,
     handle::CameraHandle,
-    types::{CameraCommand, CaptureError},
+    types::{CameraCommand, CaptureError, CapturedImage},
 };
 
 struct ConnectionConfig {
@@ -97,10 +97,11 @@ impl CameraActor {
                 cmd = self.rx.recv() => {
                     match cmd {
                         Some(CameraCommand::Capture {
-                            exposure_secs: _,
-                            reply: _,
+                            exposure_secs,
+                            reply,
                         }) => {
-                            todo!()
+                            let res = Self::execute_capture(driver, exposure_secs).await;
+                            let _ = reply.send(res);
                         }
                         None => {
                             info!("Command channel closed, shutting down camera actor");
@@ -124,6 +125,44 @@ impl CameraActor {
                 }
             }
         }
+    }
+
+    async fn execute_capture(
+        driver: &mut Driver<Initialized>,
+        exposure_secs: u32,
+    ) -> Result<CapturedImage, CaptureError> {
+        let camera = driver.camera();
+        info!("Triggering camera capture (exposure_secs={exposure_secs})...");
+
+        let file_path = camera.capture_image().await.map_err(|err| {
+            error!("Camera capture_image error: {err}");
+            CaptureError::Fatal(err.to_string())
+        })?;
+
+        let folder = file_path.folder();
+        let name = file_path.name();
+        info!("Captured file: {folder}/{name}. Downloading from camera...");
+
+        let camera_file = camera.fs().download(&folder, &name).await.map_err(|err| {
+            error!("Camera download error: {err}");
+            CaptureError::Fatal(err.to_string())
+        })?;
+
+        let data = camera_file.get_data(camera).await.map_err(|err| {
+            error!("Camera get_data error: {err}");
+            CaptureError::Fatal(err.to_string())
+        })?;
+
+        info!("Downloaded {} bytes for file {name}", data.len());
+
+        if let Err(err) = camera.fs().delete_file(&folder, &name).await {
+            warn!("Failed to delete {folder}/{name} from camera: {err}");
+        }
+
+        Ok(CapturedImage {
+            data: data.into_vec(),
+            filename: name.to_string(),
+        })
     }
 
     async fn connect(&mut self) -> Result<Driver<Initialized>, ConnectionError> {

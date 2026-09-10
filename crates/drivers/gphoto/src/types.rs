@@ -10,9 +10,15 @@ pub enum CaptureError {
     Fatal(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct CapturedImage {
+    pub data: Vec<u8>,
+    pub filename: String,
+}
+
 pub enum CameraCommand {
     Capture {
         exposure_secs: u32,
-        reply: oneshot::Sender<Result<(), CaptureError>>,
+        reply: oneshot::Sender<Result<CapturedImage, CaptureError>>,
     },
 }

@@ -126,6 +126,9 @@ async fn frame_raw_handler(Path(id): Path<u64>, State(state): State<Arc<ServerSt
                 .headers_mut()
                 .insert(header::CONTENT_DISPOSITION, disp);
         }
+        if let Ok(len) = HeaderValue::from_str(&entry.data.len().to_string()) {
+            response.headers_mut().insert(header::CONTENT_LENGTH, len);
+        }
         response
     } else {
         (
@@ -301,8 +304,23 @@ async fn execute_capture(frame: Frame, state: Arc<ServerState>) {
     );
 
     match state.camera_handle.capture(exposure_secs).await {
-        Ok(()) => {
-            info!("Capture completed for frame {}", frame.id);
+        Ok(captured) => {
+            info!(
+                "Capture completed for frame {}, storing {} bytes ({})",
+                frame.id,
+                captured.data.len(),
+                captured.filename
+            );
+            let mime = if captured.filename.to_lowercase().ends_with(".cr2") {
+                "image/x-canon-cr2"
+            } else if captured.filename.to_lowercase().ends_with(".cr3") {
+                "image/x-canon-cr3"
+            } else {
+                "application/octet-stream"
+            };
+            state
+                .store_frame(frame.id, captured.data, mime.into())
+                .await;
             let raw_url = format!("/api/frames/{}/raw", frame.id);
             state.broadcast(DaemonMessage::FrameReady {
                 frame_id: frame.id,

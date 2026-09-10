@@ -9,6 +9,8 @@ ui.workspace = true
 theme.workspace = true
 workspace = { path = "../workspace" }
 components = { path = "../components" }
+client = { path = "../client" }
+protocol = { path = "../protocol" }
 wgpu.workspace = true
 tracing.workspace = true
 bytemuck.workspace = true
