@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 use crate::{
     Driver, Initialized, Uninitialized,
     handle::CameraHandle,
-    types::{CameraCommand, CaptureError, CapturedImage},
+    types::{CameraCommand, CameraFileRef, CaptureError, DeleteError, DownloadError},
 };
 
 struct ConnectionConfig {
@@ -83,6 +83,7 @@ impl CameraActor {
             self.set_status(CameraStatus::Ready);
 
             let failure_reason = self.serve_requests(&mut driver).await;
+            driver.close();
 
             if failure_reason.is_none() {
                 return;
@@ -92,6 +93,10 @@ impl CameraActor {
     }
 
     async fn serve_requests(&mut self, driver: &mut Driver<Initialized>) -> Option<String> {
+        let mut keep_alive_interval = tokio::time::interval(Duration::from_secs(25));
+        keep_alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        keep_alive_interval.tick().await;
+
         loop {
             tokio::select! {
                 cmd = self.rx.recv() => {
@@ -100,8 +105,72 @@ impl CameraActor {
                             exposure_secs,
                             reply,
                         }) => {
-                            let res = Self::execute_capture(driver, exposure_secs).await;
+                            let capture_timeout = Duration::from_secs((exposure_secs as u64) + 20).max(Duration::from_secs(25));
+                            let capture_res = tokio::time::timeout(
+                                capture_timeout,
+                                Self::execute_capture(driver, exposure_secs),
+                            )
+                            .await;
+
+                            match capture_res {
+                                Ok(Ok(captured)) => {
+                                    let _ = reply.send(Ok(captured));
+                                    keep_alive_interval.reset();
+                                }
+                                Ok(Err(err)) => {
+                                    error!("Capture execution failed: {err:?}");
+                                    let is_fatal = matches!(err, CaptureError::Fatal(_));
+                                    let _ = reply.send(Err(err));
+                                    if is_fatal {
+                                        return Some("Fatal hardware error during capture".into());
+                                    }
+                                }
+                                Err(_) => {
+                                    error!("Capture timed out after {capture_timeout:?}!");
+                                    let _ = reply.send(Err(CaptureError::Fatal(
+                                        format!("Camera capture timed out after {capture_timeout:?}")
+                                    )));
+                                    return Some("Camera capture timed out (hardware unresponsive)".into());
+                                }
+                            }
+                        }
+                        Some(CameraCommand::Download {
+                            folder,
+                            filename,
+                            reply,
+                        }) => {
+                            let res = Self::execute_download(driver, &folder, &filename).await;
                             let _ = reply.send(res);
+                        }
+                        Some(CameraCommand::DeleteFile {
+                            folder,
+                            filename,
+                            reply,
+                        }) => {
+                            let camera = driver.camera();
+                            let delete_timeout = Duration::from_secs(10);
+                            let res = tokio::time::timeout(
+                                delete_timeout,
+                                camera.fs().delete_file(&folder, &filename),
+                            )
+                            .await;
+
+                            match res {
+                                Ok(Ok(())) => {
+                                    info!("Successfully deleted {folder}/{filename} from camera");
+                                    let _ = reply.send(Ok(()));
+                                }
+                                Ok(Err(err)) => {
+                                    warn!("Failed to delete {folder}/{filename} from camera: {err}");
+                                    let _ = reply.send(Err(DeleteError::Failed(err.to_string())));
+                                }
+                                Err(_) => {
+                                    warn!("Timed out deleting {folder}/{filename} from camera");
+                                    let _ = reply.send(Err(DeleteError::Failed(
+                                        "Delete file timed out".into(),
+                                    )));
+                                }
+                            }
                         }
                         None => {
                             info!("Command channel closed, shutting down camera actor");
@@ -109,17 +178,19 @@ impl CameraActor {
                         }
                     }
                 }
-                event_res = driver.wait_event(Duration::from_millis(500)) => {
-                    match event_res {
-                        Ok(gphoto2::camera::CameraEvent::Timeout) => {
-                            // Camera is still connected and responsive
+                _ = keep_alive_interval.tick() => {
+                    info!("Running camera keep-alive ping...");
+                    match tokio::time::timeout(Duration::from_secs(5), driver.keep_alive()).await {
+                        Ok(Ok(())) => {
+                            // Camera responded to PTP command; connection is healthy
                         }
-                        Ok(event) => {
-                            info!("Camera event: {:?}", event);
+                        Ok(Err(err)) => {
+                            warn!("Camera keep-alive failed: {err}");
+                            return Some(format!("Camera keep-alive failed: {err}"));
                         }
-                        Err(err) => {
-                            warn!("Camera health check failed: {err}");
-                            return Some(format!("Camera communication error: {err}"));
+                        Err(_) => {
+                            warn!("Camera keep-alive timed out after 5s");
+                            return Some("Camera keep-alive timed out (hardware unresponsive)".into());
                         }
                     }
                 }
@@ -130,39 +201,57 @@ impl CameraActor {
     async fn execute_capture(
         driver: &mut Driver<Initialized>,
         exposure_secs: u32,
-    ) -> Result<CapturedImage, CaptureError> {
+    ) -> Result<CameraFileRef, CaptureError> {
         let camera = driver.camera();
         info!("Triggering camera capture (exposure_secs={exposure_secs})...");
 
-        let file_path = camera.capture_image().await.map_err(|err| {
-            error!("Camera capture_image error: {err}");
-            CaptureError::Fatal(err.to_string())
-        })?;
+        let capture_timeout =
+            Duration::from_secs((exposure_secs as u64) + 15).max(Duration::from_secs(20));
+        let file_path = tokio::time::timeout(capture_timeout, camera.capture_image())
+            .await
+            .map_err(|_| CaptureError::Fatal("Capture shutter release timed out".into()))?
+            .map_err(|err| {
+                error!("Camera capture_image error: {err}");
+                CaptureError::Fatal(err.to_string())
+            })?;
 
-        let folder = file_path.folder();
-        let name = file_path.name();
-        info!("Captured file: {folder}/{name}. Downloading from camera...");
+        let folder = file_path.folder().to_string();
+        let name = file_path.name().to_string();
+        info!("Captured file on camera storage: {folder}/{name}");
 
-        let camera_file = camera.fs().download(&folder, &name).await.map_err(|err| {
-            error!("Camera download error: {err}");
-            CaptureError::Fatal(err.to_string())
-        })?;
-
-        let data = camera_file.get_data(camera).await.map_err(|err| {
-            error!("Camera get_data error: {err}");
-            CaptureError::Fatal(err.to_string())
-        })?;
-
-        info!("Downloaded {} bytes for file {name}", data.len());
-
-        if let Err(err) = camera.fs().delete_file(&folder, &name).await {
-            warn!("Failed to delete {folder}/{name} from camera: {err}");
-        }
-
-        Ok(CapturedImage {
-            data: data.into_vec(),
-            filename: name.to_string(),
+        Ok(CameraFileRef {
+            folder,
+            filename: name,
         })
+    }
+
+    async fn execute_download(
+        driver: &Driver<Initialized>,
+        folder: &str,
+        filename: &str,
+    ) -> Result<Vec<u8>, DownloadError> {
+        let camera = driver.camera();
+        info!("Downloading {folder}/{filename} from camera...");
+
+        let download_timeout = Duration::from_secs(30);
+        let camera_file = tokio::time::timeout(download_timeout, camera.fs().download(folder, filename))
+            .await
+            .map_err(|_| DownloadError::Failed("Downloading file from camera timed out".into()))?
+            .map_err(|err| {
+                error!("Camera download error: {err}");
+                DownloadError::Failed(err.to_string())
+            })?;
+
+        let data = tokio::time::timeout(download_timeout, camera_file.get_data(camera))
+            .await
+            .map_err(|_| DownloadError::Failed("Reading file data from camera timed out".into()))?
+            .map_err(|err| {
+                error!("Camera get_data error: {err}");
+                DownloadError::Failed(err.to_string())
+            })?;
+
+        info!("Downloaded {} bytes for file {filename}", data.len());
+        Ok(data.into_vec())
     }
 
     async fn connect(&mut self) -> Result<Driver<Initialized>, ConnectionError> {
@@ -218,6 +307,12 @@ impl CameraActor {
                         Some(CameraCommand::Capture { reply, .. }) => {
                             reply.send(Err(CaptureError::Interrupted)).ok();
                         }
+                        Some(CameraCommand::Download { reply, .. }) => {
+                            reply.send(Err(DownloadError::ActorDisconnected)).ok();
+                        }
+                        Some(CameraCommand::DeleteFile { reply, .. }) => {
+                            reply.send(Err(DeleteError::ActorDisconnected)).ok();
+                        }
                         None => return Err(ConnectionError::AppQuitting),
                     }
                 }
@@ -234,10 +329,23 @@ impl CameraActor {
         let uninit = Driver::<Uninitialized>::default();
         let ctx = gphoto2::Context::new().ok()?;
 
-        tokio::time::timeout(Duration::from_secs(5), uninit.initialize(&ctx))
+        let driver = tokio::time::timeout(Duration::from_secs(5), uninit.initialize(&ctx))
             .await
             .ok()? // No timeout
-            .ok() // initialization succeeded
+            .ok()?; // initialization succeeded
+
+        // Attempt to disable auto power-off if supported by camera model
+        if let Ok(autopoweroff) = driver
+            .camera()
+            .config_key::<gphoto2::widget::RadioWidget>("autopoweroff")
+            .await
+        {
+            let _ = autopoweroff.set_choice("0");
+            let _ = driver.camera().set_config(&autopoweroff).await;
+            info!("Camera autopoweroff config updated to 0 (Disabled)");
+        }
+
+        Some(driver)
     }
 
     fn set_status(&self, status: CameraStatus) {

@@ -11,6 +11,8 @@ path = "src/controller.rs"
 tracing.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+protocol.path = "../protocol"
 sequencer.path = "../sequencer"
 gphoto.path = "../drivers/gphoto"
 

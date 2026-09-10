@@ -10,19 +10,24 @@ pub enum SaveLocation {
     Viewer,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SaveInfo {
+    #[allow(dead_code)]
     save_locations: BitFlags<SaveLocation>,
+    #[allow(dead_code)]
     path: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Frame {
+    #[allow(dead_code)]
     exposure_time: Duration,
+    #[allow(dead_code)]
     save_info: SaveInfo,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Sequence {
+    #[allow(dead_code)]
     frames: Vec<Frame>,
 }

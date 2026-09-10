@@ -3,6 +3,7 @@ pub mod sequence;
 use gphoto::handle::CameraHandle;
 
 pub struct Sequencer {
+    #[allow(dead_code)]
     camera: CameraHandle,
 }
 

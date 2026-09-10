@@ -10,15 +10,41 @@ pub enum CaptureError {
     Fatal(String),
 }
 
-#[derive(Clone, Debug)]
-pub struct CapturedImage {
-    pub data: Vec<u8>,
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadError {
+    #[error("Actor task crashed or channel closed")]
+    ActorDisconnected,
+    #[error("Failed to download file from camera: {0}")]
+    Failed(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteError {
+    #[error("Actor task crashed or channel closed")]
+    ActorDisconnected,
+    #[error("Failed to delete file from camera: {0}")]
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CameraFileRef {
+    pub folder: String,
     pub filename: String,
 }
 
 pub enum CameraCommand {
     Capture {
         exposure_secs: u32,
-        reply: oneshot::Sender<Result<CapturedImage, CaptureError>>,
+        reply: oneshot::Sender<Result<CameraFileRef, CaptureError>>,
+    },
+    Download {
+        folder: String,
+        filename: String,
+        reply: oneshot::Sender<Result<Vec<u8>, DownloadError>>,
+    },
+    DeleteFile {
+        folder: String,
+        filename: String,
+        reply: oneshot::Sender<Result<(), DeleteError>>,
     },
 }

@@ -2245,7 +2245,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gphoto",
+ "protocol",
  "sequencer",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
@@ -2555,6 +2557,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "controller",
  "futures",
  "gphoto",
  "http-body-util",

@@ -17,11 +17,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use controller::{ControllerEvent, ControllerHandle};
 use futures::{SinkExt, StreamExt};
-use gphoto::handle::CameraHandle;
-use protocol::{CameraStatus, DaemonMessage, DaemonStatus, Frame, ViewerMessage};
+use protocol::{CameraStatus, DaemonMessage, DaemonStatus, ViewerMessage};
 use serde::Serialize;
-use tokio::sync::{RwLock, broadcast, watch};
+use tokio::sync::{RwLock, broadcast};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info, warn};
 
@@ -31,9 +31,7 @@ pub struct FrameCacheEntry {
 }
 
 pub struct ServerState {
-    pub camera_handle: CameraHandle,
-    pub camera_status_rx: watch::Receiver<CameraStatus>,
-    pub daemon_status: Arc<RwLock<DaemonStatus>>,
+    pub controller: ControllerHandle,
     pub broadcast_tx: broadcast::Sender<DaemonMessage>,
     pub frame_cache: Arc<RwLock<HashMap<u64, FrameCacheEntry>>>,
     pub latest_preview: Arc<RwLock<Option<(u64, Vec<u8>)>>>,
@@ -41,14 +39,11 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new(camera_handle: CameraHandle) -> Self {
+    pub fn new(controller: ControllerHandle) -> Self {
         let (broadcast_tx, _) = broadcast::channel(128);
-        let camera_status_rx = camera_handle.status();
 
         Self {
-            camera_handle,
-            camera_status_rx,
-            daemon_status: Arc::new(RwLock::new(DaemonStatus::Idle)),
+            controller,
             broadcast_tx,
             frame_cache: Arc::new(RwLock::new(HashMap::new())),
             latest_preview: Arc::new(RwLock::new(None)),
@@ -60,16 +55,16 @@ impl ServerState {
         let _ = self.broadcast_tx.send(msg);
     }
 
-    pub async fn set_daemon_status(&self, status: DaemonStatus) {
-        *self.daemon_status.write().await = status;
-    }
-
     #[allow(dead_code)]
     pub async fn store_frame(&self, frame_id: u64, data: Vec<u8>, mime_type: String) {
-        self.frame_cache
-            .write()
-            .await
-            .insert(frame_id, FrameCacheEntry { data, mime_type });
+        const MAX_CACHED_FRAMES: usize = 10;
+        let mut cache = self.frame_cache.write().await;
+        if cache.len() >= MAX_CACHED_FRAMES {
+            if let Some(&oldest_id) = cache.keys().min() {
+                cache.remove(&oldest_id);
+            }
+        }
+        cache.insert(frame_id, FrameCacheEntry { data, mime_type });
     }
 
     #[allow(dead_code)]
@@ -102,8 +97,8 @@ struct StatusResponse {
 }
 
 async fn status_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    let daemon = state.daemon_status.read().await.clone();
-    let camera = state.camera_status_rx.borrow().clone();
+    let daemon = state.controller.status().borrow().clone();
+    let camera = state.controller.camera_status().borrow().clone();
     let viewers = state.active_viewers_count.load(Ordering::Relaxed);
 
     axum::Json(StatusResponse {
@@ -171,8 +166,8 @@ async fn handle_viewer_socket(socket: WebSocket, state: Arc<ServerState>) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let mut broadcast_rx = state.broadcast_tx.subscribe();
 
-    let initial_status = state.daemon_status.read().await.clone();
-    let camera_status = state.camera_status_rx.borrow().clone();
+    let initial_status = state.controller.status().borrow().clone();
+    let camera_status = state.controller.camera_status().borrow().clone();
 
     if let Ok(text) = serde_json::to_string(&DaemonMessage::Status(initial_status)) {
         if ws_sender.send(Message::Text(text.into())).await.is_err() {
@@ -199,15 +194,24 @@ async fn handle_viewer_socket(socket: WebSocket, state: Arc<ServerState>) {
     }
 
     let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = broadcast_rx.recv().await {
-            match serde_json::to_string(&msg) {
-                Ok(text) => {
-                    if ws_sender.send(Message::Text(text.into())).await.is_err() {
-                        break;
+        loop {
+            match broadcast_rx.recv().await {
+                Ok(msg) => match serde_json::to_string(&msg) {
+                    Ok(text) => {
+                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
                     }
+                    Err(err) => {
+                        error!("Failed to serialize DaemonMessage: {err}");
+                    }
+                },
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!("WebSocket broadcast receiver lagged by {skipped} messages; continuing");
+                    continue;
                 }
-                Err(err) => {
-                    error!("Failed to serialize DaemonMessage: {err}");
+                Err(broadcast::error::RecvError::Closed) => {
+                    break;
                 }
             }
         }
@@ -258,91 +262,76 @@ async fn handle_viewer_command(msg: ViewerMessage, state: &Arc<ServerState>) {
     match msg {
         ViewerMessage::Connect => {
             info!("Received explicit Connect handshake from viewer");
-            let daemon = state.daemon_status.read().await.clone();
-            let camera = state.camera_status_rx.borrow().clone();
+            let daemon = state.controller.status().borrow().clone();
+            let camera = state.controller.camera_status().borrow().clone();
             state.broadcast(DaemonMessage::Status(daemon));
             state.broadcast(DaemonMessage::CameraStatus(camera));
         }
         ViewerMessage::StartCapture(frame) => {
             info!(
-                "Received StartCapture for frame {} ({:?}, {:.1}s)",
+                "Forwarding StartCapture for frame {} ({:?}, {:.1}s) to controller",
                 frame.id,
                 frame.frame_type,
                 frame.params.exposure.as_secs_f32()
             );
-
-            let current = state.daemon_status.read().await.clone();
-            if current == DaemonStatus::Capturing {
-                state.broadcast(DaemonMessage::CaptureError {
-                    frame_id: frame.id,
-                    message: "Capture is already in progress".into(),
-                });
-                return;
+            if let Err(err) = state.controller.start_capture(frame).await {
+                error!("Failed to forward StartCapture to controller: {err}");
             }
-
-            state.set_daemon_status(DaemonStatus::Capturing).await;
-            state.broadcast(DaemonMessage::Status(DaemonStatus::Capturing));
-
-            let capture_state = state.clone();
-            tokio::spawn(async move {
-                execute_capture(frame, capture_state).await;
-            });
         }
         ViewerMessage::Abort => {
-            warn!("Received Abort command from viewer");
-            state.set_daemon_status(DaemonStatus::Idle).await;
-            state.broadcast(DaemonMessage::Status(DaemonStatus::Idle));
+            warn!("Forwarding Abort command to controller");
+            if let Err(err) = state.controller.abort().await {
+                error!("Failed to forward Abort to controller: {err}");
+            }
         }
     }
 }
 
-async fn execute_capture(frame: Frame, state: Arc<ServerState>) {
-    let exposure_secs = frame.params.exposure.as_secs().max(1) as u32;
-    info!(
-        "Executing capture for frame {} ({}s)...",
-        frame.id, exposure_secs
-    );
-
-    match state.camera_handle.capture(exposure_secs).await {
-        Ok(captured) => {
-            info!(
-                "Capture completed for frame {}, storing {} bytes ({})",
-                frame.id,
-                captured.data.len(),
-                captured.filename
-            );
-            let mime = if captured.filename.to_lowercase().ends_with(".cr2") {
-                "image/x-canon-cr2"
-            } else if captured.filename.to_lowercase().ends_with(".cr3") {
-                "image/x-canon-cr3"
-            } else {
-                "application/octet-stream"
-            };
-            state
-                .store_frame(frame.id, captured.data, mime.into())
-                .await;
-            let raw_url = format!("/api/frames/{}/raw", frame.id);
-            state.broadcast(DaemonMessage::FrameReady {
-                frame_id: frame.id,
-                url: raw_url,
-            });
+pub fn spawn_controller_event_forwarder(state: Arc<ServerState>) {
+    let mut event_rx = state.controller.subscribe_events();
+    tokio::spawn(async move {
+        while let Ok(event) = event_rx.recv().await {
+            match event {
+                ControllerEvent::Status(status) => {
+                    state.broadcast(DaemonMessage::Status(status));
+                }
+                ControllerEvent::FrameCaptured(captured) => {
+                    let filename = &captured.file_ref.filename;
+                    let mime = if filename.to_lowercase().ends_with(".cr2") {
+                        "image/x-canon-cr2"
+                    } else if filename.to_lowercase().ends_with(".cr3") {
+                        "image/x-canon-cr3"
+                    } else {
+                        "application/octet-stream"
+                    };
+                    if let Some(data) = captured.data {
+                        state.store_frame(captured.frame.id, data, mime.into()).await;
+                        let raw_url = format!("/api/frames/{}/raw", captured.frame.id);
+                        state.broadcast(DaemonMessage::FrameReady {
+                            frame_id: captured.frame.id,
+                            url: raw_url,
+                        });
+                    } else {
+                        state.broadcast(DaemonMessage::FrameReady {
+                            frame_id: captured.frame.id,
+                            url: String::new(),
+                        });
+                    }
+                }
+                ControllerEvent::CaptureError { frame_id, error } => {
+                    state.broadcast(DaemonMessage::CaptureError {
+                        frame_id,
+                        message: error,
+                    });
+                }
+            }
         }
-        Err(err) => {
-            error!("Capture failed for frame {}: {:?}", frame.id, err);
-            state.broadcast(DaemonMessage::CaptureError {
-                frame_id: frame.id,
-                message: format!("Capture error: {err}"),
-            });
-        }
-    }
-
-    state.set_daemon_status(DaemonStatus::Idle).await;
-    state.broadcast(DaemonMessage::Status(DaemonStatus::Idle));
+    });
 }
 
 pub fn spawn_camera_status_watcher(state: Arc<ServerState>) {
+    let mut status_rx = state.controller.camera_status();
     tokio::spawn(async move {
-        let mut status_rx = state.camera_status_rx.clone();
         while status_rx.changed().await.is_ok() {
             let new_status = status_rx.borrow().clone();
             info!("Camera status changed: {:?}", new_status);
@@ -351,9 +340,10 @@ pub fn spawn_camera_status_watcher(state: Arc<ServerState>) {
     });
 }
 
-pub async fn start_server(addr: SocketAddr, camera_handle: CameraHandle) -> anyhow::Result<()> {
-    let state = Arc::new(ServerState::new(camera_handle));
+pub async fn start_server(addr: SocketAddr, controller: ControllerHandle) -> anyhow::Result<()> {
+    let state = Arc::new(ServerState::new(controller));
     spawn_camera_status_watcher(state.clone());
+    spawn_controller_event_forwarder(state.clone());
 
     let app = create_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;

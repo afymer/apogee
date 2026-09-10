@@ -1,10 +1,14 @@
 use std::net::SocketAddr;
 
+use controller::Controller;
 use gphoto::actor::CameraActor;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod server;
+
+#[cfg(test)]
+mod tests;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,13 +24,14 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting Apogee daemon...");
 
     let camera_handle = CameraActor::spawn();
+    let controller_handle = Controller::spawn(camera_handle);
 
     let bind_addr: SocketAddr = std::env::var("APOGEE_DAEMON_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:4000".to_string())
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 4000)));
 
-    server::start_server(bind_addr, camera_handle).await?;
+    server::start_server(bind_addr, controller_handle).await?;
 
     Ok(())
 }
