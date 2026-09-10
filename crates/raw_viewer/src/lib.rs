@@ -6,8 +6,8 @@ pub mod raw_image;
 pub mod renderer;
 pub mod types;
 
+pub use components::{ActiveKnob, DoubleSlider, DoubleSliderEvent, SliderColors, SliderThemeExt};
 pub use control_panel::CaptureControlPanel;
-pub use controls::{ActiveKnob, DoubleSlider, DoubleSliderEvent, SliderColors, SliderThemeExt};
 pub use histogram::{HistogramData, HistogramWidget, ScaleMode};
 pub use panel::RawViewerPanel;
 pub use raw_image::{RawError, RawImage};

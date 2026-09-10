@@ -1,5 +1,5 @@
 [package]
-name = "controls"
+name = "components"
 version = "0.1.0"
 edition.workspace = true
 
@@ -7,6 +7,7 @@ edition.workspace = true
 gpui.workspace = true
 ui.workspace = true
 theme.workspace = true
+protocol = { path = "../protocol" }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

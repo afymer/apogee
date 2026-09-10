@@ -227,16 +227,21 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assets",
+ "client",
  "futures",
  "gpui",
  "gpui_platform",
  "planetarium",
+ "protocol",
  "raw_viewer",
  "refineable",
  "serde",
  "serde_json",
+ "status_bar",
  "theme",
  "title_bar",
+ "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "ui",
@@ -1978,6 +1983,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "client"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "gpui",
+ "protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2098,6 +2117,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "components"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "protocol",
+ "theme",
+ "ui",
+]
+
+[[package]]
 name = "compression-codecs"
 version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2206,15 +2235,6 @@ dependencies = [
  "sequencer",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "controls"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "theme",
- "ui",
 ]
 
 [[package]]
@@ -6197,7 +6217,7 @@ name = "raw_viewer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "controls",
+ "components",
  "futures",
  "glam",
  "gpui",
@@ -7078,7 +7098,10 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "status_bar"
 version = "0.1.0"
 dependencies = [
+ "client",
+ "components",
  "gpui",
+ "protocol",
  "theme",
  "ui",
 ]

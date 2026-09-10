@@ -15,7 +15,7 @@ use workspace::{
     panel::{Panel, PanelEvent},
 };
 
-use controls::{ActiveKnob, DoubleSlider, DoubleSliderEvent};
+use components::{ActiveKnob, DoubleSlider, DoubleSliderEvent};
 
 use crate::{
     bridge::RawViewerBridge,

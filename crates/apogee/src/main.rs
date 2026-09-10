@@ -13,10 +13,18 @@ use crate::app_state::AppState;
 fn main() {
     tracing_subscriber::fmt::init();
 
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to initialize Tokio runtime");
+    let _runtime_guard = runtime.enter();
+
     application().with_assets(Assets).run(|cx: &mut App| {
         Assets.load_fonts(cx).expect("failed to load fonts");
         theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
         theme_provider::init(cx);
+
+        client::init(cx);
 
         title_bar::init(cx);
         bevy_viewport::init(cx);

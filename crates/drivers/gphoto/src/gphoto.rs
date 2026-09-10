@@ -36,3 +36,16 @@ impl Driver<Uninitialized> {
         })
     }
 }
+
+impl Driver<Initialized> {
+    pub fn camera(&self) -> &gphoto2::Camera {
+        &self.state.camera
+    }
+
+    pub async fn wait_event(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<gphoto2::camera::CameraEvent, gphoto2::Error> {
+        self.state.camera.wait_event(timeout).await
+    }
+}

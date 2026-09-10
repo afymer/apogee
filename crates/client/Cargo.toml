@@ -1,0 +1,21 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "client"
+path = "src/client.rs"
+
+[dependencies]
+gpui.workspace = true
+protocol = { path = "../protocol" }
+tokio.workspace = true
+tokio-tungstenite = "0.29.0"
+futures.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

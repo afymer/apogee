@@ -66,6 +66,16 @@ impl CameraActor {
                 }
                 Err(ConnectionError::HardwareUnresponsive) => {
                     error!("Hardware is not responding, requesting intervention");
+                    self.set_status(CameraStatus::Fatal(
+                        "Hardware did not respond. Please check USB connection.".into(),
+                    ));
+                    if self
+                        .sleep_and_drain_commands(Duration::from_secs(5))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     continue;
                 }
             };
@@ -81,18 +91,39 @@ impl CameraActor {
         }
     }
 
-    async fn serve_requests(&mut self, _driver: &mut Driver<Initialized>) -> Option<String> {
-        while let Some(cmd) = self.rx.recv().await {
-            match cmd {
-                CameraCommand::Capture {
-                    exposure_secs: _,
-                    reply: _,
-                } => {
-                    todo!()
+    async fn serve_requests(&mut self, driver: &mut Driver<Initialized>) -> Option<String> {
+        loop {
+            tokio::select! {
+                cmd = self.rx.recv() => {
+                    match cmd {
+                        Some(CameraCommand::Capture {
+                            exposure_secs: _,
+                            reply: _,
+                        }) => {
+                            todo!()
+                        }
+                        None => {
+                            info!("Command channel closed, shutting down camera actor");
+                            return None;
+                        }
+                    }
+                }
+                event_res = driver.wait_event(Duration::from_millis(500)) => {
+                    match event_res {
+                        Ok(gphoto2::camera::CameraEvent::Timeout) => {
+                            // Camera is still connected and responsive
+                        }
+                        Ok(event) => {
+                            info!("Camera event: {:?}", event);
+                        }
+                        Err(err) => {
+                            warn!("Camera health check failed: {err}");
+                            return Some(format!("Camera communication error: {err}"));
+                        }
+                    }
                 }
             }
         }
-        None
     }
 
     async fn connect(&mut self) -> Result<Driver<Initialized>, ConnectionError> {
@@ -128,6 +159,9 @@ impl CameraActor {
                 .await?;
         }
 
+        self.set_status(CameraStatus::Fatal(
+            "Hardware did not respond after multiple retries".into(),
+        ));
         Err(ConnectionError::HardwareUnresponsive)
     }
 
@@ -153,7 +187,8 @@ impl CameraActor {
     }
 
     async fn reset_usb_hardware(&mut self) {
-        todo!("implement reset_usb_hardware");
+        info!("Resetting USB port (stub: hardware reset triggered)");
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     async fn try_detect_once(&mut self) -> Option<Driver<Initialized>> {

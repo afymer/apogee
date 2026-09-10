@@ -13,8 +13,13 @@ wgpu.workspace = true
 planetarium = { path = "../planetarium" }
 workspace = { path = "../workspace" }
 title_bar = { path = "../title_bar" }
+status_bar = { path = "../status_bar" }
 raw_viewer = { path = "../raw_viewer" }
+protocol = { path = "../protocol" }
+client = { path = "../client" }
 futures.workspace = true
+tokio.workspace = true
+tokio-tungstenite = "0.29.0"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
