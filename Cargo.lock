@@ -3438,14 +3438,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gphoto2",
- "gpui",
  "image",
  "protocol",
  "rawloader",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "wgpu",
 ]
 
 [[package]]
