@@ -1,0 +1,14 @@
+[package]
+name = "celestial"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+hifitime.workspace = true
+
+[lints]
+workspace = true
