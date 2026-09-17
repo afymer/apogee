@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod grids;
 pub mod material;
+pub mod stars;
 pub mod viewport;
 
 use std::{
@@ -24,6 +25,7 @@ use bevy::{
             WgpuWrapper,
         },
         settings::RenderCreation,
+        storage::ShaderBuffer,
     },
 };
 
@@ -182,6 +184,7 @@ struct CelestialHandles {
     horizon_mesh: Handle<Mesh>,
     altaz_mesh: Handle<Mesh>,
     eq_mesh: Handle<Mesh>,
+    star_material: Option<Handle<stars::CelestialStarMaterial>>,
 }
 
 #[derive(Resource, Clone, Copy)]
@@ -232,6 +235,7 @@ fn camera_movement_and_interpolation_system(
     dims: Res<ViewportDimensions>,
     handles: Res<CelestialHandles>,
     mut materials: ResMut<Assets<CelestialLineMaterial>>,
+    mut star_materials: ResMut<Assets<stars::CelestialStarMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut grid_state: Local<GridMeshState>,
     mut is_initialized: Local<bool>,
@@ -391,6 +395,16 @@ fn camera_movement_and_interpolation_system(
             mat.uniforms.transform = delta_transform;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = minor_alpha;
+        }
+
+        if let Some(ref star_mat_handle) = handles.star_material {
+            if let Some(mut mat) = star_materials.get_mut(star_mat_handle) {
+                mat.uniforms.transform =
+                    glam::DMat4::from_mat3(camera.icrs_to_camera_matrix()).as_mat4();
+                mat.uniforms.projection = proj_params.into();
+                mat.uniforms.viewport_size = Vec2::new(dims.width as f32, dims.height as f32);
+                mat.uniforms.limiting_mag = 10.5;
+            }
         }
 
         camera_sync.view_info = camera.view_info();
@@ -583,6 +597,49 @@ impl PlanetariumRenderer {
                     .resource_mut::<Assets<Mesh>>()
                     .add(create_equatorial_grid_mesh(initial_eq_to_cam));
 
+                let star_catalog = stars::load_star_catalog();
+                let (star_mat_handle, star_mesh_handle) =
+                    if let Some((_header, star_records)) = star_catalog {
+                        let star_count = star_records.len();
+                        let raw_bytes: &[u8] = bytemuck::cast_slice(&star_records);
+                        let storage_buffer =
+                            ShaderBuffer::new(raw_bytes, RenderAssetUsages::RENDER_WORLD);
+                        let buffer_handle = app
+                            .world_mut()
+                            .resource_mut::<Assets<ShaderBuffer>>()
+                            .add(storage_buffer);
+
+                        let star_mesh = stars::create_star_quad_mesh(star_count);
+                        let mesh_handle = app
+                            .world_mut()
+                            .resource_mut::<Assets<Mesh>>()
+                            .add(star_mesh);
+
+                        let star_material = stars::CelestialStarMaterial {
+                            uniforms: stars::CelestialStarUniforms {
+                                transform: glam::DMat4::from_mat3(initial_eq_to_cam).as_mat4(),
+                                projection: initial_proj.into(),
+                                viewport_size: Vec2::new(width as f32, height as f32),
+                                limiting_mag: 10.5,
+                                fade_range: 0.6,
+                                base_radius: 2.2,
+                                min_radius: 0.8,
+                                max_radius: 24.0,
+                                padding: 0.0,
+                            },
+                            stars: buffer_handle,
+                        };
+
+                        let mat_handle = app
+                            .world_mut()
+                            .resource_mut::<Assets<stars::CelestialStarMaterial>>()
+                            .add(star_material);
+
+                        (Some(mat_handle), Some(mesh_handle))
+                    } else {
+                        (None, None)
+                    };
+
                 app.init_resource::<PendingCommands>();
                 app.init_resource::<CameraSyncState>();
                 app.insert_resource(bridge.clone());
@@ -594,15 +651,18 @@ impl PlanetariumRenderer {
                     horizon_mesh: horizon_mesh_handle.clone(),
                     altaz_mesh: altaz_mesh_handle.clone(),
                     eq_mesh: eq_mesh_handle.clone(),
+                    star_material: star_mat_handle.clone(),
                 });
 
                 let h_mat = horizon_mat_handle.clone();
                 let a_mat = altaz_mat_handle.clone();
                 let e_mat = eq_mat_handle.clone();
+                let s_mat = star_mat_handle.clone();
 
                 let h_mesh = horizon_mesh_handle.clone();
                 let a_mesh = altaz_mesh_handle.clone();
                 let e_mesh = eq_mesh_handle.clone();
+                let s_mesh = star_mesh_handle.clone();
 
                 app.add_systems(Startup, move |mut commands: Commands| {
                     commands.spawn((
@@ -633,6 +693,15 @@ impl PlanetariumRenderer {
                         Transform::default(),
                         NoFrustumCulling,
                     ));
+
+                    if let (Some(s_mesh), Some(s_mat)) = (s_mesh.clone(), s_mat.clone()) {
+                        commands.spawn((
+                            Mesh3d(s_mesh),
+                            MeshMaterial3d(s_mat),
+                            Transform::default(),
+                            NoFrustumCulling,
+                        ));
+                    }
                 });
 
                 app.add_systems(Update, camera_movement_and_interpolation_system);

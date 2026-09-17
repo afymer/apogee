@@ -10,6 +10,7 @@ tracing.workspace = true
 celestial.path = "../celestial"
 glam.workspace = true
 bytemuck.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true

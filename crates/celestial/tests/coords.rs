@@ -1,6 +1,4 @@
-use celestial::ObservationContext;
 use celestial::coords::Angle;
-use glam::DVec3;
 use std::f64::consts::PI;
 
 #[test]

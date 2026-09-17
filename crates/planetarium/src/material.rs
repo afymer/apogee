@@ -82,5 +82,7 @@ impl Material for CelestialLineMaterial {
 pub fn init_celestial_materials(app: &mut App) {
     load_shader_library!(app, "shaders/celestial_projection.wgsl");
     embedded_asset!(app, "shaders/celestial_line.wgsl");
+    embedded_asset!(app, "shaders/celestial_star.wgsl");
     app.add_plugins(MaterialPlugin::<CelestialLineMaterial>::default());
+    app.add_plugins(MaterialPlugin::<crate::stars::CelestialStarMaterial>::default());
 }

@@ -9,6 +9,8 @@ serde.workspace = true
 thiserror.workspace = true
 time.workspace = true
 hifitime.workspace = true
+bytemuck.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true

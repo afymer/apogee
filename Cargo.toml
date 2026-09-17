@@ -14,7 +14,8 @@ members = [
     "crates/drivers/gphoto",
     "crates/raw_viewer",
     "crates/components",
-    "crates/client"
+    "crates/client",
+    "crates/catalog_builder"
 ]
 default-members = ["crates/apogee"]
 # exclude = ["vendor/zed"]
@@ -37,6 +38,8 @@ rawloader = "0.37.2"
 glam = { version = "0.32", features = ["bytemuck"] }
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zstd = "0.13"
+indicatif = "0.17"
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", features = ["font-kit", "wayland", "x11", "wgpu"] }
 ui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
