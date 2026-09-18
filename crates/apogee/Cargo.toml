@@ -26,6 +26,16 @@ serde.workspace = true
 serde_json.workspace = true
 refineable.workspace = true
 anyhow.workspace = true
+tracing-tracy = { workspace = true, optional = true }
+tracy-client = { workspace = true, optional = true }
+
+[features]
+default = []
+tracy = [
+    "dep:tracing-tracy",
+    "dep:tracy-client",
+    "planetarium/tracy",
+]
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

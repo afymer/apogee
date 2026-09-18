@@ -68,6 +68,7 @@ impl Material for CelestialStarMaterial {
 }
 
 pub fn create_star_quad_mesh(star_count: usize) -> Mesh {
+    let _span = tracing::info_span!("create_star_quad_mesh", star_count).entered();
     let mut positions = Vec::with_capacity(star_count * 4);
     let mut indices = Vec::with_capacity(star_count * 6);
 
@@ -98,6 +99,7 @@ pub fn create_star_quad_mesh(star_count: usize) -> Mesh {
 /// Discovers and loads the star catalog from disk, checks `APOGEE_STARS_PATH`
 /// first, then searches common relative locations
 pub fn load_star_catalog() -> Option<(StarCatalogHeader, Vec<StarRecord>)> {
+    let _span = tracing::info_span!("load_star_catalog").entered();
     let mut candidates = Vec::new();
 
     if let Ok(env_path) = std::env::var("APOGEE_STARS_PATH") {
@@ -118,22 +120,32 @@ pub fn load_star_catalog() -> Option<(StarCatalogHeader, Vec<StarRecord>)> {
     for path in &candidates {
         if path.exists() {
             info!("Loading star catalog from {:?}", path);
-            match File::open(path) {
-                Ok(file) => match read_stars_from_zst(file) {
-                    Ok((header, stars)) => {
-                        info!(
-                            "Loaded {} stars (magnitudes {:.2} to {:.2}) from {:?}",
-                            stars.len(),
-                            header.min_mag,
-                            header.max_mag,
-                            path
-                        );
-                        return Some((header, stars));
+            let file = {
+                let _span = tracing::info_span!("open_catalog_file", ?path).entered();
+                File::open(path)
+            };
+            match file {
+                Ok(file) => {
+                    let parse_res = {
+                        let _span = tracing::info_span!("read_stars_from_zst").entered();
+                        read_stars_from_zst(file)
+                    };
+                    match parse_res {
+                        Ok((header, stars)) => {
+                            info!(
+                                "Loaded {} stars (magnitudes {:.2} to {:.2}) from {:?}",
+                                stars.len(),
+                                header.min_mag,
+                                header.max_mag,
+                                path
+                            );
+                            return Some((header, stars));
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse star catalog at {:?}: {}", path, e);
+                        }
                     }
-                    Err(e) => {
-                        warn!("Failed to parse star catalog at {:?}: {}", path, e);
-                    }
-                },
+                }
                 Err(e) => {
                     warn!("Failed to open star catalog at {:?}: {}", path, e);
                 }

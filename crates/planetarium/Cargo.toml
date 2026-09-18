@@ -11,6 +11,11 @@ celestial.path = "../celestial"
 glam.workspace = true
 bytemuck.workspace = true
 zstd.workspace = true
+tracy-client = { workspace = true, optional = true }
+
+[features]
+default = []
+tracy = ["dep:tracy-client"]
 
 [lints]
 workspace = true

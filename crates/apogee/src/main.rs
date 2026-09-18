@@ -2,6 +2,9 @@ mod app_state;
 mod bevy_viewport;
 mod theme_loader;
 mod theme_provider;
+mod tracing;
+
+use crate::tracing as apogee_tracing;
 
 use assets::Assets;
 use gpui::{App, AppContext, WindowOptions};
@@ -11,31 +14,92 @@ use workspace::workbench::Workbench;
 use crate::app_state::AppState;
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    let app_start = std::time::Instant::now();
+    apogee_tracing::init_tracing();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to initialize Tokio runtime");
+    // Looks like tracy hardcods "MainThread" for the main thread's name
+    // Renaming here only leads to helper threads (mainly for zbus) inheriting
+    // this name, which is confusing in the tracy client
+    //
+    // #[cfg(all(debug_assertions, feature = "tracy"))]
+    // if let Some(client) = tracy_client::Client::running() {
+    //     client.set_thread_name("GPUI");
+    // }
+
+    let startup_span = ::tracing::info_span!("startup").entered();
+
+    let runtime = {
+        let _span = ::tracing::info_span!("tokio_runtime_init").entered();
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to initialize Tokio runtime")
+    };
     let _runtime_guard = runtime.enter();
 
-    application().with_assets(Assets).run(|cx: &mut App| {
-        Assets.load_fonts(cx).expect("failed to load fonts");
-        theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
-        theme_provider::init(cx);
+    let app_builder = {
+        let _span = ::tracing::info_span!("gpui_application_create").entered();
+        application().with_assets(Assets)
+    };
 
-        client::init(cx);
+    let _run_span = ::tracing::info_span!("gpui_run_loop_enter").entered();
+    app_builder.run(move |cx: &mut App| {
+        {
+            let _span = ::tracing::info_span!("load_fonts").entered();
+            Assets.load_fonts(cx).expect("failed to load fonts");
+        }
+        {
+            let _span = ::tracing::info_span!("theme_init").entered();
+            theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
+        }
+        {
+            let _span = ::tracing::info_span!("theme_provider_init").entered();
+            theme_provider::init(cx);
+        }
 
-        title_bar::init(cx);
-        bevy_viewport::init(cx);
-        raw_viewer::init(cx);
+        {
+            let _span = ::tracing::info_span!("client_init").entered();
+            client::init(cx);
+        }
 
-        cx.set_global(AppState::new());
+        {
+            let _span = ::tracing::info_span!("title_bar_init").entered();
+            title_bar::init(cx);
+        }
+        {
+            let _span = ::tracing::info_span!("bevy_viewport_init").entered();
+            bevy_viewport::init(cx);
+        }
+        {
+            let _span = ::tracing::info_span!("raw_viewer_init").entered();
+            raw_viewer::init(cx);
+        }
 
-        if let Err(e) = cx.open_window(WindowOptions::default(), |window, cx| {
-            cx.new(|cx| Workbench::new(window, cx))
-        }) {
-            tracing::error!("Failed to open main window: {e:?}");
+        {
+            let _span = ::tracing::info_span!("app_state_init").entered();
+            cx.set_global(AppState::new());
+        }
+
+        drop(startup_span);
+
+        let open_window_res = {
+            let _span = ::tracing::info_span!("open_main_window").entered();
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                let _wb_span = ::tracing::info_span!("workbench_new").entered();
+                cx.new(|cx| Workbench::new(window, cx))
+            })
+        };
+
+        match open_window_res {
+            Ok(_) => {
+                ::tracing::info!(
+                    "Main window opened at +{:.2}ms from app start",
+                    app_start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            Err(e) => {
+                ::tracing::error!("Failed to open main window: {e:?}");
+            }
         }
     });
 }

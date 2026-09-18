@@ -51,7 +51,11 @@ pub fn init(cx: &mut App) {
 
     let registry = theme::ThemeRegistry::global(cx);
     info!("Registering themes");
-    registry.insert_theme_families(built_in_themes());
+    let themes = {
+        let _span = tracing::info_span!("built_in_themes_parse").entered();
+        built_in_themes()
+    };
+    registry.insert_theme_families(themes);
 
     if let Ok(theme) = registry.get(DEFAULT_THEME_NAME) {
         theme::GlobalTheme::update_theme(cx, theme);

@@ -51,6 +51,7 @@ impl PlanetariumPanel {
         initial_height: u32,
     ) -> Entity<Self> {
         cx.new(|cx| {
+            let _build_span = tracing::info_span!("planetarium_panel_build").entered();
             let (tx, mut rx) = futures::channel::mpsc::channel::<()>(1);
             let tx = std::sync::Mutex::new(tx);
 

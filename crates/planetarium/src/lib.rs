@@ -472,9 +472,17 @@ impl PlanetariumRenderer {
         initial_height: u32,
         bridge: BevyBridge,
     ) -> Result<JoinHandle<()>, std::io::Error> {
+        let spawn_instant = std::time::Instant::now();
         std::thread::Builder::new()
             .name("Bevy renderer".to_string())
             .spawn(move || {
+                let thread_start = std::time::Instant::now();
+                #[cfg(all(debug_assertions, feature = "tracy"))]
+                if let Some(client) = tracy_client::Client::running() {
+                    client.set_thread_name("Bevy renderer");
+                }
+
+                let init_span = tracing::info_span!("planetarium_init").entered();
                 let mut app = App::new();
 
                 let width = initial_width.max(1);
@@ -490,47 +498,56 @@ impl PlanetariumRenderer {
                     guard.last_size = Some((width, height));
                 }
 
-                app.add_plugins(
-                    DefaultPlugins
-                        .set(WindowPlugin {
-                            primary_window: None,
-                            exit_condition: bevy::window::ExitCondition::DontExit,
-                            ..default()
-                        })
-                        .set(RenderPlugin {
-                            render_creation: RenderCreation::manual(
-                                RenderDevice::from(device),
-                                RenderQueue(Arc::new(WgpuWrapper::new(queue))),
-                                RenderAdapterInfo(WgpuWrapper::new(adapter_info)),
-                                RenderAdapter(Arc::new(WgpuWrapper::new(adapter))),
-                                RenderInstance(Arc::new(WgpuWrapper::new(instance))),
-                            ),
-                            synchronous_pipeline_compilation: true,
-                            ..default()
-                        })
-                        .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>(), // TODO: try to make pipelined rendering work
-                );
+                {
+                    let _span = tracing::info_span!("bevy_add_plugins").entered();
+                    app.add_plugins(
+                        DefaultPlugins
+                            .set(WindowPlugin {
+                                primary_window: None,
+                                exit_condition: bevy::window::ExitCondition::DontExit,
+                                ..default()
+                            })
+                            .set(RenderPlugin {
+                                render_creation: RenderCreation::manual(
+                                    RenderDevice::from(device),
+                                    RenderQueue(Arc::new(WgpuWrapper::new(queue))),
+                                    RenderAdapterInfo(WgpuWrapper::new(adapter_info)),
+                                    RenderAdapter(Arc::new(WgpuWrapper::new(adapter))),
+                                    RenderInstance(Arc::new(WgpuWrapper::new(instance))),
+                                ),
+                                synchronous_pipeline_compilation: true,
+                                ..default()
+                            })
+                            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>(
+                            ), // TODO: try to make pipelined rendering work
+                    );
+                }
 
-                init_celestial_materials(&mut app);
+                {
+                    let _span = tracing::info_span!("init_celestial_materials").entered();
+                    init_celestial_materials(&mut app);
+                }
 
-                let size = Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
+                let render_target_handle = {
+                    let _span = tracing::info_span!("create_render_target_image").entered();
+                    let size = Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    };
+                    let mut render_image = Image::new_fill(
+                        size,
+                        TextureDimension::D2,
+                        &[0, 0, 0, 255],
+                        TextureFormat::Bgra8UnormSrgb,
+                        RenderAssetUsages::default(),
+                    );
+                    render_image.texture_descriptor.usage =
+                        TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
+                    app.world_mut()
+                        .resource_mut::<Assets<Image>>()
+                        .add(render_image)
                 };
-                let mut render_image = Image::new_fill(
-                    size,
-                    TextureDimension::D2,
-                    &[0, 0, 0, 255],
-                    TextureFormat::Bgra8UnormSrgb,
-                    RenderAssetUsages::default(),
-                );
-                render_image.texture_descriptor.usage =
-                    TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
-                let render_target_handle = app
-                    .world_mut()
-                    .resource_mut::<Assets<Image>>()
-                    .add(render_image);
 
                 let target_clone = render_target_handle.clone();
 
@@ -540,81 +557,104 @@ impl PlanetariumRenderer {
                 let initial_aspect = width as f32 / height as f32;
                 let initial_proj = initial_camera.projection_params(initial_aspect);
 
-                let horizon_material = CelestialLineMaterial {
-                    uniforms: CelestialLineUniforms {
-                        transform: Mat4::IDENTITY,
-                        projection: initial_proj.into(),
-                        color: Vec4::new(0.0, 0.85, 1.0, 0.85),
-                        minor_alpha: 1.0,
-                    },
+                let (horizon_mat_handle, altaz_mat_handle, eq_mat_handle) = {
+                    let _span = tracing::info_span!("init_line_materials").entered();
+                    let horizon_material = CelestialLineMaterial {
+                        uniforms: CelestialLineUniforms {
+                            transform: Mat4::IDENTITY,
+                            projection: initial_proj.into(),
+                            color: Vec4::new(0.0, 0.85, 1.0, 0.85),
+                            minor_alpha: 1.0,
+                        },
+                    };
+
+                    let altaz_material = CelestialLineMaterial {
+                        uniforms: CelestialLineUniforms {
+                            transform: Mat4::IDENTITY,
+                            projection: initial_proj.into(),
+                            color: Vec4::new(0.2, 0.55, 0.85, 0.40),
+                            minor_alpha: 1.0,
+                        },
+                    };
+
+                    let eq_material = CelestialLineMaterial {
+                        uniforms: CelestialLineUniforms {
+                            transform: Mat4::IDENTITY,
+                            projection: initial_proj.into(),
+                            color: Vec4::new(0.85, 0.50, 0.20, 0.30),
+                            minor_alpha: 1.0,
+                        },
+                    };
+
+                    let h = app
+                        .world_mut()
+                        .resource_mut::<Assets<CelestialLineMaterial>>()
+                        .add(horizon_material);
+
+                    let a = app
+                        .world_mut()
+                        .resource_mut::<Assets<CelestialLineMaterial>>()
+                        .add(altaz_material);
+
+                    let e = app
+                        .world_mut()
+                        .resource_mut::<Assets<CelestialLineMaterial>>()
+                        .add(eq_material);
+
+                    (h, a, e)
                 };
 
-                let altaz_material = CelestialLineMaterial {
-                    uniforms: CelestialLineUniforms {
-                        transform: Mat4::IDENTITY,
-                        projection: initial_proj.into(),
-                        color: Vec4::new(0.2, 0.55, 0.85, 0.40),
-                        minor_alpha: 1.0,
-                    },
+                let horizon_mesh_handle = {
+                    let _span = tracing::info_span!("create_horizon_mesh").entered();
+                    app.world_mut()
+                        .resource_mut::<Assets<Mesh>>()
+                        .add(create_horizon_mesh(initial_topo_to_cam))
                 };
 
-                let eq_material = CelestialLineMaterial {
-                    uniforms: CelestialLineUniforms {
-                        transform: Mat4::IDENTITY,
-                        projection: initial_proj.into(),
-                        color: Vec4::new(0.85, 0.50, 0.20, 0.30),
-                        minor_alpha: 1.0,
-                    },
+                let altaz_mesh_handle = {
+                    let _span = tracing::info_span!("create_altaz_grid_mesh").entered();
+                    app.world_mut()
+                        .resource_mut::<Assets<Mesh>>()
+                        .add(create_altaz_grid_mesh(initial_topo_to_cam))
                 };
 
-                let horizon_mat_handle = app
-                    .world_mut()
-                    .resource_mut::<Assets<CelestialLineMaterial>>()
-                    .add(horizon_material);
+                let eq_mesh_handle = {
+                    let _span = tracing::info_span!("create_equatorial_grid_mesh").entered();
+                    app.world_mut()
+                        .resource_mut::<Assets<Mesh>>()
+                        .add(create_equatorial_grid_mesh(initial_eq_to_cam))
+                };
 
-                let altaz_mat_handle = app
-                    .world_mut()
-                    .resource_mut::<Assets<CelestialLineMaterial>>()
-                    .add(altaz_material);
-
-                let eq_mat_handle = app
-                    .world_mut()
-                    .resource_mut::<Assets<CelestialLineMaterial>>()
-                    .add(eq_material);
-
-                let horizon_mesh_handle = app
-                    .world_mut()
-                    .resource_mut::<Assets<Mesh>>()
-                    .add(create_horizon_mesh(initial_topo_to_cam));
-
-                let altaz_mesh_handle = app
-                    .world_mut()
-                    .resource_mut::<Assets<Mesh>>()
-                    .add(create_altaz_grid_mesh(initial_topo_to_cam));
-
-                let eq_mesh_handle = app
-                    .world_mut()
-                    .resource_mut::<Assets<Mesh>>()
-                    .add(create_equatorial_grid_mesh(initial_eq_to_cam));
-
-                let star_catalog = stars::load_star_catalog();
-                let (star_mat_handle, star_mesh_handle) =
-                    if let Some((_header, star_records)) = star_catalog {
-                        let star_count = star_records.len();
+                let star_catalog = {
+                    let _span = tracing::info_span!("load_star_catalog_step").entered();
+                    stars::load_star_catalog()
+                };
+                let (star_mat_handle, star_mesh_handle) = if let Some((_header, star_records)) =
+                    star_catalog
+                {
+                    let star_count = star_records.len();
+                    let buffer_handle = {
+                        let _span =
+                            tracing::info_span!("create_star_shader_buffer", star_count).entered();
                         let raw_bytes: &[u8] = bytemuck::cast_slice(&star_records);
                         let storage_buffer =
                             ShaderBuffer::new(raw_bytes, RenderAssetUsages::RENDER_WORLD);
-                        let buffer_handle = app
-                            .world_mut()
+                        app.world_mut()
                             .resource_mut::<Assets<ShaderBuffer>>()
-                            .add(storage_buffer);
+                            .add(storage_buffer)
+                    };
 
+                    let mesh_handle = {
+                        let _span =
+                            tracing::info_span!("create_star_mesh_step", star_count).entered();
                         let star_mesh = stars::create_star_quad_mesh(star_count);
-                        let mesh_handle = app
-                            .world_mut()
+                        app.world_mut()
                             .resource_mut::<Assets<Mesh>>()
-                            .add(star_mesh);
+                            .add(star_mesh)
+                    };
 
+                    let mat_handle = {
+                        let _span = tracing::info_span!("create_star_material_step").entered();
                         let star_material = stars::CelestialStarMaterial {
                             uniforms: stars::CelestialStarUniforms {
                                 transform: glam::DMat4::from_mat3(initial_eq_to_cam).as_mat4(),
@@ -630,15 +670,15 @@ impl PlanetariumRenderer {
                             stars: buffer_handle,
                         };
 
-                        let mat_handle = app
-                            .world_mut()
+                        app.world_mut()
                             .resource_mut::<Assets<stars::CelestialStarMaterial>>()
-                            .add(star_material);
-
-                        (Some(mat_handle), Some(mesh_handle))
-                    } else {
-                        (None, None)
+                            .add(star_material)
                     };
+
+                    (Some(mat_handle), Some(mesh_handle))
+                } else {
+                    (None, None)
+                };
 
                 app.init_resource::<PendingCommands>();
                 app.init_resource::<CameraSyncState>();
@@ -664,55 +704,72 @@ impl PlanetariumRenderer {
                 let e_mesh = eq_mesh_handle.clone();
                 let s_mesh = star_mesh_handle.clone();
 
-                app.add_systems(Startup, move |mut commands: Commands| {
-                    commands.spawn((
-                        Camera3d::default(),
-                        Camera::default(),
-                        RenderTarget::Image(target_clone.clone().into()),
-                        PlanetariumCameraMarker,
-                        PlanetariumCamera::default(),
-                    ));
-
-                    commands.spawn((
-                        Mesh3d(h_mesh.clone()),
-                        MeshMaterial3d(h_mat.clone()),
-                        Transform::default(),
-                        NoFrustumCulling,
-                    ));
-
-                    commands.spawn((
-                        Mesh3d(a_mesh.clone()),
-                        MeshMaterial3d(a_mat.clone()),
-                        Transform::default(),
-                        NoFrustumCulling,
-                    ));
-
-                    commands.spawn((
-                        Mesh3d(e_mesh.clone()),
-                        MeshMaterial3d(e_mat.clone()),
-                        Transform::default(),
-                        NoFrustumCulling,
-                    ));
-
-                    if let (Some(s_mesh), Some(s_mat)) = (s_mesh.clone(), s_mat.clone()) {
+                {
+                    let _span = tracing::info_span!("add_startup_systems").entered();
+                    app.add_systems(Startup, move |mut commands: Commands| {
                         commands.spawn((
-                            Mesh3d(s_mesh),
-                            MeshMaterial3d(s_mat),
+                            Camera3d::default(),
+                            Camera::default(),
+                            RenderTarget::Image(target_clone.clone().into()),
+                            PlanetariumCameraMarker,
+                            PlanetariumCamera::default(),
+                        ));
+
+                        commands.spawn((
+                            Mesh3d(h_mesh.clone()),
+                            MeshMaterial3d(h_mat.clone()),
                             Transform::default(),
                             NoFrustumCulling,
                         ));
-                    }
-                });
+
+                        commands.spawn((
+                            Mesh3d(a_mesh.clone()),
+                            MeshMaterial3d(a_mat.clone()),
+                            Transform::default(),
+                            NoFrustumCulling,
+                        ));
+
+                        commands.spawn((
+                            Mesh3d(e_mesh.clone()),
+                            MeshMaterial3d(e_mat.clone()),
+                            Transform::default(),
+                            NoFrustumCulling,
+                        ));
+
+                        if let (Some(s_mesh), Some(s_mat)) = (s_mesh.clone(), s_mat.clone()) {
+                            commands.spawn((
+                                Mesh3d(s_mesh),
+                                MeshMaterial3d(s_mat),
+                                Transform::default(),
+                                NoFrustumCulling,
+                            ));
+                        }
+                    });
+                }
 
                 app.add_systems(Update, camera_movement_and_interpolation_system);
 
-                app.finish();
-                app.cleanup();
+                {
+                    let _span = tracing::info_span!("bevy_app_finish").entered();
+                    app.finish();
+                }
+                {
+                    let _span = tracing::info_span!("bevy_app_cleanup").entered();
+                    app.cleanup();
+                }
+                drop(init_span);
+
+                tracing::info!(
+                    "Bevy renderer initialized in {:.2}ms (thread spawn delay: {:.2}ms)",
+                    thread_start.elapsed().as_secs_f64() * 1000.0,
+                    (thread_start - spawn_instant).as_secs_f64() * 1000.0,
+                );
 
                 let mut last_view_size = None;
                 let mut frames_remaining = 0;
                 let mut current_width = width;
                 let mut current_height = height;
+                let mut is_first_frame = true;
 
                 while !bridge.inner.shutdown.load(Ordering::Acquire) {
                     let mut guard = bridge
@@ -748,35 +805,49 @@ impl PlanetariumRenderer {
                     let commands = std::mem::take(&mut guard.pending_commands);
                     drop(guard);
 
-                    let resized_size = process_viewport_commands(
-                        commands,
-                        &mut app,
-                        &mut current_width,
-                        &mut current_height,
-                        &render_target_handle,
-                        &mut frames_remaining,
-                    );
+                    let first_frame = is_first_frame;
+                    #[cfg(all(debug_assertions, feature = "tracy"))]
+                    let frame_span = tracy_client::non_continuous_frame!("Frame");
 
-                    app.update();
+                    let resized_size = {
+                        let _span = tracing::info_span!("process_viewport_commands").entered();
+                        process_viewport_commands(
+                            commands,
+                            &mut app,
+                            &mut current_width,
+                            &mut current_height,
+                            &render_target_handle,
+                            &mut frames_remaining,
+                        )
+                    };
+
+                    {
+                        let _span = tracing::info_span!("bevy_app_update").entered();
+                        app.update();
+                    }
 
                     let mut new_texture_view = None;
-                    if let Some(render_sub_app) = app.get_sub_app(bevy::render::RenderApp) {
-                        let render_world = render_sub_app.world();
-                        if let Some(render_assets) = render_world
-                            .get_resource::<bevy::render::render_asset::RenderAssets<
-                            bevy::render::texture::GpuImage,
-                        >>() {
-                            if let Some(gpu_image) = render_assets.get(&render_target_handle) {
-                                let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
-                                let current_size = (wgpu_texture.width(), wgpu_texture.height());
+                    {
+                        let _span = tracing::info_span!("extract_texture_view").entered();
+                        if let Some(render_sub_app) = app.get_sub_app(bevy::render::RenderApp) {
+                            let render_world = render_sub_app.world();
+                            if let Some(render_assets) = render_world
+                                .get_resource::<bevy::render::render_asset::RenderAssets<
+                                bevy::render::texture::GpuImage,
+                            >>() {
+                                if let Some(gpu_image) = render_assets.get(&render_target_handle) {
+                                    let wgpu_texture: &wgpu::Texture = &gpu_image.texture;
+                                    let current_size =
+                                        (wgpu_texture.width(), wgpu_texture.height());
 
-                                if current_size == (current_width, current_height)
-                                    && last_view_size != Some(current_size)
-                                {
-                                    let wgpu_view = wgpu_texture
-                                        .create_view(&wgpu::TextureViewDescriptor::default());
-                                    new_texture_view = Some(Arc::new(wgpu_view));
-                                    last_view_size = Some(current_size);
+                                    if current_size == (current_width, current_height)
+                                        && last_view_size != Some(current_size)
+                                    {
+                                        let wgpu_view = wgpu_texture
+                                            .create_view(&wgpu::TextureViewDescriptor::default());
+                                        new_texture_view = Some(Arc::new(wgpu_view));
+                                        last_view_size = Some(current_size);
+                                    }
                                 }
                             }
                         }
@@ -811,6 +882,14 @@ impl PlanetariumRenderer {
                         if is_interpolating || needs_frame_dirty {
                             guard.is_dirty = true;
                         }
+                    }
+
+                    if first_frame {
+                        is_first_frame = false;
+                        tracing::info!(
+                            "Bevy first frame rendered in {:.2}ms from thread start",
+                            thread_start.elapsed().as_secs_f64() * 1000.0
+                        );
                     }
 
                     bridge.notify_frame_ready();
