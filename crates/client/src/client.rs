@@ -52,8 +52,10 @@ impl DaemonAddress {
     }
 
     pub fn set_url(&mut self, new_url: String) {
-        self.url.clone_from(&new_url);
-        let _ = self.tx.send(new_url);
+        if self.url != new_url {
+            self.url.clone_from(&new_url);
+            let _ = self.tx.send(new_url);
+        }
     }
 }
 
@@ -108,6 +110,42 @@ pub fn init(cx: &mut App) {
     });
 }
 
+enum PumpExit {
+    AddressChanged,
+    Shutdown,
+    Disconnected(DisconnectReason),
+}
+
+enum DisconnectReason {
+    WatchdogTimeout,
+    PingSendFailed,
+    CommandSendFailed,
+    ClosedByPeer(String),
+    WebSocketError(String),
+    StreamClosedByServer,
+}
+
+impl std::fmt::Display for DisconnectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DisconnectReason::WatchdogTimeout => {
+                write!(f, "Watchdog timeout: no response/pong from daemon for 15s")
+            }
+            DisconnectReason::PingSendFailed => {
+                write!(f, "Failed to send WebSocket ping to daemon")
+            }
+            DisconnectReason::CommandSendFailed => {
+                write!(f, "Failed to send command over WebSocket")
+            }
+            DisconnectReason::ClosedByPeer(frame) => write!(f, "Daemon closed connection: {frame}"),
+            DisconnectReason::WebSocketError(err) => write!(f, "WebSocket error: {err}"),
+            DisconnectReason::StreamClosedByServer => {
+                write!(f, "WebSocket stream closed by server")
+            }
+        }
+    }
+}
+
 async fn run_connection_supervisor(
     mut address_rx: tokio::sync::watch::Receiver<String>,
     update_tx: UnboundedSender<ClientModelUpdate>,
@@ -117,6 +155,11 @@ async fn run_connection_supervisor(
     let mut current_state = DaemonState::default();
 
     loop {
+        if update_tx.is_closed() {
+            info!("Client UI channel closed; shutting down connection supervisor.");
+            return;
+        }
+
         let current_url = address_rx.borrow().clone();
         attempt += 1;
 
@@ -140,10 +183,18 @@ async fn run_connection_supervisor(
         let connect_result = tokio::select! {
             res = &mut connect_future => Some(res),
             () = tokio::time::sleep(Duration::from_secs(5)) => None,
-            _ = address_rx.changed() => {
+            res = address_rx.changed() => {
+                if res.is_err() {
+                    info!("Daemon address channel closed; client is shutting down. Exiting connection supervisor.");
+                    return;
+                }
                 info!("Daemon address changed during connection attempt. Retrying with new address...");
                 attempt = 0;
                 continue;
+            }
+            () = update_tx.closed() => {
+                info!("Client UI channel closed during connection attempt. Exiting connection supervisor.");
+                return;
             }
         };
 
@@ -154,7 +205,7 @@ async fn run_connection_supervisor(
                 current_state.connection = ConnectionState::Connected;
                 let _ = update_tx.send(ClientModelUpdate::State(current_state.clone()));
 
-                let disconnect_reason = run_message_pump(
+                let pump_exit = run_message_pump(
                     ws_stream,
                     &update_tx,
                     &mut current_state,
@@ -163,7 +214,20 @@ async fn run_connection_supervisor(
                 )
                 .await;
 
-                warn!("Daemon connection lost: {disconnect_reason}. Initiating reconnect...");
+                match pump_exit {
+                    PumpExit::Shutdown => {
+                        info!("Client is shutting down. Exiting connection supervisor.");
+                        return;
+                    }
+                    PumpExit::AddressChanged => {
+                        info!("Daemon address changed by user. Reconnecting immediately...");
+                        attempt = 0;
+                        continue;
+                    }
+                    PumpExit::Disconnected(reason) => {
+                        warn!("Daemon connection lost: {reason}. Initiating reconnect...");
+                    }
+                }
             }
             Some(Err(err)) => {
                 warn!("Failed to connect to daemon at {current_url}: {err}");
@@ -190,9 +254,17 @@ async fn run_connection_supervisor(
 
         tokio::select! {
             () = tokio::time::sleep(backoff) => {}
-            _ = address_rx.changed() => {
+            res = address_rx.changed() => {
+                if res.is_err() {
+                    info!("Daemon address channel closed; client is shutting down. Exiting connection supervisor.");
+                    return;
+                }
                 info!("Daemon address changed during backoff. Reconnecting immediately...");
                 attempt = 0;
+            }
+            () = update_tx.closed() => {
+                info!("Client UI channel closed during backoff. Exiting connection supervisor.");
+                return;
             }
         }
     }
@@ -206,7 +278,7 @@ async fn run_message_pump(
     current_state: &mut DaemonState,
     cmd_rx: &mut Receiver<ViewerMessage>,
     address_rx: &mut tokio::sync::watch::Receiver<String>,
-) -> String {
+) -> PumpExit {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
@@ -220,30 +292,44 @@ async fn run_message_pump(
 
     loop {
         tokio::select! {
-            _ = address_rx.changed() => {
-                return "Target daemon address changed by user".to_string();
+            res = address_rx.changed() => {
+                if res.is_err() {
+                    return PumpExit::Shutdown;
+                }
+                return PumpExit::AddressChanged;
             }
 
             _ = ping_interval.tick() => {
                 if last_activity.elapsed() > watchdog_timeout {
-                    return "Watchdog timeout: no response/pong from daemon for 15s".to_string();
+                    return PumpExit::Disconnected(DisconnectReason::WatchdogTimeout);
                 }
                 if ws_sender.send(Message::Ping(vec![].into())).await.is_err() {
-                    return "Failed to send WebSocket ping to daemon".to_string();
+                    return PumpExit::Disconnected(DisconnectReason::PingSendFailed);
                 }
             }
 
-            Some(cmd) = cmd_rx.recv() => {
-                match serde_json::to_string(&cmd) {
-                    Ok(json) => {
-                        if ws_sender.send(Message::Text(json.into())).await.is_err() {
-                            return "Failed to send command over WebSocket".to_string();
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(cmd) => {
+                        match serde_json::to_string(&cmd) {
+                            Ok(json) => {
+                                if ws_sender.send(Message::Text(json.into())).await.is_err() {
+                                    return PumpExit::Disconnected(DisconnectReason::CommandSendFailed);
+                                }
+                            }
+                            Err(err) => {
+                                error!("Failed to serialize ViewerMessage: {err}");
+                            }
                         }
                     }
-                    Err(err) => {
-                        error!("Failed to serialize ViewerMessage: {err}");
+                    None => {
+                        return PumpExit::Shutdown;
                     }
                 }
+            }
+
+            () = update_tx.closed() => {
+                return PumpExit::Shutdown;
             }
 
             msg = ws_receiver.next() => {
@@ -321,13 +407,13 @@ async fn run_message_pump(
                         let _ = ws_sender.send(Message::Pong(data)).await;
                     }
                     Some(Ok(Message::Close(frame))) => {
-                        return format!("Daemon closed connection: {frame:?}");
+                        return PumpExit::Disconnected(DisconnectReason::ClosedByPeer(format!("{frame:?}")));
                     }
                     Some(Err(err)) => {
-                        return format!("WebSocket error: {err}");
+                        return PumpExit::Disconnected(DisconnectReason::WebSocketError(err.to_string()));
                     }
                     None => {
-                        return "WebSocket stream closed by server".to_string();
+                        return PumpExit::Disconnected(DisconnectReason::StreamClosedByServer);
                     }
                     _ => {}
                 }
