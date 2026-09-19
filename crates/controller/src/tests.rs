@@ -1,9 +1,12 @@
-use protocol::{CameraSaveConfig, Frame, FrameType, SaveLocationConfig, ServerSaveConfig, ViewerSaveConfig, CaptureParams, DaemonStatus};
-use std::time::Duration;
-use tokio::sync::{mpsc, watch};
 use crate::{Controller, ControllerEvent, should_delete_from_camera, should_download};
 use gphoto::handle::CameraHandle;
 use gphoto::types::{CameraCommand, CameraFileRef};
+use protocol::{
+    CameraSaveConfig, CaptureParams, DaemonStatus, Frame, FrameType, SaveLocationConfig,
+    ServerSaveConfig, ViewerSaveConfig,
+};
+use std::time::Duration;
+use tokio::sync::{mpsc, watch};
 
 #[test]
 fn test_should_delete_from_camera() {
@@ -106,14 +109,23 @@ async fn test_capture_concurrency_gating() {
     };
 
     // First capture starts
-    controller_handle.start_capture(make_frame(1)).await.unwrap();
+    controller_handle
+        .start_capture(make_frame(1))
+        .await
+        .unwrap();
 
     // Wait for status to become Capturing
     let mut status_rx = controller_handle.status();
-    status_rx.wait_for(|s| *s == DaemonStatus::Capturing).await.unwrap();
+    status_rx
+        .wait_for(|s| *s == DaemonStatus::Capturing)
+        .await
+        .unwrap();
 
     // Second capture while first is in progress
-    controller_handle.start_capture(make_frame(2)).await.unwrap();
+    controller_handle
+        .start_capture(make_frame(2))
+        .await
+        .unwrap();
 
     // Should receive CaptureError for frame 2
     let mut got_error = false;
@@ -130,7 +142,10 @@ async fn test_capture_concurrency_gating() {
 
     // Abort should reset status to Idle
     controller_handle.abort().await.unwrap();
-    status_rx.wait_for(|s| *s == DaemonStatus::Idle).await.unwrap();
+    status_rx
+        .wait_for(|s| *s == DaemonStatus::Idle)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -139,7 +154,8 @@ async fn test_capture_deletion_flow_when_configured() {
     let (_status_tx, status_rx) = watch::channel(protocol::CameraStatus::Ready);
     let camera_handle = CameraHandle::new(cmd_tx, status_rx);
 
-    let downloaded_files = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let downloaded_files =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let downloaded_clone = downloaded_files.clone();
     let deleted_files = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let deleted_clone = deleted_files.clone();
@@ -153,11 +169,19 @@ async fn test_capture_deletion_flow_when_configured() {
                         folder: "/store_0001/DCIM".into(),
                     }));
                 }
-                CameraCommand::Download { folder, filename, reply } => {
+                CameraCommand::Download {
+                    folder,
+                    filename,
+                    reply,
+                } => {
                     downloaded_clone.lock().unwrap().push((folder, filename));
                     let _ = reply.send(Ok(vec![1, 2, 3, 4]));
                 }
-                CameraCommand::DeleteFile { folder, filename, reply } => {
+                CameraCommand::DeleteFile {
+                    folder,
+                    filename,
+                    reply,
+                } => {
                     deleted_clone.lock().unwrap().push((folder, filename));
                     let _ = reply.send(Ok(()));
                 }
@@ -202,11 +226,17 @@ async fn test_capture_deletion_flow_when_configured() {
 
     // Verify Download was called on the camera driver
     let downloaded = downloaded_files.lock().unwrap().clone();
-    assert_eq!(downloaded, vec![("/store_0001/DCIM".to_string(), "IMG_0001.CR2".to_string())]);
+    assert_eq!(
+        downloaded,
+        vec![("/store_0001/DCIM".to_string(), "IMG_0001.CR2".to_string())]
+    );
 
     // Verify DeleteFile was called on the camera driver
     let deleted = deleted_files.lock().unwrap().clone();
-    assert_eq!(deleted, vec![("/store_0001/DCIM".to_string(), "IMG_0001.CR2".to_string())]);
+    assert_eq!(
+        deleted,
+        vec![("/store_0001/DCIM".to_string(), "IMG_0001.CR2".to_string())]
+    );
 }
 
 #[tokio::test]
@@ -215,7 +245,8 @@ async fn test_capture_preservation_flow_when_configured() {
     let (_status_tx, status_rx) = watch::channel(protocol::CameraStatus::Ready);
     let camera_handle = CameraHandle::new(cmd_tx, status_rx);
 
-    let downloaded_files = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let downloaded_files =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let downloaded_clone = downloaded_files.clone();
     let deleted_files = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let deleted_clone = deleted_files.clone();
@@ -229,11 +260,19 @@ async fn test_capture_preservation_flow_when_configured() {
                         folder: "/store_0001/DCIM".into(),
                     }));
                 }
-                CameraCommand::Download { folder, filename, reply } => {
+                CameraCommand::Download {
+                    folder,
+                    filename,
+                    reply,
+                } => {
                     downloaded_clone.lock().unwrap().push((folder, filename));
                     let _ = reply.send(Ok(vec![5, 6, 7, 8]));
                 }
-                CameraCommand::DeleteFile { folder, filename, reply } => {
+                CameraCommand::DeleteFile {
+                    folder,
+                    filename,
+                    reply,
+                } => {
                     deleted_clone.lock().unwrap().push((folder, filename));
                     let _ = reply.send(Ok(()));
                 }
@@ -278,11 +317,18 @@ async fn test_capture_preservation_flow_when_configured() {
 
     // Verify Download was called
     let downloaded = downloaded_files.lock().unwrap().clone();
-    assert_eq!(downloaded, vec![("/store_0001/DCIM".to_string(), "IMG_0002.CR2".to_string())]);
+    assert_eq!(
+        downloaded,
+        vec![("/store_0001/DCIM".to_string(), "IMG_0002.CR2".to_string())]
+    );
 
     // Verify DeleteFile was NOT called on the camera driver
     let deleted = deleted_files.lock().unwrap().clone();
-    assert!(deleted.is_empty(), "Expected no files to be deleted from camera, but got: {:?}", deleted);
+    assert!(
+        deleted.is_empty(),
+        "Expected no files to be deleted from camera, but got: {:?}",
+        deleted
+    );
 }
 
 #[tokio::test]
@@ -291,7 +337,8 @@ async fn test_capture_camera_only_skips_download() {
     let (_status_tx, status_rx) = watch::channel(protocol::CameraStatus::Ready);
     let camera_handle = CameraHandle::new(cmd_tx, status_rx);
 
-    let downloaded_files = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let downloaded_files =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let downloaded_clone = downloaded_files.clone();
 
     tokio::spawn(async move {
@@ -303,7 +350,11 @@ async fn test_capture_camera_only_skips_download() {
                         folder: "/store_0001/DCIM".into(),
                     }));
                 }
-                CameraCommand::Download { folder, filename, reply } => {
+                CameraCommand::Download {
+                    folder,
+                    filename,
+                    reply,
+                } => {
                     downloaded_clone.lock().unwrap().push((folder, filename));
                     let _ = reply.send(Ok(vec![9, 9, 9]));
                 }
@@ -349,5 +400,9 @@ async fn test_capture_camera_only_skips_download() {
 
     // Verify Download was NOT called on the camera driver
     let downloaded = downloaded_files.lock().unwrap().clone();
-    assert!(downloaded.is_empty(), "Expected no downloads for camera-only save config, but got: {:?}", downloaded);
+    assert!(
+        downloaded.is_empty(),
+        "Expected no downloads for camera-only save config, but got: {:?}",
+        downloaded
+    );
 }
