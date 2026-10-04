@@ -2,24 +2,29 @@ use std::{fs::File, path::PathBuf};
 
 use bevy::{
     asset::RenderAssetUsages,
-    mesh::{Indices, PrimitiveTopology},
-    pbr::{MaterialPipeline, MaterialPipelineKey},
+    ecs::query::QueryItem,
+    mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
     prelude::*,
     render::{
-        mesh::MeshVertexBufferLayoutRef,
+        extract_component::ExtractComponent,
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+            BindGroupLayoutDescriptor, BindGroupLayoutEntries, RenderPipelineDescriptor,
+            ShaderStages, ShaderType, SpecializedMeshPipeline, SpecializedMeshPipelineError,
+            binding_types::{storage_buffer_read_only_sized, uniform_buffer},
         },
         storage::ShaderBuffer,
+        sync_component::SyncComponent,
     },
-    shader::ShaderRef,
+    shader::Shader,
 };
 use celestial::catalog::{StarCatalogHeader, StarRecord, read_stars_from_zst};
 use tracing::{error, info, warn};
 
-use crate::material::CelestialProjectionUniforms;
+use crate::material::{
+    CelestialPipelineId, CelestialPipelineKey, CelestialProjectionUniforms, pipeline_descriptor,
+};
 
-#[derive(Clone, Copy, ShaderType, Debug)]
+#[derive(Clone, Copy, ShaderType, Debug, Component)]
 pub struct CelestialStarUniforms {
     pub transform: Mat4,
     pub projection: CelestialProjectionUniforms,
@@ -32,38 +37,81 @@ pub struct CelestialStarUniforms {
     pub padding: f32,
 }
 
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+#[derive(Component, Debug, Clone)]
 pub struct CelestialStarMaterial {
-    #[uniform(0)]
     pub uniforms: CelestialStarUniforms,
-    #[storage(1, read_only)]
     pub stars: Handle<ShaderBuffer>,
 }
 
-impl Material for CelestialStarMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "embedded://planetarium/shaders/celestial_star.wgsl".into()
-    }
+#[derive(Component, Clone, Copy, Debug)]
+pub struct CelestialStarDraw {
+    pub mesh: AssetId<Mesh>,
+    pub stars: AssetId<ShaderBuffer>,
+}
 
-    fn fragment_shader() -> ShaderRef {
-        "embedded://planetarium/shaders/celestial_star.wgsl".into()
-    }
+impl SyncComponent for CelestialStarMaterial {
+    type Target = (
+        CelestialStarUniforms,
+        CelestialStarDraw,
+        CelestialPipelineId,
+    );
+}
 
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
+impl ExtractComponent for CelestialStarMaterial {
+    type QueryData = (&'static Self, &'static Mesh3d);
+    type QueryFilter = ();
+    type Out = (CelestialStarUniforms, CelestialStarDraw);
+
+    fn extract_component(
+        (material, mesh): QueryItem<'_, '_, Self::QueryData>,
+    ) -> Option<Self::Out> {
+        Some((
+            material.uniforms,
+            CelestialStarDraw {
+                mesh: mesh.id(),
+                stars: material.stars.id(),
+            },
+        ))
     }
+}
+
+#[derive(Resource)]
+pub struct CelestialStarPipeline {
+    pub layout: BindGroupLayoutDescriptor,
+    shader: Handle<Shader>,
+}
+
+impl CelestialStarPipeline {
+    pub fn new(shader: Handle<Shader>) -> Self {
+        let layout = BindGroupLayoutDescriptor::new(
+            "celestial_star_bind_group_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::VERTEX_FRAGMENT,
+                (
+                    uniform_buffer::<CelestialStarUniforms>(true),
+                    storage_buffer_read_only_sized(false, None),
+                ),
+            ),
+        );
+        Self { layout, shader }
+    }
+}
+
+impl SpecializedMeshPipeline for CelestialStarPipeline {
+    type Key = CelestialPipelineKey;
 
     fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
+        &self,
+        key: Self::Key,
         layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
+    ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
+        let mut descriptor =
+            pipeline_descriptor("celestial_star_pipeline", &self.layout, &self.shader, key);
         let vertex_layout = layout
             .0
             .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?;
         descriptor.vertex.buffers = vec![vertex_layout];
-        Ok(())
+        Ok(descriptor)
     }
 }
 

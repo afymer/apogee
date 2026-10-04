@@ -1,17 +1,44 @@
+//! This is a replacement for the painfully slow bevy_pbr crate
+
+use std::ops::Range;
+
 use bevy::{
     asset::embedded_asset,
-    pbr::{MaterialPipeline, MaterialPipelineKey},
+    core_pipeline::{Core3d, Core3dSystems, core_3d::main_transparent_pass_3d},
+    ecs::query::QueryItem,
+    mesh::MeshVertexBufferLayoutRef,
     prelude::*,
     render::{
-        mesh::MeshVertexBufferLayoutRef,
-        render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+        Render, RenderApp, RenderStartup, RenderSystems,
+        extract_component::{
+            ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
+            UniformComponentPlugin,
         },
+        mesh::{RenderMesh, RenderMeshBufferInfo, allocator::MeshAllocator},
+        render_asset::RenderAssets,
+        render_resource::{
+            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+            BlendState, Buffer, BufferSlice, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+            FragmentState, IndexFormat, MultisampleState, PipelineCache, PrimitiveState,
+            PrimitiveTopology, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
+            ShaderStages, ShaderType, SpecializedMeshPipeline, SpecializedMeshPipelineError,
+            SpecializedMeshPipelines, TextureFormat, VertexState, binding_types::uniform_buffer,
+        },
+        renderer::{RenderContext, ViewQuery},
+        storage::GpuShaderBuffer,
+        sync_component::SyncComponent,
+        view::{Msaa, ViewTarget},
     },
-    shader::{ShaderRef, load_shader_library},
+    shader::{Shader, load_shader_library},
 };
+use tracing::error;
 
-use crate::camera::ProjectionParams;
+use crate::{
+    camera::ProjectionParams,
+    stars::{
+        CelestialStarDraw, CelestialStarMaterial, CelestialStarPipeline, CelestialStarUniforms,
+    },
+};
 
 #[derive(Clone, Copy, ShaderType, Debug)]
 pub struct CelestialProjectionUniforms {
@@ -21,7 +48,7 @@ pub struct CelestialProjectionUniforms {
     pub scale_factor: f32,
 }
 
-#[derive(Clone, Copy, ShaderType, Debug)]
+#[derive(Clone, Copy, ShaderType, Debug, Component)]
 pub struct CelestialLineUniforms {
     pub transform: Mat4,
     pub projection: CelestialProjectionUniforms,
@@ -29,11 +56,18 @@ pub struct CelestialLineUniforms {
     pub minor_alpha: f32,
 }
 
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+#[derive(Component, Debug, Clone)]
 pub struct CelestialLineMaterial {
-    #[uniform(0)]
     pub uniforms: CelestialLineUniforms,
 }
+
+#[derive(Component, Clone, Copy, Debug)]
+pub struct CelestialLineDraw {
+    pub mesh: AssetId<Mesh>,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+pub struct CelestialPipelineId(pub CachedRenderPipelineId);
 
 impl From<ProjectionParams> for CelestialProjectionUniforms {
     fn from(projection: ProjectionParams) -> Self {
@@ -46,36 +80,94 @@ impl From<ProjectionParams> for CelestialProjectionUniforms {
     }
 }
 
-impl Material for CelestialLineMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "embedded://planetarium/shaders/celestial_line.wgsl".into()
-    }
+impl SyncComponent for CelestialLineMaterial {
+    type Target = (
+        CelestialLineUniforms,
+        CelestialLineDraw,
+        CelestialPipelineId,
+    );
+}
 
-    fn fragment_shader() -> ShaderRef {
-        "embedded://planetarium/shaders/celestial_line.wgsl".into()
-    }
+impl ExtractComponent for CelestialLineMaterial {
+    type QueryData = (&'static Self, &'static Mesh3d);
+    type QueryFilter = ();
+    type Out = (CelestialLineUniforms, CelestialLineDraw);
 
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
+    fn extract_component(
+        (material, mesh): QueryItem<'_, '_, Self::QueryData>,
+    ) -> Option<Self::Out> {
+        Some((material.uniforms, CelestialLineDraw { mesh: mesh.id() }))
     }
+}
+
+/// Everything a pipeline variant depends on besides the mesh vertex layout
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CelestialPipelineKey {
+    pub format: TextureFormat,
+    pub samples: u32,
+    pub topology: PrimitiveTopology,
+}
+
+pub fn pipeline_descriptor(
+    label: &'static str,
+    layout: &BindGroupLayoutDescriptor,
+    shader: &Handle<Shader>,
+    key: CelestialPipelineKey,
+) -> RenderPipelineDescriptor {
+    RenderPipelineDescriptor {
+        label: Some(label.into()),
+        layout: vec![layout.clone()],
+        vertex: VertexState {
+            shader: shader.clone(),
+            entry_point: Some("vertex".into()),
+            ..default()
+        },
+        fragment: Some(FragmentState {
+            shader: shader.clone(),
+            entry_point: Some("fragment".into()),
+            targets: vec![Some(ColorTargetState {
+                format: key.format,
+                blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            })],
+            ..default()
+        }),
+        primitive: PrimitiveState {
+            topology: key.topology,
+            ..default()
+        },
+        multisample: MultisampleState {
+            count: key.samples,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        ..default()
+    }
+}
+
+#[derive(Resource)]
+struct CelestialLinePipeline {
+    layout: BindGroupLayoutDescriptor,
+    shader: Handle<Shader>,
+}
+
+impl SpecializedMeshPipeline for CelestialLinePipeline {
+    type Key = CelestialPipelineKey;
 
     fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
+        &self,
+        key: Self::Key,
         layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
+    ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
+        let mut descriptor =
+            pipeline_descriptor("celestial_line_pipeline", &self.layout, &self.shader, key);
         let mut vertex_attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
         if layout.0.contains(crate::grids::ATTRIBUTE_LINE_TIER) {
             vertex_attributes.push(crate::grids::ATTRIBUTE_LINE_TIER.at_shader_location(1));
-            descriptor
-                .vertex
-                .shader_defs
-                .push("VERTEX_LINE_TIER".into());
         }
         let vertex_layout = layout.0.get_layout(&vertex_attributes)?;
         descriptor.vertex.buffers = vec![vertex_layout];
-        Ok(())
+        Ok(descriptor)
     }
 }
 
@@ -83,6 +175,273 @@ pub fn init_celestial_materials(app: &mut App) {
     load_shader_library!(app, "shaders/celestial_projection.wgsl");
     embedded_asset!(app, "shaders/celestial_line.wgsl");
     embedded_asset!(app, "shaders/celestial_star.wgsl");
-    app.add_plugins(MaterialPlugin::<CelestialLineMaterial>::default());
-    app.add_plugins(MaterialPlugin::<crate::stars::CelestialStarMaterial>::default());
+
+    app.add_plugins((
+        ExtractComponentPlugin::<CelestialLineMaterial>::default(),
+        UniformComponentPlugin::<CelestialLineUniforms>::default(),
+        ExtractComponentPlugin::<CelestialStarMaterial>::default(),
+        UniformComponentPlugin::<CelestialStarUniforms>::default(),
+    ));
+
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    render_app
+        .init_resource::<SpecializedMeshPipelines<CelestialLinePipeline>>()
+        .init_resource::<SpecializedMeshPipelines<CelestialStarPipeline>>()
+        .add_systems(RenderStartup, init_celestial_pipelines)
+        .add_systems(
+            Render,
+            queue_celestial_pipelines.in_set(RenderSystems::Queue),
+        )
+        .add_systems(
+            Core3d,
+            draw_celestial
+                .in_set(Core3dSystems::MainPass)
+                .after(main_transparent_pass_3d),
+        );
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn init_celestial_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let line_layout = BindGroupLayoutDescriptor::new(
+        "celestial_line_bind_group_layout",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::VERTEX_FRAGMENT,
+            (uniform_buffer::<CelestialLineUniforms>(true),),
+        ),
+    );
+    commands.insert_resource(CelestialLinePipeline {
+        layout: line_layout,
+        shader: asset_server.load("embedded://planetarium/shaders/celestial_line.wgsl"),
+    });
+    commands.insert_resource(CelestialStarPipeline::new(
+        asset_server.load("embedded://planetarium/shaders/celestial_star.wgsl"),
+    ));
+}
+
+fn specialize_pipeline<S: SpecializedMeshPipeline<Key = CelestialPipelineKey>>(
+    cache: &PipelineCache,
+    specializer: &S,
+    pipelines: &mut SpecializedMeshPipelines<S>,
+    meshes: &RenderAssets<RenderMesh>,
+    mesh: AssetId<Mesh>,
+    target: &ViewTarget,
+    msaa: Msaa,
+) -> Option<CelestialPipelineId> {
+    let render_mesh = meshes.get(mesh)?;
+    let key = CelestialPipelineKey {
+        format: target.main_texture_format(),
+        samples: msaa.samples(),
+        topology: render_mesh.primitive_topology(),
+    };
+    match pipelines.specialize(cache, specializer, key, &render_mesh.layout) {
+        Ok(id) => Some(CelestialPipelineId(id)),
+        Err(err) => {
+            error!("Failed to specialize celestial pipeline: {err}");
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+fn queue_celestial_pipelines(
+    mut commands: Commands,
+    cache: Res<PipelineCache>,
+    line_pipeline: Res<CelestialLinePipeline>,
+    star_pipeline: Res<CelestialStarPipeline>,
+    mut line_pipelines: ResMut<SpecializedMeshPipelines<CelestialLinePipeline>>,
+    mut star_pipelines: ResMut<SpecializedMeshPipelines<CelestialStarPipeline>>,
+    meshes: Res<RenderAssets<RenderMesh>>,
+    views: Query<(&ViewTarget, &Msaa)>,
+    lines: Query<(Entity, &CelestialLineDraw)>,
+    stars: Query<(Entity, &CelestialStarDraw)>,
+) {
+    for (target, msaa) in &views {
+        for (entity, draw) in &lines {
+            if let Some(id) = specialize_pipeline(
+                &cache,
+                &*line_pipeline,
+                &mut line_pipelines,
+                &meshes,
+                draw.mesh,
+                target,
+                *msaa,
+            ) {
+                commands.entity(entity).insert(id);
+            }
+        }
+        for (entity, draw) in &stars {
+            if let Some(id) = specialize_pipeline(
+                &cache,
+                &*star_pipeline,
+                &mut star_pipelines,
+                &meshes,
+                draw.mesh,
+                target,
+                *msaa,
+            ) {
+                commands.entity(entity).insert(id);
+            }
+        }
+    }
+}
+
+enum Geometry<'a> {
+    Indexed {
+        buffer: &'a Buffer,
+        format: IndexFormat,
+        range: Range<u32>,
+    },
+    Plain {
+        vertex_count: u32,
+    },
+}
+
+struct DrawItem<'a> {
+    pipeline: &'a RenderPipeline,
+    bind_group: BindGroup,
+    uniform_offset: u32,
+    vertex_buffer: BufferSlice<'a>,
+    geometry: Geometry<'a>,
+}
+
+/// Locates a mesh's GPU buffers.
+///
+/// The vertex buffer is bound at the mesh's byte offset inside its slab and
+/// draws use a base vertex of zero, so `@builtin(vertex_index)` starts at 0 in
+/// the shaders regardless of where the allocator placed the mesh.
+fn locate_mesh<'a>(
+    mesh: AssetId<Mesh>,
+    meshes: &RenderAssets<RenderMesh>,
+    allocator: &'a MeshAllocator,
+) -> Option<(BufferSlice<'a>, Geometry<'a>)> {
+    let render_mesh = meshes.get(mesh)?;
+    let vertex_slice = allocator.mesh_vertex_slice(&mesh)?;
+    let stride = render_mesh.layout.0.layout().array_stride;
+    let vertex_buffer = vertex_slice
+        .buffer
+        .slice(u64::from(vertex_slice.range.start) * stride..);
+
+    let geometry = match &render_mesh.buffer_info {
+        RenderMeshBufferInfo::Indexed { index_format, .. } => {
+            let index_slice = allocator.mesh_index_slice(&mesh)?;
+            Geometry::Indexed {
+                buffer: index_slice.buffer,
+                format: *index_format,
+                range: index_slice.range,
+            }
+        }
+        RenderMeshBufferInfo::NonIndexed => Geometry::Plain {
+            vertex_count: render_mesh.vertex_count,
+        },
+    };
+    Some((vertex_buffer, geometry))
+}
+
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+fn draw_celestial(
+    view: ViewQuery<&ViewTarget>,
+    pipeline_cache: Res<PipelineCache>,
+    line_pipeline: Res<CelestialLinePipeline>,
+    star_pipeline: Res<CelestialStarPipeline>,
+    meshes: Res<RenderAssets<RenderMesh>>,
+    allocator: Res<MeshAllocator>,
+    shader_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+    line_uniforms: Res<ComponentUniforms<CelestialLineUniforms>>,
+    star_uniforms: Res<ComponentUniforms<CelestialStarUniforms>>,
+    lines: Query<(
+        &CelestialLineDraw,
+        &DynamicUniformIndex<CelestialLineUniforms>,
+        &CelestialPipelineId,
+    )>,
+    stars: Query<(
+        &CelestialStarDraw,
+        &DynamicUniformIndex<CelestialStarUniforms>,
+        &CelestialPipelineId,
+    )>,
+    mut ctx: RenderContext,
+) {
+    let target = view.into_inner();
+    let mut items: Vec<DrawItem> = Vec::new();
+
+    if let Some(binding) = line_uniforms.binding() {
+        let bind_group = ctx.render_device().create_bind_group(
+            "celestial_line_bind_group",
+            &pipeline_cache.get_bind_group_layout(&line_pipeline.layout),
+            &BindGroupEntries::sequential((binding,)),
+        );
+        for (draw, uniform_index, pipeline_id) in &lines {
+            let (Some(pipeline), Some((vertex_buffer, geometry))) = (
+                pipeline_cache.get_render_pipeline(pipeline_id.0),
+                locate_mesh(draw.mesh, &meshes, &allocator),
+            ) else {
+                continue;
+            };
+            items.push(DrawItem {
+                pipeline,
+                bind_group: bind_group.clone(),
+                uniform_offset: uniform_index.index(),
+                vertex_buffer,
+                geometry,
+            });
+        }
+    }
+
+    if let Some(binding) = star_uniforms.binding() {
+        for (draw, uniform_index, pipeline_id) in &stars {
+            let (Some(pipeline), Some((vertex_buffer, geometry)), Some(stars_buffer)) = (
+                pipeline_cache.get_render_pipeline(pipeline_id.0),
+                locate_mesh(draw.mesh, &meshes, &allocator),
+                shader_buffers.get(draw.stars),
+            ) else {
+                continue;
+            };
+            let bind_group = ctx.render_device().create_bind_group(
+                "celestial_star_bind_group",
+                &pipeline_cache.get_bind_group_layout(&star_pipeline.layout),
+                &BindGroupEntries::sequential((
+                    binding.clone(),
+                    stars_buffer.buffer.as_entire_binding(),
+                )),
+            );
+            items.push(DrawItem {
+                pipeline,
+                bind_group,
+                uniform_offset: uniform_index.index(),
+                vertex_buffer,
+                geometry,
+            });
+        }
+    }
+
+    if items.is_empty() {
+        return;
+    }
+
+    let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("celestial_pass"),
+        color_attachments: &[Some(target.get_color_attachment())],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+
+    for item in &items {
+        pass.set_render_pipeline(item.pipeline);
+        pass.set_bind_group(0, &item.bind_group, &[item.uniform_offset]);
+        pass.set_vertex_buffer(0, item.vertex_buffer.clone());
+        match &item.geometry {
+            Geometry::Indexed {
+                buffer,
+                format,
+                range,
+            } => {
+                pass.set_index_buffer(buffer.slice(..), *format);
+                pass.draw_indexed(range.clone(), 0, 0..1);
+            }
+            Geometry::Plain { vertex_count } => pass.draw(0..*vertex_count, 0..1),
+        }
+    }
 }

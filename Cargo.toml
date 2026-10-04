@@ -24,22 +24,22 @@ default-members = ["crates/apogee"]
 edition = "2024"
 
 [workspace.dependencies]
-thiserror = "2.0.20"
-futures = "0.3.34"
-tracing = "0.1.44"
-serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0"
+futures = "0.3"
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 anyhow = "1.0"
-wgpu = "29.0.4"
+wgpu = "29.0"
 bytemuck = { version = "1.25", features = ["derive"] }
-hifitime = "4.3.1"
-rawloader = "0.37.2"
+hifitime = "4.3"
+rawloader = "0.37"
 glam = { version = "0.32", features = ["bytemuck"] }
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "registry"] }
-tracing-tracy = "0.11.4"
-tracy-client = "0.18.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-tracy = "0.11"
+tracy-client = "0.18"
 zstd = "0.13"
 indicatif = "0.17"
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
@@ -48,17 +48,14 @@ ui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing
 theme = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 assets = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 refineable = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
-bevy = { version = "0.19.1", default-features = false, features = [
+bevy = { version = "0.19", default-features = false, features = [
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_asset",
     "bevy_color",
-    "bevy_pbr",
+    "bevy_material",
     "multi_threaded",
     "zstd_rust",
-    "tonemapping_luts",
-    "png",
-    "jpeg",
 ] }
 
 [workspace.lints.clippy]
@@ -102,17 +99,14 @@ match_same_arms = "allow"
 manual_clamp = "allow"
 approx_constant = "allow"
 
-# As recommended by the Bevy docs
-# Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 0
-debug = 1
-split-debuginfo = "off"
+debug = true
+split-debuginfo = "unpacked"
 
-# Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
 opt-level = 3
-debug = 0
+debug = false
 
 [patch."https://github.com/zed-industries/zed"]
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", version = "0.2.2" }

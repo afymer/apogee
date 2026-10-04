@@ -17,8 +17,8 @@ struct StarRecord {
     packed_props: u32,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> uniforms: CelestialStarUniforms;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> stars: array<StarRecord>;
+@group(0) @binding(0) var<uniform> uniforms: CelestialStarUniforms;
+@group(0) @binding(1) var<storage, read> stars: array<StarRecord>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,

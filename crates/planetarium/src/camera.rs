@@ -174,10 +174,26 @@ impl PlanetariumCamera {
         self.pitch_vel = 0.0;
     }
 
-    pub fn pan(&mut self, dx: f64, dy: f64) {
-        let sensitivity = (self.fov_y / PI).max(1e-7) * 0.003;
-        self.target_yaw = (self.target_yaw - dx * sensitivity).rem_euclid(TAU);
-        self.target_pitch = (self.target_pitch + dy * sensitivity).clamp(-FRAC_PI_2, FRAC_PI_2);
+    pub fn pan(&mut self, dx: f64, dy: f64, viewport_height: f64) {
+        let proj = self.projection(1.0);
+        let scale = proj.scale_factor();
+        let h = viewport_height.max(1.0);
+        let sensitivity = 2.0 * scale / h;
+
+        let delta_pitch = dy * sensitivity;
+        self.pitch = (self.pitch + delta_pitch).clamp(-FRAC_PI_2, FRAC_PI_2);
+        self.target_pitch = self.pitch;
+
+        let min_cos = (self.fov_y * 0.5).sin().max(1e-4);
+        let cos_pitch = self.pitch.cos().abs().max(min_cos);
+
+        let sign = match self.view_mode {
+            ViewMode::Horizontal => -1.0,
+            ViewMode::Equatorial => 1.0,
+        };
+        let delta_yaw = sign * dx * (sensitivity / cos_pitch);
+        self.yaw = (self.yaw + delta_yaw).rem_euclid(TAU);
+        self.target_yaw = self.yaw;
     }
 
     pub fn zoom(&mut self, delta: f64) {

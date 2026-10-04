@@ -15,7 +15,8 @@ use std::{
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{RenderTarget, visibility::NoFrustumCulling},
+    camera::RenderTarget,
+    core_pipeline::tonemapping::Tonemapping,
     prelude::*,
     render::{
         RenderPlugin,
@@ -178,13 +179,13 @@ impl BevyBridge {
 
 #[derive(Resource, Clone)]
 struct CelestialHandles {
-    horizon_material: Handle<CelestialLineMaterial>,
-    altaz_material: Handle<CelestialLineMaterial>,
-    eq_material: Handle<CelestialLineMaterial>,
+    horizon_entity: Entity,
+    altaz_entity: Entity,
+    eq_entity: Entity,
     horizon_mesh: Handle<Mesh>,
     altaz_mesh: Handle<Mesh>,
     eq_mesh: Handle<Mesh>,
-    star_material: Option<Handle<stars::CelestialStarMaterial>>,
+    star_entity: Option<Entity>,
 }
 
 #[derive(Resource, Clone, Copy)]
@@ -234,8 +235,8 @@ fn camera_movement_and_interpolation_system(
     mut camera_sync: ResMut<CameraSyncState>,
     dims: Res<ViewportDimensions>,
     handles: Res<CelestialHandles>,
-    mut materials: ResMut<Assets<CelestialLineMaterial>>,
-    mut star_materials: ResMut<Assets<stars::CelestialStarMaterial>>,
+    mut line_materials: Query<&mut CelestialLineMaterial>,
+    mut star_materials: Query<&mut stars::CelestialStarMaterial>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut grid_state: Local<GridMeshState>,
     mut is_initialized: Local<bool>,
@@ -248,7 +249,7 @@ fn camera_movement_and_interpolation_system(
     for cmd in pending_commands.0.drain(..) {
         match cmd {
             ViewportCommand::Pan { delta_x, delta_y } => {
-                camera.pan(delta_x, delta_y);
+                camera.pan(delta_x, delta_y, dims.height as f64);
                 moved = true;
             }
             ViewportCommand::Zoom { delta } => {
@@ -299,9 +300,16 @@ fn camera_movement_and_interpolation_system(
 
         let is_zoomed_in = camera.fov_y < std::f64::consts::FRAC_PI_3;
         let zoom_ratio_diff = (camera.fov_y - grid_state.fov_y).abs() / grid_state.fov_y.max(1e-8);
+        let mut diff_yaw = (camera.yaw - grid_state.yaw)
+            .abs()
+            .rem_euclid(std::f64::consts::TAU);
+        if diff_yaw > std::f64::consts::PI {
+            diff_yaw = std::f64::consts::TAU - diff_yaw;
+        }
+        let effective_yaw_diff = diff_yaw * camera.pitch.cos().abs();
         let moved_significantly = is_zoomed_in
             && (zoom_ratio_diff > 0.15
-                || (camera.yaw - grid_state.yaw).abs() > camera.fov_y * 0.1
+                || effective_yaw_diff > camera.fov_y * 0.1
                 || (camera.pitch - grid_state.pitch).abs() > camera.fov_y * 0.1);
 
         let needs_rebuild = grid_state.level != Some(grid_level)
@@ -381,24 +389,24 @@ fn camera_movement_and_interpolation_system(
         let delta_rot = camera.camera_rotation_matrix() * grid_state.mesh_rotation.transpose();
         let delta_transform = glam::DMat4::from_mat3(delta_rot).as_mat4();
 
-        if let Some(mut mat) = materials.get_mut(&handles.horizon_material) {
+        if let Ok(mut mat) = line_materials.get_mut(handles.horizon_entity) {
             mat.uniforms.transform = delta_transform;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = 1.0;
         }
-        if let Some(mut mat) = materials.get_mut(&handles.altaz_material) {
+        if let Ok(mut mat) = line_materials.get_mut(handles.altaz_entity) {
             mat.uniforms.transform = delta_transform;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = minor_alpha;
         }
-        if let Some(mut mat) = materials.get_mut(&handles.eq_material) {
+        if let Ok(mut mat) = line_materials.get_mut(handles.eq_entity) {
             mat.uniforms.transform = delta_transform;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = minor_alpha;
         }
 
-        if let Some(ref star_mat_handle) = handles.star_material {
-            if let Some(mut mat) = star_materials.get_mut(star_mat_handle) {
+        if let Some(star_entity) = handles.star_entity {
+            if let Ok(mut mat) = star_materials.get_mut(star_entity) {
                 mat.uniforms.transform =
                     glam::DMat4::from_mat3(camera.icrs_to_camera_matrix()).as_mat4();
                 mat.uniforms.projection = proj_params.into();
@@ -557,7 +565,7 @@ impl PlanetariumRenderer {
                 let initial_aspect = width as f32 / height as f32;
                 let initial_proj = initial_camera.projection_params(initial_aspect);
 
-                let (horizon_mat_handle, altaz_mat_handle, eq_mat_handle) = {
+                let (horizon_material, altaz_material, eq_material) = {
                     let _span = tracing::info_span!("init_line_materials").entered();
                     let horizon_material = CelestialLineMaterial {
                         uniforms: CelestialLineUniforms {
@@ -586,22 +594,7 @@ impl PlanetariumRenderer {
                         },
                     };
 
-                    let h = app
-                        .world_mut()
-                        .resource_mut::<Assets<CelestialLineMaterial>>()
-                        .add(horizon_material);
-
-                    let a = app
-                        .world_mut()
-                        .resource_mut::<Assets<CelestialLineMaterial>>()
-                        .add(altaz_material);
-
-                    let e = app
-                        .world_mut()
-                        .resource_mut::<Assets<CelestialLineMaterial>>()
-                        .add(eq_material);
-
-                    (h, a, e)
+                    (horizon_material, altaz_material, eq_material)
                 };
 
                 let horizon_mesh_handle = {
@@ -629,9 +622,7 @@ impl PlanetariumRenderer {
                     let _span = tracing::info_span!("load_star_catalog_step").entered();
                     stars::load_star_catalog()
                 };
-                let (star_mat_handle, star_mesh_handle) = if let Some((_header, star_records)) =
-                    star_catalog
-                {
+                let star_setup = if let Some((_header, star_records)) = star_catalog {
                     let star_count = star_records.len();
                     let buffer_handle = {
                         let _span =
@@ -653,9 +644,9 @@ impl PlanetariumRenderer {
                             .add(star_mesh)
                     };
 
-                    let mat_handle = {
+                    let star_material = {
                         let _span = tracing::info_span!("create_star_material_step").entered();
-                        let star_material = stars::CelestialStarMaterial {
+                        stars::CelestialStarMaterial {
                             uniforms: stars::CelestialStarUniforms {
                                 transform: glam::DMat4::from_mat3(initial_eq_to_cam).as_mat4(),
                                 projection: initial_proj.into(),
@@ -668,41 +659,44 @@ impl PlanetariumRenderer {
                                 padding: 0.0,
                             },
                             stars: buffer_handle,
-                        };
-
-                        app.world_mut()
-                            .resource_mut::<Assets<stars::CelestialStarMaterial>>()
-                            .add(star_material)
+                        }
                     };
 
-                    (Some(mat_handle), Some(mesh_handle))
+                    Some((star_material, mesh_handle))
                 } else {
-                    (None, None)
+                    None
                 };
 
                 app.init_resource::<PendingCommands>();
                 app.init_resource::<CameraSyncState>();
                 app.insert_resource(bridge.clone());
                 app.insert_resource(ViewportDimensions { width, height });
+                let (horizon_entity, altaz_entity, eq_entity, star_entity) = {
+                    let _span = tracing::info_span!("spawn_celestial_entities").entered();
+                    let world = app.world_mut();
+                    let horizon = world
+                        .spawn((Mesh3d(horizon_mesh_handle.clone()), horizon_material))
+                        .id();
+                    let altaz = world
+                        .spawn((Mesh3d(altaz_mesh_handle.clone()), altaz_material))
+                        .id();
+                    let eq = world
+                        .spawn((Mesh3d(eq_mesh_handle.clone()), eq_material))
+                        .id();
+                    let star = star_setup
+                        .map(|(material, mesh)| world.spawn((Mesh3d(mesh), material)).id());
+                    (horizon, altaz, eq, star)
+                };
+
                 app.insert_resource(CelestialHandles {
-                    horizon_material: horizon_mat_handle.clone(),
-                    altaz_material: altaz_mat_handle.clone(),
-                    eq_material: eq_mat_handle.clone(),
-                    horizon_mesh: horizon_mesh_handle.clone(),
-                    altaz_mesh: altaz_mesh_handle.clone(),
-                    eq_mesh: eq_mesh_handle.clone(),
-                    star_material: star_mat_handle.clone(),
+                    horizon_entity,
+                    altaz_entity,
+                    eq_entity,
+                    horizon_mesh: horizon_mesh_handle,
+                    altaz_mesh: altaz_mesh_handle,
+                    eq_mesh: eq_mesh_handle,
+                    star_entity,
                 });
-
-                let h_mat = horizon_mat_handle.clone();
-                let a_mat = altaz_mat_handle.clone();
-                let e_mat = eq_mat_handle.clone();
-                let s_mat = star_mat_handle.clone();
-
-                let h_mesh = horizon_mesh_handle.clone();
-                let a_mesh = altaz_mesh_handle.clone();
-                let e_mesh = eq_mesh_handle.clone();
-                let s_mesh = star_mesh_handle.clone();
 
                 {
                     let _span = tracing::info_span!("add_startup_systems").entered();
@@ -711,39 +705,10 @@ impl PlanetariumRenderer {
                             Camera3d::default(),
                             Camera::default(),
                             RenderTarget::Image(target_clone.clone().into()),
+                            Tonemapping::None,
                             PlanetariumCameraMarker,
                             PlanetariumCamera::default(),
                         ));
-
-                        commands.spawn((
-                            Mesh3d(h_mesh.clone()),
-                            MeshMaterial3d(h_mat.clone()),
-                            Transform::default(),
-                            NoFrustumCulling,
-                        ));
-
-                        commands.spawn((
-                            Mesh3d(a_mesh.clone()),
-                            MeshMaterial3d(a_mat.clone()),
-                            Transform::default(),
-                            NoFrustumCulling,
-                        ));
-
-                        commands.spawn((
-                            Mesh3d(e_mesh.clone()),
-                            MeshMaterial3d(e_mat.clone()),
-                            Transform::default(),
-                            NoFrustumCulling,
-                        ));
-
-                        if let (Some(s_mesh), Some(s_mat)) = (s_mesh.clone(), s_mat.clone()) {
-                            commands.spawn((
-                                Mesh3d(s_mesh),
-                                MeshMaterial3d(s_mat),
-                                Transform::default(),
-                                NoFrustumCulling,
-                            ));
-                        }
                     });
                 }
 

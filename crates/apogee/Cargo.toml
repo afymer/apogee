@@ -28,6 +28,7 @@ refineable.workspace = true
 anyhow.workspace = true
 tracing-tracy = { workspace = true, optional = true }
 tracy-client = { workspace = true, optional = true }
+subsecond = "0.7.10"
 
 [features]
 default = []

@@ -1,0 +1,16 @@
+{
+    "lsp": {
+        "rust-analyzer": {
+            "initialization_options": {
+                "cargo": {
+                    "extraEnv": {
+                        "CARGO_HOME": "/home/remy/.local/share/cargo",
+                    },
+                },
+                "check": {
+                    "command": "clippy",
+                },
+            },
+        },
+    },
+}

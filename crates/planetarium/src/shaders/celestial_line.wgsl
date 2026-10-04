@@ -7,13 +7,11 @@ struct CelestialLineUniforms {
     minor_alpha: f32,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> uniforms: CelestialLineUniforms;
+@group(0) @binding(0) var<uniform> uniforms: CelestialLineUniforms;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-#ifdef VERTEX_LINE_TIER
     @location(1) line_tier: f32,
-#endif
 }
 
 struct VertexOutput {
@@ -39,11 +37,8 @@ fn vertex(input: VertexInput) -> VertexOutput {
 
     out.clip_position = project_celestial(v_cam, uniforms.projection);
     out.alpha = alpha;
-#ifdef VERTEX_LINE_TIER
     out.tier_alpha = mix(1.0, uniforms.minor_alpha, input.line_tier);
-#else
     out.tier_alpha = 1.0;
-#endif
     return out;
 }
 
