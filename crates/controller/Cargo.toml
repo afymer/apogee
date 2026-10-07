@@ -12,9 +12,9 @@ tracing.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-protocol.path = "../protocol"
-sequencer.path = "../sequencer"
-gphoto.path = "../drivers/gphoto"
+protocol.workspace = true
+sequencer.workspace = true
+gphoto.workspace = true
 
 [lints]
 workspace = true

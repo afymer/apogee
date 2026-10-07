@@ -7,9 +7,9 @@ edition.workspace = true
 gpui.workspace = true
 ui.workspace = true
 theme.workspace = true
-protocol.path = "../protocol"
-client.path = "../client"
-components.path = "../components"
+protocol.workspace = true
+client.workspace = true
+components.workspace = true
 
 [lib]
 name = "status_bar"

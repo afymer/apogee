@@ -58,6 +58,19 @@ bevy = { version = "0.19", default-features = false, features = [
     "zstd_rust",
 ] }
 
+protocol.path = "crates/protocol"
+sequencer.path = "crates/sequencer"
+gphoto.path = "crates/drivers/gphoto"
+controller.path = "crates/controller"
+celestial.path = "crates/celestial"
+client.path = "crates/client"
+components.path = "crates/components"
+status_bar.path = "crates/status_bar"
+workspace.path = "crates/workspace"
+planetarium.path = "crates/planetarium"
+title_bar.path = "crates/title_bar"
+raw_viewer.path = "crates/raw_viewer"
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }

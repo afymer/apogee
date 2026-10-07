@@ -7,10 +7,10 @@ edition.workspace = true
 gpui = { workspace = true, features = ["wgpu"] }
 ui.workspace = true
 theme.workspace = true
-workspace = { path = "../workspace" }
-components = { path = "../components" }
-client = { path = "../client" }
-protocol = { path = "../protocol" }
+workspace.workspace = true
+components.workspace = true
+client.workspace = true
+protocol.workspace = true
 wgpu.workspace = true
 tracing.workspace = true
 bytemuck.workspace = true

@@ -10,13 +10,13 @@ ui.workspace = true
 theme.workspace = true
 assets.workspace = true
 wgpu.workspace = true
-planetarium = { path = "../planetarium" }
-workspace = { path = "../workspace" }
-title_bar = { path = "../title_bar" }
-status_bar = { path = "../status_bar" }
-raw_viewer = { path = "../raw_viewer" }
-protocol = { path = "../protocol" }
-client = { path = "../client" }
+planetarium.workspace = true
+workspace.workspace = true
+title_bar.workspace = true
+status_bar.workspace = true
+raw_viewer.workspace = true
+protocol.workspace = true
+client.workspace = true
 futures.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.29.0"

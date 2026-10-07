@@ -9,7 +9,7 @@ path = "src/client.rs"
 
 [dependencies]
 gpui.workspace = true
-protocol = { path = "../protocol" }
+protocol.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.29.0"
 futures.workspace = true
