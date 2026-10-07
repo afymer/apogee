@@ -21,12 +21,15 @@ use bevy::{
             BlendState, Buffer, BufferSlice, CachedRenderPipelineId, ColorTargetState, ColorWrites,
             FragmentState, IndexFormat, MultisampleState, PipelineCache, PrimitiveState,
             PrimitiveTopology, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-            ShaderStages, ShaderType, SpecializedMeshPipeline, SpecializedMeshPipelineError,
-            SpecializedMeshPipelines, TextureFormat, VertexState, binding_types::uniform_buffer,
+            SamplerBindingType, ShaderStages, ShaderType, SpecializedMeshPipeline,
+            SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureFormat,
+            TextureSampleType, VertexState,
+            binding_types::{sampler, texture_2d, uniform_buffer},
         },
         renderer::{RenderContext, ViewQuery},
         storage::GpuShaderBuffer,
         sync_component::SyncComponent,
+        texture::GpuImage,
         view::{Msaa, ViewTarget},
     },
     shader::{Shader, load_shader_library},
@@ -100,6 +103,54 @@ impl ExtractComponent for CelestialLineMaterial {
     }
 }
 
+#[derive(Clone, Copy, ShaderType, Debug, Component)]
+pub struct CelestialTileUniforms {
+    pub transform: Mat4,
+    pub projection: CelestialProjectionUniforms,
+    pub alpha: f32,
+}
+
+#[derive(Component, Debug, Clone)]
+pub struct CelestialTileMaterial {
+    pub uniforms: CelestialTileUniforms,
+    pub image: Handle<Image>,
+    pub depth: u8,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+pub struct CelestialTileDraw {
+    pub mesh: AssetId<Mesh>,
+    pub image: AssetId<Image>,
+    pub depth: u8,
+}
+
+impl SyncComponent for CelestialTileMaterial {
+    type Target = (
+        CelestialTileUniforms,
+        CelestialTileDraw,
+        CelestialPipelineId,
+    );
+}
+
+impl ExtractComponent for CelestialTileMaterial {
+    type QueryData = (&'static Self, &'static Mesh3d);
+    type QueryFilter = ();
+    type Out = (CelestialTileUniforms, CelestialTileDraw);
+
+    fn extract_component(
+        (material, mesh): QueryItem<'_, '_, Self::QueryData>,
+    ) -> Option<Self::Out> {
+        Some((
+            material.uniforms,
+            CelestialTileDraw {
+                mesh: mesh.id(),
+                image: material.image.id(),
+                depth: material.depth,
+            },
+        ))
+    }
+}
+
 /// Everything a pipeline variant depends on besides the mesh vertex layout
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CelestialPipelineKey {
@@ -146,6 +197,32 @@ pub fn pipeline_descriptor(
 }
 
 #[derive(Resource)]
+pub struct CelestialTilePipeline {
+    pub layout: BindGroupLayoutDescriptor,
+    pub shader: Handle<Shader>,
+}
+
+impl SpecializedMeshPipeline for CelestialTilePipeline {
+    type Key = CelestialPipelineKey;
+
+    fn specialize(
+        &self,
+        key: Self::Key,
+        layout: &MeshVertexBufferLayoutRef,
+    ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
+        let mut descriptor =
+            pipeline_descriptor("celestial_tile_pipeline", &self.layout, &self.shader, key);
+        let vertex_attributes = vec![
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
+        ];
+        let vertex_layout = layout.0.get_layout(&vertex_attributes)?;
+        descriptor.vertex.buffers = vec![vertex_layout];
+        Ok(descriptor)
+    }
+}
+
+#[derive(Resource)]
 struct CelestialLinePipeline {
     layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
@@ -173,10 +250,13 @@ impl SpecializedMeshPipeline for CelestialLinePipeline {
 
 pub fn init_celestial_materials(app: &mut App) {
     load_shader_library!(app, "shaders/celestial_projection.wgsl");
+    embedded_asset!(app, "shaders/celestial_tile.wgsl");
     embedded_asset!(app, "shaders/celestial_line.wgsl");
     embedded_asset!(app, "shaders/celestial_star.wgsl");
 
     app.add_plugins((
+        ExtractComponentPlugin::<CelestialTileMaterial>::default(),
+        UniformComponentPlugin::<CelestialTileUniforms>::default(),
         ExtractComponentPlugin::<CelestialLineMaterial>::default(),
         UniformComponentPlugin::<CelestialLineUniforms>::default(),
         ExtractComponentPlugin::<CelestialStarMaterial>::default(),
@@ -187,6 +267,7 @@ pub fn init_celestial_materials(app: &mut App) {
         return;
     };
     render_app
+        .init_resource::<SpecializedMeshPipelines<CelestialTilePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialLinePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialStarPipeline>>()
         .add_systems(RenderStartup, init_celestial_pipelines)
@@ -204,6 +285,22 @@ pub fn init_celestial_materials(app: &mut App) {
 
 #[allow(clippy::needless_pass_by_value)]
 fn init_celestial_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let tile_layout = BindGroupLayoutDescriptor::new(
+        "celestial_tile_bind_group_layout",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::VERTEX_FRAGMENT,
+            (
+                uniform_buffer::<CelestialTileUniforms>(true),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+            ),
+        ),
+    );
+    commands.insert_resource(CelestialTilePipeline {
+        layout: tile_layout,
+        shader: asset_server.load("embedded://planetarium/shaders/celestial_tile.wgsl"),
+    });
+
     let line_layout = BindGroupLayoutDescriptor::new(
         "celestial_line_bind_group_layout",
         &BindGroupLayoutEntries::sequential(
@@ -248,16 +345,32 @@ fn specialize_pipeline<S: SpecializedMeshPipeline<Key = CelestialPipelineKey>>(
 fn queue_celestial_pipelines(
     mut commands: Commands,
     cache: Res<PipelineCache>,
+    tile_pipeline: Res<CelestialTilePipeline>,
     line_pipeline: Res<CelestialLinePipeline>,
     star_pipeline: Res<CelestialStarPipeline>,
+    mut tile_pipelines: ResMut<SpecializedMeshPipelines<CelestialTilePipeline>>,
     mut line_pipelines: ResMut<SpecializedMeshPipelines<CelestialLinePipeline>>,
     mut star_pipelines: ResMut<SpecializedMeshPipelines<CelestialStarPipeline>>,
     meshes: Res<RenderAssets<RenderMesh>>,
     views: Query<(&ViewTarget, &Msaa)>,
+    tiles: Query<(Entity, &CelestialTileDraw)>,
     lines: Query<(Entity, &CelestialLineDraw)>,
     stars: Query<(Entity, &CelestialStarDraw)>,
 ) {
     for (target, msaa) in &views {
+        for (entity, draw) in &tiles {
+            if let Some(id) = specialize_pipeline(
+                &cache,
+                &*tile_pipeline,
+                &mut tile_pipelines,
+                &meshes,
+                draw.mesh,
+                target,
+                *msaa,
+            ) {
+                commands.entity(entity).insert(id);
+            }
+        }
         for (entity, draw) in &lines {
             if let Some(id) = specialize_pipeline(
                 &cache,
@@ -343,13 +456,21 @@ fn locate_mesh<'a>(
 fn draw_celestial(
     view: ViewQuery<&ViewTarget>,
     pipeline_cache: Res<PipelineCache>,
+    tile_pipeline: Res<CelestialTilePipeline>,
     line_pipeline: Res<CelestialLinePipeline>,
     star_pipeline: Res<CelestialStarPipeline>,
     meshes: Res<RenderAssets<RenderMesh>>,
+    images: Res<RenderAssets<GpuImage>>,
     allocator: Res<MeshAllocator>,
     shader_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+    tile_uniforms: Res<ComponentUniforms<CelestialTileUniforms>>,
     line_uniforms: Res<ComponentUniforms<CelestialLineUniforms>>,
     star_uniforms: Res<ComponentUniforms<CelestialStarUniforms>>,
+    tiles: Query<(
+        &CelestialTileDraw,
+        &DynamicUniformIndex<CelestialTileUniforms>,
+        &CelestialPipelineId,
+    )>,
     lines: Query<(
         &CelestialLineDraw,
         &DynamicUniformIndex<CelestialLineUniforms>,
@@ -364,6 +485,37 @@ fn draw_celestial(
 ) {
     let target = view.into_inner();
     let mut items: Vec<DrawItem> = Vec::new();
+
+    if let Some(binding) = tile_uniforms.binding() {
+        let mut sorted_tiles: Vec<_> = tiles.iter().collect();
+        sorted_tiles.sort_by_key(|(draw, _, _)| draw.depth);
+
+        for (draw, uniform_index, pipeline_id) in sorted_tiles {
+            let (Some(pipeline), Some((vertex_buffer, geometry)), Some(gpu_image)) = (
+                pipeline_cache.get_render_pipeline(pipeline_id.0),
+                locate_mesh(draw.mesh, &meshes, &allocator),
+                images.get(draw.image),
+            ) else {
+                continue;
+            };
+            let bind_group = ctx.render_device().create_bind_group(
+                "celestial_tile_bind_group",
+                &pipeline_cache.get_bind_group_layout(&tile_pipeline.layout),
+                &BindGroupEntries::sequential((
+                    binding.clone(),
+                    &gpu_image.texture_view,
+                    &gpu_image.sampler,
+                )),
+            );
+            items.push(DrawItem {
+                pipeline,
+                bind_group,
+                uniform_offset: uniform_index.index(),
+                vertex_buffer,
+                geometry,
+            });
+        }
+    }
 
     if let Some(binding) = line_uniforms.binding() {
         let bind_group = ctx.render_device().create_bind_group(

@@ -1,22 +1,37 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+pub use ::hips::{HipsGrid, HipsGridConfig, HipsSurvey, HipsTileFetcher};
 use bevy::{
     asset::RenderAssetUsages,
+    mesh::Indices,
     prelude::*,
-    render::{mesh::Mesh, render_resource::PrimitiveTopology},
+    render::{
+        mesh::Mesh,
+        render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
+    },
 };
 use glam::Vec3;
-use hips::{HipsGrid, HipsGridConfig};
 
 use crate::{
+    BevyBridge, ViewportDimensions,
     camera::PlanetariumCamera,
     grids::ATTRIBUTE_LINE_TIER,
-    material::{CelestialLineMaterial, CelestialLineUniforms},
-    ViewportDimensions,
+    material::{
+        CelestialLineMaterial, CelestialLineUniforms, CelestialTileMaterial, CelestialTileUniforms,
+    },
 };
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HipsTile {
+    pub depth: u8,
+    pub hash: u64,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HipsSurveyTile {
     pub depth: u8,
     pub hash: u64,
 }
@@ -27,7 +42,23 @@ pub struct HipsMeshCache {
 }
 
 #[derive(Resource, Default)]
+pub struct HipsSurfaceMeshCache {
+    pub meshes: HashMap<(u8, u64), Handle<Mesh>>,
+}
+
+#[derive(Resource, Default)]
+pub struct HipsImageCache {
+    pub images: HashMap<(u8, u64), Handle<Image>>,
+}
+
+#[derive(Resource, Default)]
 pub struct HipsActiveTiles {
+    pub tiles: HashMap<(u8, u64), Entity>,
+    pub current_depth: Option<u8>,
+}
+
+#[derive(Resource, Default)]
+pub struct HipsActiveSurveyTiles {
     pub tiles: HashMap<(u8, u64), Entity>,
     pub current_depth: Option<u8>,
 }
@@ -49,12 +80,111 @@ impl Default for HipsGridSettings {
     }
 }
 
+#[derive(Resource)]
+pub struct HipsSurveySettings {
+    pub enabled: bool,
+    pub survey: HipsSurvey,
+    pub alpha: f32,
+    pub max_depth_override: Option<u8>,
+}
+
+impl Default for HipsSurveySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            survey: HipsSurvey::dss_color(),
+            alpha: 1.0,
+            max_depth_override: None,
+        }
+    }
+}
+
+pub struct LoadedTile {
+    pub depth: u8,
+    pub hash: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+#[derive(Resource)]
+pub struct HipsTileLoader {
+    request_tx: crossbeam_channel::Sender<(HipsSurvey, u8, u64)>,
+    result_rx: crossbeam_channel::Receiver<LoadedTile>,
+    in_flight: HashSet<(u8, u64)>,
+}
+
+impl HipsTileLoader {
+    pub fn new(bridge: Option<BevyBridge>) -> Self {
+        let (request_tx, req_rx) = crossbeam_channel::unbounded::<(HipsSurvey, u8, u64)>();
+        let (res_tx, result_rx) = crossbeam_channel::unbounded::<LoadedTile>();
+
+        std::thread::Builder::new()
+            .name("hips-tile-fetcher".into())
+            .spawn(move || {
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    tracing::error!("Failed to initialize tokio runtime for hips fetcher");
+                    return;
+                };
+
+                rt.block_on(async move {
+                    let fetcher =
+                        HipsTileFetcher::new(HipsTileFetcher::default_cache_dir("DSSColor"));
+                    let sem = Arc::new(tokio::sync::Semaphore::new(8));
+
+                    while let Ok((survey, depth, hash)) = req_rx.recv() {
+                        let Ok(permit) = sem.clone().acquire_owned().await else {
+                            break;
+                        };
+                        let fetcher = fetcher.clone();
+                        let res_tx = res_tx.clone();
+                        let bridge = bridge.clone();
+
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            match fetcher.fetch_tile(&survey, depth, hash).await {
+                                Ok(bytes) => {
+                                    if let Ok(img) = image::load_from_memory(&bytes) {
+                                        let rgba = img.to_rgba8();
+                                        let (width, height) = rgba.dimensions();
+                                        let _ = res_tx.send(LoadedTile {
+                                            depth,
+                                            hash,
+                                            width,
+                                            height,
+                                            rgba: rgba.into_raw(),
+                                        });
+                                        if let Some(ref b) = bridge {
+                                            b.request_frame();
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::debug!(
+                                        "Failed to fetch tile ({depth}, {hash}): {err}"
+                                    );
+                                }
+                            }
+                        });
+                    }
+                });
+            })
+            .expect("Failed to spawn hips-tile-fetcher thread");
+
+        Self {
+            request_tx,
+            result_rx,
+            in_flight: HashSet::new(),
+        }
+    }
+}
+
 pub(crate) fn create_tile_boundary_mesh(depth: u8, hash: u64) -> Mesh {
-    let segments = HipsGrid::cell_boundary_segments(
-        depth,
-        hash,
-        HipsGrid::default_segments_per_edge(depth),
-    );
+    let segments =
+        HipsGrid::cell_boundary_segments(depth, hash, HipsGrid::default_segments_per_edge(depth));
     let mut positions = Vec::with_capacity(segments.len() * 2);
     let mut line_tiers = Vec::with_capacity(segments.len() * 2);
 
@@ -68,6 +198,20 @@ pub(crate) fn create_tile_boundary_mesh(depth: u8, hash: u64) -> Mesh {
     let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default());
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(ATTRIBUTE_LINE_TIER, line_tiers);
+    mesh
+}
+
+pub(crate) fn create_tile_surface_mesh(depth: u8, hash: u64) -> Mesh {
+    let subdivisions = HipsGrid::default_tile_subdivisions(depth);
+    let geom = HipsGrid::tile_surface_mesh(depth, hash, subdivisions);
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, geom.positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, geom.uvs);
+    mesh.insert_indices(Indices::U32(geom.indices));
     mesh
 }
 
@@ -178,5 +322,159 @@ pub(crate) fn hips_grid_system(
         mesh_cache
             .meshes
             .retain(|key, _| active_tiles.tiles.contains_key(key));
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+pub(crate) fn hips_survey_system(
+    mut commands: Commands,
+    camera_query: Query<&PlanetariumCamera>,
+    dims: Res<ViewportDimensions>,
+    grid_settings: Res<HipsGridSettings>,
+    settings: Res<HipsSurveySettings>,
+    mut active_survey_tiles: ResMut<HipsActiveSurveyTiles>,
+    mut mesh_cache: ResMut<HipsSurfaceMeshCache>,
+    mut image_cache: ResMut<HipsImageCache>,
+    mut loader: ResMut<HipsTileLoader>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut tile_materials: Query<&mut CelestialTileMaterial, With<HipsSurveyTile>>,
+) {
+    while let Ok(tile) = loader.result_rx.try_recv() {
+        loader.in_flight.remove(&(tile.depth, tile.hash));
+        let image = Image::new(
+            Extent3d {
+                width: tile.width,
+                height: tile.height,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            tile.rgba,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        let handle = images.add(image);
+        image_cache.images.insert((tile.depth, tile.hash), handle);
+    }
+
+    if !settings.enabled {
+        if !active_survey_tiles.tiles.is_empty() {
+            for entity in active_survey_tiles.tiles.values() {
+                commands.entity(*entity).despawn();
+            }
+            active_survey_tiles.tiles.clear();
+            active_survey_tiles.current_depth = None;
+        }
+        return;
+    }
+
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+
+    let aspect = dims.width as f32 / dims.height as f32;
+    let proj_params = camera.projection_params(aspect);
+    let transform = camera.icrs_to_camera_mat4();
+
+    let mut target_depth = HipsGrid::target_depth(
+        camera.fov_y,
+        dims.height,
+        active_survey_tiles.current_depth,
+        &grid_settings.config,
+    );
+    if let Some(max_override) = settings.max_depth_override {
+        target_depth = target_depth.min(max_override);
+    }
+    target_depth = target_depth.min(settings.survey.max_depth);
+    active_survey_tiles.current_depth = Some(target_depth);
+
+    let center_icrs = camera.forward_direction_eq();
+    let theta_y = camera.fov_y * 0.5;
+    let half_diag = (theta_y * theta_y + (theta_y * aspect as f64).powi(2)).sqrt() * 1.1;
+
+    let min_depth = target_depth.saturating_sub(2);
+    let mut desired_set = HashSet::new();
+
+    for d in min_depth..=target_depth {
+        let visible_cells = HipsGrid::query_visible_cells(center_icrs, half_diag, d);
+        for hash in visible_cells {
+            let key = (d, hash);
+            if image_cache.images.contains_key(&key) {
+                desired_set.insert(key);
+            } else if !loader.in_flight.contains(&key) {
+                loader.in_flight.insert(key);
+                let _ = loader.request_tx.send((settings.survey.clone(), d, hash));
+            }
+        }
+    }
+
+    let mut to_remove = Vec::new();
+    for (&key, &entity) in &active_survey_tiles.tiles {
+        if !desired_set.contains(&key) {
+            commands.entity(entity).despawn();
+            to_remove.push(key);
+        }
+    }
+    for key in to_remove {
+        active_survey_tiles.tiles.remove(&key);
+    }
+
+    for key in desired_set {
+        if active_survey_tiles.tiles.contains_key(&key) {
+            continue;
+        }
+
+        let (depth, hash) = key;
+        let Some(image_handle) = image_cache.images.get(&key).cloned() else {
+            continue;
+        };
+
+        let mesh_handle = mesh_cache
+            .meshes
+            .entry(key)
+            .or_insert_with(|| {
+                let mesh = create_tile_surface_mesh(depth, hash);
+                meshes.add(mesh)
+            })
+            .clone();
+
+        let material = CelestialTileMaterial {
+            uniforms: CelestialTileUniforms {
+                transform,
+                projection: proj_params.into(),
+                alpha: settings.alpha,
+            },
+            image: image_handle,
+            depth,
+        };
+
+        let entity = commands
+            .spawn((
+                Mesh3d(mesh_handle),
+                material,
+                HipsSurveyTile { depth, hash },
+            ))
+            .id();
+
+        active_survey_tiles.tiles.insert(key, entity);
+    }
+
+    for &entity in active_survey_tiles.tiles.values() {
+        if let Ok(mut mat) = tile_materials.get_mut(entity) {
+            mat.uniforms.transform = transform;
+            mat.uniforms.projection = proj_params.into();
+            mat.uniforms.alpha = settings.alpha;
+        }
+    }
+
+    if mesh_cache.meshes.len() > 1024 {
+        mesh_cache
+            .meshes
+            .retain(|key, _| active_survey_tiles.tiles.contains_key(key));
+    }
+    if image_cache.images.len() > 1024 {
+        image_cache
+            .images
+            .retain(|key, _| active_survey_tiles.tiles.contains_key(key));
     }
 }

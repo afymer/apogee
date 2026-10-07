@@ -7,6 +7,12 @@ edition.workspace = true
 cdshealpix.workspace = true
 glam.workspace = true
 celestial.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

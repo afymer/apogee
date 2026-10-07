@@ -7,4 +7,7 @@ pub enum ViewportCommand {
     Zoom { delta: f64 },
     SetViewMode(ViewMode),
     ToggleHipsGrid(bool),
+    ToggleHipsSurvey(bool),
+    SetHipsSurvey(hips::HipsSurvey),
 }
+

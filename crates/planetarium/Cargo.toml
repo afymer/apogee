@@ -12,6 +12,9 @@ hips.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 zstd.workspace = true
+image.workspace = true
+crossbeam-channel = "0.5"
+tokio = { workspace = true, features = ["sync", "rt"] }
 tracy-client = { workspace = true, optional = true }
 
 [features]

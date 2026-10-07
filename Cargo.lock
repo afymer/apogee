@@ -4104,6 +4104,10 @@ dependencies = [
  "cdshealpix",
  "celestial",
  "glam",
+ "reqwest",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6049,8 +6053,11 @@ dependencies = [
  "bevy",
  "bytemuck",
  "celestial",
+ "crossbeam-channel",
  "glam",
  "hips",
+ "image",
+ "tokio",
  "tracing",
  "tracy-client",
  "wgpu",

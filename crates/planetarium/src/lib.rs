@@ -162,6 +162,14 @@ impl BevyBridge {
         self.send_command(ViewportCommand::ToggleHipsGrid(visible));
     }
 
+    pub fn set_hips_survey_visible(&self, visible: bool) {
+        self.send_command(ViewportCommand::ToggleHipsSurvey(visible));
+    }
+
+    pub fn set_hips_survey(&self, survey: hips::HipsSurvey) {
+        self.send_command(ViewportCommand::SetHipsSurvey(survey));
+    }
+
     pub fn request_redraw(&self) {
         {
             let mut guard = self
@@ -172,6 +180,11 @@ impl BevyBridge {
             guard.is_dirty = true;
         }
         self.inner.cvar.notify_one();
+    }
+
+    pub fn request_frame(&self) {
+        self.request_redraw();
+        self.notify_frame_ready();
     }
 
     pub fn notify_frame_ready(&self) {
@@ -271,6 +284,9 @@ fn camera_movement_and_interpolation_system(
                 moved = true;
             }
             ViewportCommand::ToggleHipsGrid(_) => {
+                moved = true;
+            }
+            ViewportCommand::ToggleHipsSurvey(_) | ViewportCommand::SetHipsSurvey(_) => {
                 moved = true;
             }
         }
@@ -468,9 +484,28 @@ fn process_viewport_commands(
                 }
             }
             ViewportCommand::ToggleHipsGrid(visible) => {
-                if let Some(mut settings) = app.world_mut().get_resource_mut::<HipsGridSettings>()
+                if let Some(mut settings) =
+                    app.world_mut().get_resource_mut::<hips::HipsGridSettings>()
                 {
                     settings.visible = visible;
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::ToggleHipsSurvey(visible) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<hips::HipsSurveySettings>()
+                {
+                    settings.enabled = visible;
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetHipsSurvey(survey) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<hips::HipsSurveySettings>()
+                {
+                    settings.survey = survey;
                     *frames_remaining = 3;
                 }
             }
@@ -686,9 +721,15 @@ impl PlanetariumRenderer {
 
                 app.init_resource::<PendingCommands>();
                 app.init_resource::<CameraSyncState>();
+                let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
+                app.insert_resource(tile_loader);
                 app.init_resource::<hips::HipsMeshCache>();
                 app.init_resource::<hips::HipsActiveTiles>();
                 app.init_resource::<hips::HipsGridSettings>();
+                app.init_resource::<hips::HipsSurfaceMeshCache>();
+                app.init_resource::<hips::HipsImageCache>();
+                app.init_resource::<hips::HipsActiveSurveyTiles>();
+                app.init_resource::<hips::HipsSurveySettings>();
                 app.insert_resource(bridge.clone());
                 app.insert_resource(ViewportDimensions { width, height });
                 let (horizon_entity, altaz_entity, eq_entity, star_entity) = {
@@ -736,6 +777,7 @@ impl PlanetariumRenderer {
                     Update,
                     (
                         camera_movement_and_interpolation_system,
+                        hips::hips_survey_system,
                         hips::hips_grid_system,
                     )
                         .chain(),
