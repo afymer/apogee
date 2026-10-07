@@ -15,7 +15,8 @@ members = [
     "crates/raw_viewer",
     "crates/components",
     "crates/client",
-    "crates/catalog_builder"
+    "crates/catalog_builder",
+    "crates/hips"
 ]
 default-members = ["crates/apogee"]
 # exclude = ["vendor/zed"]
@@ -42,6 +43,7 @@ tracing-tracy = "0.11"
 tracy-client = "0.18"
 zstd = "0.13"
 indicatif = "0.17"
+cdshealpix = "0.9.1"
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", features = ["font-kit", "wayland", "x11", "wgpu"] }
 ui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
@@ -63,6 +65,7 @@ sequencer.path = "crates/sequencer"
 gphoto.path = "crates/drivers/gphoto"
 controller.path = "crates/controller"
 celestial.path = "crates/celestial"
+hips.path = "crates/hips"
 client.path = "crates/client"
 components.path = "crates/components"
 status_bar.path = "crates/status_bar"

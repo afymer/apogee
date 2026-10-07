@@ -1,8 +1,11 @@
 pub mod camera;
 pub mod grids;
+pub mod hips;
 pub mod material;
 pub mod stars;
 pub mod viewport;
+
+pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
 
 use std::{
     sync::{
@@ -155,6 +158,10 @@ impl BevyBridge {
         self.send_command(ViewportCommand::SetViewMode(mode));
     }
 
+    pub fn set_hips_grid_visible(&self, visible: bool) {
+        self.send_command(ViewportCommand::ToggleHipsGrid(visible));
+    }
+
     pub fn request_redraw(&self) {
         {
             let mut guard = self
@@ -261,6 +268,9 @@ fn camera_movement_and_interpolation_system(
                 moved = true;
             }
             ViewportCommand::Resize(_, _) => {
+                moved = true;
+            }
+            ViewportCommand::ToggleHipsGrid(_) => {
                 moved = true;
             }
         }
@@ -455,6 +465,13 @@ fn process_viewport_commands(
                         dims.height = new_h;
                     }
                     pending.push(ViewportCommand::Resize(new_w, new_h));
+                }
+            }
+            ViewportCommand::ToggleHipsGrid(visible) => {
+                if let Some(mut settings) = app.world_mut().get_resource_mut::<HipsGridSettings>()
+                {
+                    settings.visible = visible;
+                    *frames_remaining = 3;
                 }
             }
             movement => {
@@ -669,6 +686,9 @@ impl PlanetariumRenderer {
 
                 app.init_resource::<PendingCommands>();
                 app.init_resource::<CameraSyncState>();
+                app.init_resource::<hips::HipsMeshCache>();
+                app.init_resource::<hips::HipsActiveTiles>();
+                app.init_resource::<hips::HipsGridSettings>();
                 app.insert_resource(bridge.clone());
                 app.insert_resource(ViewportDimensions { width, height });
                 let (horizon_entity, altaz_entity, eq_entity, star_entity) = {
@@ -712,7 +732,14 @@ impl PlanetariumRenderer {
                     });
                 }
 
-                app.add_systems(Update, camera_movement_and_interpolation_system);
+                app.add_systems(
+                    Update,
+                    (
+                        camera_movement_and_interpolation_system,
+                        hips::hips_grid_system,
+                    )
+                        .chain(),
+                );
 
                 {
                     let _span = tracing::info_span!("bevy_app_finish").entered();

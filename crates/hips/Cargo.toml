@@ -1,0 +1,12 @@
+[package]
+name = "hips"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+cdshealpix.workspace = true
+glam.workspace = true
+celestial.workspace = true
+
+[lints]
+workspace = true

@@ -6,4 +6,5 @@ pub enum ViewportCommand {
     Pan { delta_x: f64, delta_y: f64 },
     Zoom { delta: f64 },
     SetViewMode(ViewMode),
+    ToggleHipsGrid(bool),
 }
