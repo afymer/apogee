@@ -4,11 +4,8 @@
             "initialization_options": {
                 "cargo": {
                     "extraEnv": {
-                        "CARGO_HOME": "/home/remy/.local/share/cargo",
+                        "RUSTFLAGS": "-Clinker=clang -Clink-arg=-fuse-ld=mold"
                     },
-                },
-                "check": {
-                    "command": "clippy",
                 },
             },
         },
