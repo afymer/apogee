@@ -4,7 +4,6 @@ struct CelestialTileUniforms {
     transform: mat4x4<f32>,
     projection: CelestialProjectionUniforms,
     alpha: f32,
-    _padding: vec3<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: CelestialTileUniforms;
