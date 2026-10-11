@@ -61,6 +61,7 @@ pub struct HipsActiveTiles {
 pub struct HipsActiveSurveyTiles {
     pub tiles: HashMap<(u8, u64), Entity>,
     pub current_depth: Option<u8>,
+    pub current_survey_name: Option<String>,
 }
 
 #[derive(Resource)]
@@ -107,17 +108,23 @@ pub struct LoadedTile {
     pub rgba: Vec<u8>,
 }
 
+pub enum TileLoadResult {
+    Success(LoadedTile),
+    Failed { depth: u8, hash: u64 },
+}
+
 #[derive(Resource)]
 pub struct HipsTileLoader {
-    request_tx: crossbeam_channel::Sender<(HipsSurvey, u8, u64)>,
-    result_rx: crossbeam_channel::Receiver<LoadedTile>,
+    request_tx: tokio::sync::mpsc::UnboundedSender<(Arc<HipsSurvey>, u8, u64)>,
+    result_rx: crossbeam_channel::Receiver<TileLoadResult>,
     in_flight: HashSet<(u8, u64)>,
 }
 
 impl HipsTileLoader {
     pub fn new(bridge: Option<BevyBridge>) -> Self {
-        let (request_tx, req_rx) = crossbeam_channel::unbounded::<(HipsSurvey, u8, u64)>();
-        let (res_tx, result_rx) = crossbeam_channel::unbounded::<LoadedTile>();
+        let (request_tx, mut req_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(Arc<HipsSurvey>, u8, u64)>();
+        let (res_tx, result_rx) = crossbeam_channel::unbounded::<TileLoadResult>();
 
         std::thread::Builder::new()
             .name("hips-tile-fetcher".into())
@@ -132,10 +139,10 @@ impl HipsTileLoader {
 
                 rt.block_on(async move {
                     let fetcher =
-                        HipsTileFetcher::new(HipsTileFetcher::default_cache_dir("DSSColor"));
+                        HipsTileFetcher::new(HipsTileFetcher::default_cache_root());
                     let sem = Arc::new(tokio::sync::Semaphore::new(8));
 
-                    while let Ok((survey, depth, hash)) = req_rx.recv() {
+                    while let Some((survey, depth, hash)) = req_rx.recv().await {
                         let Ok(permit) = sem.clone().acquire_owned().await else {
                             break;
                         };
@@ -147,25 +154,34 @@ impl HipsTileLoader {
                             let _permit = permit;
                             match fetcher.fetch_tile(&survey, depth, hash).await {
                                 Ok(bytes) => {
-                                    if let Ok(img) = image::load_from_memory(&bytes) {
+                                    let decode_res = tokio::task::spawn_blocking(move || {
+                                        let img = image::load_from_memory(&bytes).ok()?;
                                         let rgba = img.to_rgba8();
                                         let (width, height) = rgba.dimensions();
-                                        let _ = res_tx.send(LoadedTile {
+                                        Some((width, height, rgba.into_raw()))
+                                    })
+                                    .await;
+
+                                    if let Ok(Some((width, height, rgba))) = decode_res {
+                                        let _ = res_tx.send(TileLoadResult::Success(LoadedTile {
                                             depth,
                                             hash,
                                             width,
                                             height,
-                                            rgba: rgba.into_raw(),
-                                        });
+                                            rgba,
+                                        }));
                                         if let Some(ref b) = bridge {
                                             b.request_frame();
                                         }
+                                    } else {
+                                        let _ = res_tx.send(TileLoadResult::Failed { depth, hash });
                                     }
                                 }
                                 Err(err) => {
                                     tracing::debug!(
                                         "Failed to fetch tile ({depth}, {hash}): {err}"
                                     );
+                                    let _ = res_tx.send(TileLoadResult::Failed { depth, hash });
                                 }
                             }
                         });
@@ -340,21 +356,48 @@ pub(crate) fn hips_survey_system(
     mut images: ResMut<Assets<Image>>,
     mut tile_materials: Query<&mut CelestialTileMaterial, With<HipsSurveyTile>>,
 ) {
-    while let Ok(tile) = loader.result_rx.try_recv() {
-        loader.in_flight.remove(&(tile.depth, tile.hash));
-        let image = Image::new(
-            Extent3d {
-                width: tile.width,
-                height: tile.height,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            tile.rgba,
-            TextureFormat::Rgba8UnormSrgb,
-            RenderAssetUsages::default(),
-        );
-        let handle = images.add(image);
-        image_cache.images.insert((tile.depth, tile.hash), handle);
+    while let Ok(result) = loader.result_rx.try_recv() {
+        match result {
+            TileLoadResult::Success(tile) => {
+                loader.in_flight.remove(&(tile.depth, tile.hash));
+                let image = Image::new(
+                    Extent3d {
+                        width: tile.width,
+                        height: tile.height,
+                        depth_or_array_layers: 1,
+                    },
+                    TextureDimension::D2,
+                    tile.rgba,
+                    TextureFormat::Rgba8UnormSrgb,
+                    RenderAssetUsages::default(),
+                );
+                let handle = images.add(image);
+                image_cache.images.insert((tile.depth, tile.hash), handle);
+            }
+            TileLoadResult::Failed { depth, hash } => {
+                loader.in_flight.remove(&(depth, hash));
+            }
+        }
+    }
+
+    let survey_name = &settings.survey.name;
+    if active_survey_tiles.current_survey_name.as_deref() != Some(survey_name) {
+        for entity in active_survey_tiles.tiles.values() {
+            commands.entity(*entity).despawn();
+        }
+        active_survey_tiles.tiles.clear();
+        image_cache.images.clear();
+        mesh_cache.meshes.clear();
+        loader.in_flight.clear();
+        active_survey_tiles.current_survey_name = Some(survey_name.clone());
+        active_survey_tiles.current_depth = None;
+
+        let survey_arc = Arc::new(settings.survey.clone());
+        for h in 0..12 {
+            let key = (0, h);
+            loader.in_flight.insert(key);
+            let _ = loader.request_tx.send((Arc::clone(&survey_arc), 0, h));
+        }
     }
 
     if !settings.enabled {
@@ -392,18 +435,29 @@ pub(crate) fn hips_survey_system(
     let theta_y = camera.fov_y * 0.5;
     let half_diag = (theta_y * theta_y + (theta_y * aspect as f64).powi(2)).sqrt() * 1.1;
 
-    let min_depth = target_depth.saturating_sub(2);
     let mut desired_set = HashSet::new();
+    let survey_arc = Arc::new(settings.survey.clone());
 
-    for d in min_depth..=target_depth {
-        let visible_cells = HipsGrid::query_visible_cells(center_icrs, half_diag, d);
-        for hash in visible_cells {
-            let key = (d, hash);
-            if image_cache.images.contains_key(&key) {
-                desired_set.insert(key);
-            } else if !loader.in_flight.contains(&key) {
+    let visible_cells = HipsGrid::query_visible_cells(center_icrs, half_diag, target_depth);
+    for hash in visible_cells {
+        let key = (target_depth, hash);
+        if image_cache.images.contains_key(&key) {
+            desired_set.insert(key);
+        } else {
+            if !loader.in_flight.contains(&key) {
                 loader.in_flight.insert(key);
-                let _ = loader.request_tx.send((settings.survey.clone(), d, hash));
+                let _ = loader.request_tx.send((Arc::clone(&survey_arc), target_depth, hash));
+            }
+            let mut fallback_depth = target_depth;
+            let mut fallback_hash = hash;
+            while fallback_depth > 0 {
+                fallback_depth -= 1;
+                fallback_hash >>= 2;
+                let parent_key = (fallback_depth, fallback_hash);
+                if image_cache.images.contains_key(&parent_key) {
+                    desired_set.insert(parent_key);
+                    break;
+                }
             }
         }
     }

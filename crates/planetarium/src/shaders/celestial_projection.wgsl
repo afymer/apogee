@@ -14,10 +14,10 @@ fn project_celestial(v_cam: vec3<f32>, proj: CelestialProjectionUniforms) -> vec
     let nz = clamp(norm.z, -1.0, 1.0);
 
     // Stereographic: r_stereo * dir = 2.0 * norm.xy / (1.0 + nz)
-    let stereo_factor = 2.0 / (1.0 + nz);
+    let stereo_factor = 2.0 / max(1.0 + nz, 0.002);
 
     // Perspective: r_persp * dir = norm.xy / nz
-    let persp_factor = 1.0 / max(nz, 0.001);
+    let persp_factor = 1.0 / max(nz, 0.005);
 
     let factor = mix(stereo_factor, persp_factor, proj.blend_factor);
     let scale = max(proj.scale_factor, 1e-9);

@@ -26,19 +26,9 @@ fn vertex(input: VertexInput) -> VertexOutput {
 
     let v_cam = (uniforms.transform * vec4<f32>(input.position, 0.0)).xyz;
 
-    // Fade out smoothly if behind camera in perspective mode
-    var alpha = 1.0;
-    if (uniforms.projection.blend_factor > 0.5 && v_cam.z <= 0.02) {
-        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
-        out.alpha = 0.0;
-        out.tier_alpha = 0.0;
-        return out;
-    }
-
     out.clip_position = project_celestial(v_cam, uniforms.projection);
-    out.alpha = alpha;
+    out.alpha = 1.0;
     out.tier_alpha = mix(1.0, uniforms.minor_alpha, input.line_tier);
-    out.tier_alpha = 1.0;
     return out;
 }
 

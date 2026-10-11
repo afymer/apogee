@@ -54,6 +54,13 @@ impl HipsSurvey {
             self.format.extension()
         ))
     }
+
+    pub fn slug(&self) -> String {
+        self.name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -151,10 +158,14 @@ impl HipsTileFetcher {
     }
 
     pub fn default_cache_dir(survey_slug: &str) -> Option<PathBuf> {
+        Self::default_cache_root().map(|root| root.join(survey_slug))
+    }
+
+    pub fn default_cache_root() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-        Some(base.join("apogee").join("hips").join(survey_slug))
+        Some(base.join("apogee").join("hips"))
     }
 
     pub async fn fetch_tile(
@@ -164,7 +175,9 @@ impl HipsTileFetcher {
         hash: u64,
     ) -> Result<Vec<u8>, TileFetchError> {
         if let Some(ref root) = self.cache_dir {
-            let path = root.join(survey.tile_relative_path(depth, hash));
+            let path = root
+                .join(survey.slug())
+                .join(survey.tile_relative_path(depth, hash));
             if path.exists() {
                 if let Ok(bytes) = std::fs::read(&path) {
                     return Ok(bytes);
@@ -185,11 +198,13 @@ impl HipsTileFetcher {
         let bytes = resp.bytes().await?.to_vec();
 
         if let Some(ref root) = self.cache_dir {
-            let path = root.join(survey.tile_relative_path(depth, hash));
+            let path = root
+                .join(survey.slug())
+                .join(survey.tile_relative_path(depth, hash));
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let tmp_path = path.with_extension("tmp");
+            let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
             if std::fs::write(&tmp_path, &bytes).is_ok() {
                 let _ = std::fs::rename(&tmp_path, &path);
             }

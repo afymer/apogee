@@ -18,7 +18,7 @@ use bevy::{
         render_asset::RenderAssets,
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            BlendState, Buffer, BufferSlice, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+            BlendState, Buffer, BufferId, BufferSlice, CachedRenderPipelineId, ColorTargetState, ColorWrites,
             FragmentState, IndexFormat, MultisampleState, PipelineCache, PrimitiveState,
             PrimitiveTopology, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
             SamplerBindingType, ShaderStages, ShaderType, SpecializedMeshPipeline,
@@ -159,6 +159,7 @@ pub struct CelestialPipelineKey {
     pub topology: PrimitiveTopology,
 }
 
+
 pub fn pipeline_descriptor(
     label: &'static str,
     layout: &BindGroupLayoutDescriptor,
@@ -200,6 +201,12 @@ pub fn pipeline_descriptor(
 pub struct CelestialTilePipeline {
     pub layout: BindGroupLayoutDescriptor,
     pub shader: Handle<Shader>,
+}
+
+#[derive(Resource, Default)]
+pub struct CelestialTileBindGroupCache {
+    pub buffer_id: Option<BufferId>,
+    pub cache: std::collections::HashMap<AssetId<Image>, BindGroup>,
 }
 
 impl SpecializedMeshPipeline for CelestialTilePipeline {
@@ -248,6 +255,13 @@ impl SpecializedMeshPipeline for CelestialLinePipeline {
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct CelestialPipelines<'w> {
+    tile: Res<'w, CelestialTilePipeline>,
+    line: Res<'w, CelestialLinePipeline>,
+    star: Res<'w, CelestialStarPipeline>,
+}
+
 pub fn init_celestial_materials(app: &mut App) {
     load_shader_library!(app, "shaders/celestial_projection.wgsl");
     embedded_asset!(app, "shaders/celestial_tile.wgsl");
@@ -270,6 +284,7 @@ pub fn init_celestial_materials(app: &mut App) {
         .init_resource::<SpecializedMeshPipelines<CelestialTilePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialLinePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialStarPipeline>>()
+        .init_resource::<CelestialTileBindGroupCache>()
         .add_systems(RenderStartup, init_celestial_pipelines)
         .add_systems(
             Render,
@@ -456,9 +471,7 @@ fn locate_mesh<'a>(
 fn draw_celestial(
     view: ViewQuery<&ViewTarget>,
     pipeline_cache: Res<PipelineCache>,
-    tile_pipeline: Res<CelestialTilePipeline>,
-    line_pipeline: Res<CelestialLinePipeline>,
-    star_pipeline: Res<CelestialStarPipeline>,
+    pipelines: CelestialPipelines,
     meshes: Res<RenderAssets<RenderMesh>>,
     images: Res<RenderAssets<GpuImage>>,
     allocator: Res<MeshAllocator>,
@@ -481,12 +494,19 @@ fn draw_celestial(
         &DynamicUniformIndex<CelestialStarUniforms>,
         &CelestialPipelineId,
     )>,
+    mut tile_bind_groups: ResMut<CelestialTileBindGroupCache>,
     mut ctx: RenderContext,
 ) {
     let target = view.into_inner();
     let mut items: Vec<DrawItem> = Vec::new();
 
     if let Some(binding) = tile_uniforms.binding() {
+        let current_buf_id = tile_uniforms.buffer().map(|b| b.id());
+        if tile_bind_groups.buffer_id != current_buf_id {
+            tile_bind_groups.cache.clear();
+            tile_bind_groups.buffer_id = current_buf_id;
+        }
+
         let mut sorted_tiles: Vec<_> = tiles.iter().collect();
         sorted_tiles.sort_by_key(|(draw, _, _)| draw.depth);
 
@@ -498,15 +518,21 @@ fn draw_celestial(
             ) else {
                 continue;
             };
-            let bind_group = ctx.render_device().create_bind_group(
-                "celestial_tile_bind_group",
-                &pipeline_cache.get_bind_group_layout(&tile_pipeline.layout),
-                &BindGroupEntries::sequential((
-                    binding.clone(),
-                    &gpu_image.texture_view,
-                    &gpu_image.sampler,
-                )),
-            );
+            let bind_group = tile_bind_groups
+                .cache
+                .entry(draw.image)
+                .or_insert_with(|| {
+                    ctx.render_device().create_bind_group(
+                        "celestial_tile_bind_group",
+                        &pipeline_cache.get_bind_group_layout(&pipelines.tile.layout),
+                        &BindGroupEntries::sequential((
+                            binding.clone(),
+                            &gpu_image.texture_view,
+                            &gpu_image.sampler,
+                        )),
+                    )
+                })
+                .clone();
             items.push(DrawItem {
                 pipeline,
                 bind_group,
@@ -520,7 +546,7 @@ fn draw_celestial(
     if let Some(binding) = line_uniforms.binding() {
         let bind_group = ctx.render_device().create_bind_group(
             "celestial_line_bind_group",
-            &pipeline_cache.get_bind_group_layout(&line_pipeline.layout),
+            &pipeline_cache.get_bind_group_layout(&pipelines.line.layout),
             &BindGroupEntries::sequential((binding,)),
         );
         for (draw, uniform_index, pipeline_id) in &lines {
@@ -551,7 +577,7 @@ fn draw_celestial(
             };
             let bind_group = ctx.render_device().create_bind_group(
                 "celestial_star_bind_group",
-                &pipeline_cache.get_bind_group_layout(&star_pipeline.layout),
+                &pipeline_cache.get_bind_group_layout(&pipelines.star.layout),
                 &BindGroupEntries::sequential((
                     binding.clone(),
                     stars_buffer.buffer.as_entire_binding(),

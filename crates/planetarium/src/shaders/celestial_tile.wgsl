@@ -18,19 +18,16 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) alpha: f32,
 }
 
 @vertex
 fn vertex(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.uv = input.uv;
+    out.alpha = 1.0;
 
     let v_cam = (uniforms.transform * vec4<f32>(input.position, 0.0)).xyz;
-
-    if (uniforms.projection.blend_factor > 0.5 && v_cam.z <= 0.001) {
-        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
-        return out;
-    }
 
     out.clip_position = project_celestial(v_cam, uniforms.projection);
     return out;
@@ -38,6 +35,9 @@ fn vertex(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
+    if (input.alpha <= 0.0) {
+        discard;
+    }
     let color = textureSample(tile_texture, tile_sampler, input.uv);
-    return vec4<f32>(color.rgb, color.a * uniforms.alpha);
+    return vec4<f32>(color.rgb, color.a * uniforms.alpha * input.alpha);
 }
