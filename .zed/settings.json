@@ -3,9 +3,10 @@
         "rust-analyzer": {
             "initialization_options": {
                 "cargo": {
-                    "extraEnv": {
-                        "RUSTFLAGS": "-Clinker=clang -Clink-arg=-fuse-ld=mold"
-                    },
+                    "targetDir": true,
+                },
+                "check": {
+                    "command": "clippy",
                 },
             },
         },

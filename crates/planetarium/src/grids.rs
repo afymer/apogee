@@ -68,14 +68,14 @@ pub fn create_hierarchical_grid_mesh_mapped(
     subdivisions: u32,
     map_point: impl Fn(Angle, Angle) -> Vec3,
 ) -> Mesh {
-    let n = subdivisions.max(2) as i32;
+    let subdivisions = subdivisions.max(2) as i32;
     let tau = Angle::TAU.radians();
 
     let major_lon_cuts = (tau / lon_major.radians()).round() as i32;
-    let total_lon_cuts = major_lon_cuts * n;
+    let total_lon_cuts = major_lon_cuts * subdivisions;
 
     let major_lat_cuts = (tau / lat_major.radians()).round() as i32;
-    let total_lat_cuts = major_lat_cuts * n;
+    let total_lat_cuts = major_lat_cuts * subdivisions;
     let n_pole = total_lat_cuts / 4;
 
     let total_lon_cuts_f = total_lon_cuts as f64;
@@ -114,7 +114,7 @@ pub fn create_hierarchical_grid_mesh_mapped(
 
     for j in j_start..=j_end {
         let lat = Angle::from_radians(tau * j as f64 / total_lat_cuts_f);
-        let tier = if j % n == 0 || j == n_pole - 1 || j == -n_pole + 1 {
+        let tier = if j % subdivisions == 0 || j == n_pole - 1 || j == -n_pole + 1 {
             GridLineTier::Major
         } else {
             GridLineTier::Minor
@@ -151,13 +151,13 @@ pub fn create_hierarchical_grid_mesh_mapped(
         if is_full_circle {
             let mut stride = 1;
             while total_lon_cuts / stride > 72 {
-                stride *= n;
+                stride *= subdivisions;
             }
 
             for c in (0..total_lon_cuts).step_by(stride as usize) {
                 let cut_index = c.rem_euclid(total_lon_cuts);
                 let lon = Angle::from_radians(tau * cut_index as f64 / total_lon_cuts_f);
-                let tier = if cut_index % n == 0 {
+                let tier = if cut_index % subdivisions == 0 {
                     GridLineTier::Major
                 } else {
                     GridLineTier::Minor
@@ -184,14 +184,14 @@ pub fn create_hierarchical_grid_mesh_mapped(
             let span_cuts = span_cuts_f.ceil() as i32;
             let mut stride: i32 = 1;
             while span_cuts / stride > 72 {
-                stride *= n;
+                stride *= subdivisions;
             }
 
             let c_start = (start_cut_f / stride as f64).ceil() as i32 * stride;
             for c in (c_start..=end_cut).step_by(stride as usize) {
                 let cut_index = c.rem_euclid(total_lon_cuts);
                 let lon = Angle::from_radians(tau * cut_index as f64 / total_lon_cuts_f);
-                let tier = if cut_index % n == 0 {
+                let tier = if cut_index % subdivisions == 0 {
                     GridLineTier::Major
                 } else {
                     GridLineTier::Minor

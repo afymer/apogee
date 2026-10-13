@@ -1,0 +1,10 @@
+[toolchain]
+channel = "nightly"
+profile = "minimal"
+components = [
+    "rustc-codegen-cranelift-preview",
+    "rust-src",
+    "rust-analyzer",
+    "clippy",
+    "rustfmt",
+]
