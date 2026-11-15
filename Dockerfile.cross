@@ -22,7 +22,6 @@ COPY Cargo.cross.toml ./Cargo.toml
 COPY Cargo.lock ./
 COPY crates/daemon ./crates/daemon
 COPY crates/controller ./crates/controller
-COPY crates/sequencer ./crates/sequencer
 COPY crates/protocol ./crates/protocol
 COPY crates/drivers/gphoto ./crates/drivers/gphoto
 
@@ -55,7 +54,6 @@ COPY Cargo.cross.toml ./Cargo.toml
 COPY Cargo.lock ./
 COPY crates/daemon ./crates/daemon
 COPY crates/controller ./crates/controller
-COPY crates/sequencer ./crates/sequencer
 COPY crates/protocol ./crates/protocol
 COPY crates/drivers/gphoto ./crates/drivers/gphoto
 

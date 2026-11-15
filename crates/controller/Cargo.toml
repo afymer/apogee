@@ -10,10 +10,8 @@ path = "src/controller.rs"
 [dependencies]
 tracing.workspace = true
 tokio.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 protocol.workspace = true
-sequencer.workspace = true
 gphoto.workspace = true
 
 [lints]

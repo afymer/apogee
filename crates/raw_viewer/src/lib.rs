@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub(crate) mod bridge;
 pub mod control_panel;
 pub mod histogram;

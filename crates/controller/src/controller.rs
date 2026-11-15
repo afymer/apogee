@@ -7,7 +7,6 @@ mod tests;
 
 use gphoto::handle::CameraHandle;
 use protocol::{DaemonStatus, Frame};
-use sequencer::Sequencer;
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{error, info, warn};
 
@@ -34,8 +33,6 @@ enum InternalMessage {
 
 pub struct Controller {
     camera: CameraHandle,
-    #[allow(dead_code)]
-    sequencer: Sequencer,
     cmd_rx: mpsc::Receiver<ControllerCommand>,
     internal_tx: mpsc::Sender<InternalMessage>,
     internal_rx: mpsc::Receiver<InternalMessage>,
@@ -54,13 +51,11 @@ impl Controller {
         let (event_tx, _) = broadcast::channel(128);
 
         let camera_status_rx = camera.status();
-        let sequencer = Sequencer::new(camera.clone());
 
         let handle = ControllerHandle::new(cmd_tx, status_rx, camera_status_rx, event_tx.clone());
 
         let controller = Self {
             camera,
-            sequencer,
             cmd_rx,
             internal_tx,
             internal_rx,

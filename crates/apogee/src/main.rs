@@ -1,4 +1,3 @@
-mod app_state;
 mod bevy_viewport;
 mod theme_loader;
 mod theme_provider;
@@ -11,7 +10,6 @@ use gpui::{App, AppContext, WindowOptions};
 use gpui_platform::application;
 use workspace::workbench::Workbench;
 
-use crate::app_state::AppState;
 
 fn main() {
     let app_start = std::time::Instant::now();
@@ -75,10 +73,6 @@ fn main() {
             raw_viewer::init(cx);
         }
 
-        {
-            let _span = ::tracing::info_span!("app_state_init").entered();
-            cx.set_global(AppState::new());
-        }
 
         drop(startup_span);
 

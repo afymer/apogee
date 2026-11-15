@@ -282,17 +282,13 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "planetarium",
- "protocol",
  "raw_viewer",
  "refineable",
  "serde",
  "serde_json",
- "status_bar",
- "subsecond",
  "theme",
  "title_bar",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "tracing-tracy",
@@ -1865,7 +1861,6 @@ dependencies = [
  "celestial",
  "clap",
  "csv",
- "futures",
  "glam",
  "indicatif",
  "reqwest",
@@ -1949,7 +1944,6 @@ dependencies = [
  "hifitime",
  "serde",
  "thiserror 2.0.20",
- "time",
  "zstd",
 ]
 
@@ -2345,10 +2339,8 @@ dependencies = [
 name = "controller"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "gphoto",
  "protocol",
- "sequencer",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -2685,7 +2677,6 @@ dependencies = [
  "gphoto",
  "http-body-util",
  "protocol",
- "sequencer",
  "serde",
  "serde_json",
  "tokio",
@@ -2713,9 +2704,6 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "derive_more"
@@ -3583,11 +3571,8 @@ dependencies = [
 name = "gphoto"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "gphoto2",
- "image",
  "protocol",
- "rawloader",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5059,15 +5044,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "memfd"
-version = "0.6.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57804b2c9b69967f1536a56f86297e367a33b19e98852ed624b84551cdbc0d90"
-dependencies = [
- "rustix 1.1.4",
-]
-
-[[package]]
 name = "memmap2"
 version = "0.9.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6278,7 +6254,6 @@ name = "protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
- "tracing",
 ]
 
 [[package]]
@@ -7185,17 +7160,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 
 [[package]]
-name = "sequencer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "enumflags2",
- "gphoto",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7656,34 +7620,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "subsecond"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d350d5788fa94d560d92269266a50efc77b036bfca6675e420b64df7b3211f37"
-dependencies = [
- "js-sys",
- "libc",
- "libloading",
- "memfd",
- "memmap2",
- "serde",
- "subsecond-types",
- "thiserror 2.0.20",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "subsecond-types"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcf32d66269b5fbb8558334e8d22b657b2f7af0dd2ef56c231541099a862e464"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8032,7 +7968,6 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
- "time-macros",
 ]
 
 [[package]]
@@ -8040,16 +7975,6 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
-
-[[package]]
-name = "time-macros"
-version = "0.2.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
-dependencies = [
- "num-conv",
- "time-core",
-]
 
 [[package]]
 name = "tiny-keccak"

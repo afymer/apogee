@@ -5,7 +5,6 @@ members = [
     "crates/daemon",
     "crates/protocol",
     "crates/controller",
-    "crates/sequencer",
     "crates/celestial",
     "crates/planetarium",
     "crates/workspace",
@@ -37,7 +36,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 hifitime = "4.3"
 rawloader = "0.37"
 glam = { version = "0.32", features = ["bytemuck"] }
-time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+tokio-tungstenite = "0.29.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-tracy = "0.11"
 tracy-client = "0.18"
@@ -63,7 +62,6 @@ bevy = { version = "0.19", default-features = false, features = [
 ] }
 
 protocol.path = "crates/protocol"
-sequencer.path = "crates/sequencer"
 gphoto.path = "crates/drivers/gphoto"
 controller.path = "crates/controller"
 celestial.path = "crates/celestial"

@@ -4,7 +4,6 @@ members = [
     "crates/daemon",
     "crates/protocol",
     "crates/controller",
-    "crates/sequencer",
     "crates/drivers/gphoto",
 ]
 default-members = ["crates/daemon"]
@@ -21,6 +20,9 @@ serde_json = "1.0"
 tokio = { version = "1.53.1", features = ["full"] }
 anyhow = "1.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+protocol.path = "crates/protocol"
+gphoto.path = "crates/drivers/gphoto"
+controller.path = "crates/controller"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
