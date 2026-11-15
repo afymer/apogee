@@ -31,14 +31,14 @@ impl StarRecord {
     }
 
     pub fn from_icrs_spherical(ra_rad: f64, dec_rad: f64, mag: f32, color_index: f32) -> Self {
-        let (sin_ra, cos_ra) = ra_rad.sin_cos();
-        let (sin_dec, cos_dec) = dec_rad.sin_cos();
+        let pos = crate::coords::canonical_spherical_to_cartesian(
+            crate::coords::Angle::from_radians(ra_rad),
+            crate::coords::Angle::from_radians(dec_rad),
+        )
+        .as_vec3()
+        .to_array();
 
-        let x = (cos_dec * cos_ra) as f32;
-        let y = (cos_dec * sin_ra) as f32;
-        let z = sin_dec as f32;
-
-        Self::new([x, y, z], mag, color_index)
+        Self::new(pos, mag, color_index)
     }
 
     #[inline]

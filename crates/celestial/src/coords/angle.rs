@@ -303,8 +303,24 @@ pub fn canonical_spherical_to_cartesian(lon: Angle, lat: Angle) -> glam::DVec3 {
 }
 
 #[inline]
+pub fn cartesian_to_canonical_spherical(v: glam::DVec3) -> (Angle, Angle) {
+    let norm = v.normalize();
+    let lat = Angle::from_radians(norm.z.clamp(-1.0, 1.0).asin());
+    let lon = Angle::from_radians_normalized(norm.y.atan2(norm.x));
+    (lon, lat)
+}
+
+#[inline]
 pub fn topocentric_spherical_to_enu(az: Angle, alt: Angle) -> glam::DVec3 {
     let (sin_alt, cos_alt) = alt.sin_cos();
     let (sin_az, cos_az) = az.sin_cos();
     glam::DVec3::new(cos_alt * sin_az, cos_alt * cos_az, sin_alt)
+}
+
+#[inline]
+pub fn topocentric_enu_to_spherical(v: glam::DVec3) -> (Angle, Angle) {
+    let norm = v.normalize();
+    let alt = Angle::from_radians(norm.z.clamp(-1.0, 1.0).asin());
+    let az = Angle::from_radians_normalized(norm.x.atan2(norm.y));
+    (az, alt)
 }

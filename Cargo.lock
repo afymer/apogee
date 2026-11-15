@@ -1943,7 +1943,6 @@ dependencies = [
  "glam",
  "hifitime",
  "serde",
- "thiserror 2.0.20",
  "zstd",
 ]
 

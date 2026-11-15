@@ -2,8 +2,8 @@ use glam::{DMat3, DVec3};
 use hifitime::Epoch;
 
 use crate::coords::{
-    angle::Angle, canonical_spherical_to_cartesian, geodetic::GeodeticPosition,
-    topocentric_spherical_to_enu,
+    angle::Angle, canonical_spherical_to_cartesian, cartesian_to_canonical_spherical,
+    geodetic::GeodeticPosition, topocentric_enu_to_spherical, topocentric_spherical_to_enu,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -14,10 +14,13 @@ pub struct ObservationContext {
 
 impl Default for ObservationContext {
     fn default() -> Self {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
         Self {
             location: GeodeticPosition::default(),
-            // Placeholder, TODO
-            epoch: Epoch::from_gregorian_utc_hms(2026, 9, 17, 21, 0, 0),
+            epoch: Epoch::now().unwrap_or_else(|_| Epoch::from_unix_seconds(secs)),
         }
     }
 }
@@ -77,19 +80,13 @@ impl ObservationContext {
     pub fn equatorial_to_topocentric_coords(&self, ra: Angle, dec: Angle) -> (Angle, Angle) {
         let v_eq = canonical_spherical_to_cartesian(ra, dec);
         let v_enu = self.equatorial_to_topocentric_dir(v_eq);
-
-        let alt = Angle::from_radians(v_enu.z.clamp(-1.0, 1.0).asin());
-        let az = Angle::from_radians_normalized(v_enu.x.atan2(v_enu.y));
-        (az, alt)
+        topocentric_enu_to_spherical(v_enu)
     }
 
     /// Converts Az/Alt to RA/Dec
     pub fn topocentric_to_equatorial_coords(&self, az: Angle, alt: Angle) -> (Angle, Angle) {
         let v_enu = topocentric_spherical_to_enu(az, alt);
         let v_eq = self.topocentric_to_equatorial_dir(v_enu);
-
-        let dec = Angle::from_radians(v_eq.z.clamp(-1.0, 1.0).asin());
-        let ra = Angle::from_radians_normalized(v_eq.y.atan2(v_eq.x));
-        (ra, dec)
+        cartesian_to_canonical_spherical(v_eq)
     }
 }

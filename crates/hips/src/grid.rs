@@ -58,17 +58,16 @@ impl HipsGrid {
 
     #[inline]
     pub fn vector_to_spherical(v: DVec3) -> (f64, f64) {
-        let norm = v.normalize();
-        let lat = norm.z.clamp(-1.0, 1.0).asin();
-        let lon = norm.y.atan2(norm.x).rem_euclid(2.0 * PI);
-        (lon, lat)
+        let (lon, lat) = celestial::coords::cartesian_to_canonical_spherical(v);
+        (lon.radians(), lat.radians())
     }
 
     #[inline]
     pub fn spherical_to_vector(lon: f64, lat: f64) -> DVec3 {
-        let (sin_lat, cos_lat) = lat.sin_cos();
-        let (sin_lon, cos_lon) = lon.sin_cos();
-        DVec3::new(cos_lat * cos_lon, cos_lat * sin_lon, sin_lat)
+        celestial::coords::canonical_spherical_to_cartesian(
+            celestial::coords::Angle::from_radians(lon),
+            celestial::coords::Angle::from_radians(lat),
+        )
     }
 
     pub fn query_visible_cells(center_icrs: DVec3, radius_rad: f64, depth: u8) -> Vec<u64> {

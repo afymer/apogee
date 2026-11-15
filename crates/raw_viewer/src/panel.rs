@@ -203,26 +203,7 @@ impl RawViewerPanel {
     }
 
     pub fn set_one_to_one(&mut self) {
-        let bounds = self.viewport_bounds.lock().ok().and_then(|g| *g);
-        let Some(bounds) = bounds else { return };
-        let viewer_w = f32::from(bounds.size.width).max(1.0);
-        let viewer_h = f32::from(bounds.size.height).max(1.0);
-        let screen_aspect = viewer_w / viewer_h;
-
-        let (raw_w, raw_h) = self
-            .bridge
-            .image_size()
-            .unwrap_or((viewer_w as u32, viewer_h as u32));
-        let img_aspect = (raw_w as f32) / (raw_h as f32).max(1.0);
-
-        let fitted_w = if screen_aspect > img_aspect {
-            viewer_h * img_aspect
-        } else {
-            viewer_w
-        };
-
-        let target_zoom = (raw_w as f32) / fitted_w.max(1.0);
-        self.bridge.set_pan_zoom(Vec2::ZERO, target_zoom);
+        self.bridge.set_one_to_one();
     }
 
     fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {

@@ -42,14 +42,17 @@ pub async fn trigger_camera_exposure(
     camera: &CameraHandle,
     exposure: Duration,
 ) -> Result<CameraFileRef, CaptureExecutionError> {
-    let exposure_secs = exposure.as_secs().max(1) as u32;
-    info!("Triggering camera exposure ({}s)...", exposure_secs);
+    info!("Triggering camera exposure ({exposure:?})...");
 
-    let timeout_duration = Duration::from_secs((exposure_secs as u64) + 25).max(Duration::from_secs(30));
+    let timeout_duration = exposure
+        .saturating_add(Duration::from_secs(25))
+        .max(Duration::from_secs(30));
 
-    tokio::time::timeout(timeout_duration, camera.capture(exposure_secs))
+    tokio::time::timeout(timeout_duration, camera.capture(exposure))
         .await
-        .map_err(|_| CaptureExecutionError::Exposure(format!("Exposure timed out after {timeout_duration:?}")))?
+        .map_err(|_| {
+            CaptureExecutionError::Exposure(format!("Exposure timed out after {timeout_duration:?}"))
+        })?
         .map_err(|err| CaptureExecutionError::Exposure(err.to_string()))
 }
 

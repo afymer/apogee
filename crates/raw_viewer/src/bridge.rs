@@ -266,6 +266,31 @@ impl RawViewerBridge {
         self.set_view_transform(ViewTransform::DEFAULT);
     }
 
+    /// Sets zoom and centers pan so one raw image pixel maps to one physical viewport pixel.
+    pub fn set_one_to_one(&self) {
+        if let (Some((raw_w, raw_h)), Some((view_w, view_h))) =
+            (self.image_size(), self.last_size())
+        {
+            let view_w = (view_w as f32).max(1.0);
+            let view_h = (view_h as f32).max(1.0);
+            let screen_aspect = view_w / view_h;
+
+            let raw_w = raw_w as f32;
+            let raw_h = (raw_h as f32).max(1.0);
+            let img_aspect = raw_w / raw_h;
+
+            let fitted_w = if screen_aspect > img_aspect {
+                view_h * img_aspect
+            } else {
+                view_w
+            };
+            let target_zoom = raw_w / fitted_w.max(1.0);
+            self.set_pan_zoom(Vec2::ZERO, target_zoom);
+        } else {
+            self.set_pan_zoom(Vec2::ZERO, 1.0);
+        }
+    }
+
     pub fn resize(&self, width: u32, height: u32) {
         {
             let mut guard = self

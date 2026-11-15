@@ -432,6 +432,7 @@ struct DrawItem<'a> {
     uniform_offset: u32,
     vertex_buffer: BufferSlice<'a>,
     geometry: Geometry<'a>,
+    instances: Range<u32>,
 }
 
 /// Locates a mesh's GPU buffers.
@@ -539,6 +540,7 @@ fn draw_celestial(
                 uniform_offset: uniform_index.index(),
                 vertex_buffer,
                 geometry,
+                instances: 0..1,
             });
         }
     }
@@ -562,6 +564,7 @@ fn draw_celestial(
                 uniform_offset: uniform_index.index(),
                 vertex_buffer,
                 geometry,
+                instances: 0..1,
             });
         }
     }
@@ -589,6 +592,7 @@ fn draw_celestial(
                 uniform_offset: uniform_index.index(),
                 vertex_buffer,
                 geometry,
+                instances: 0..draw.star_count,
             });
         }
     }
@@ -617,9 +621,11 @@ fn draw_celestial(
                 range,
             } => {
                 pass.set_index_buffer(buffer.slice(..), *format);
-                pass.draw_indexed(range.clone(), 0, 0..1);
+                pass.draw_indexed(range.clone(), 0, item.instances.clone());
             }
-            Geometry::Plain { vertex_count } => pass.draw(0..*vertex_count, 0..1),
+            Geometry::Plain { vertex_count } => {
+                pass.draw(0..*vertex_count, item.instances.clone());
+            }
         }
     }
 }

@@ -172,15 +172,7 @@ impl Render for CaptureControlPanel {
                                 .style(ButtonStyle::Subtle)
                                 .label_size(LabelSize::Small)
                                 .on_click(cx.listener(|this, _event, _window, cx| {
-                                    // TODO: make this a real 1:1 by bypassing the renderer scaling
-                                    if let (Some((raw_w, _)), Some((view_w, _))) =
-                                        (this.bridge.image_size(), this.bridge.last_size())
-                                    {
-                                        let scale = (raw_w as f32) / (view_w as f32).max(1.0);
-                                        this.bridge.set_pan_zoom(glam::Vec2::ZERO, scale);
-                                    } else {
-                                        this.bridge.set_pan_zoom(glam::Vec2::ZERO, 1.0);
-                                    }
+                                    this.bridge.set_one_to_one();
                                     cx.notify();
                                 })),
                         ),

@@ -157,15 +157,18 @@ impl HipsTileFetcher {
         Self { client, cache_dir }
     }
 
-    pub fn default_cache_dir(survey_slug: &str) -> Option<PathBuf> {
-        Self::default_cache_root().map(|root| root.join(survey_slug))
-    }
-
     pub fn default_cache_root() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
         Some(base.join("apogee").join("hips"))
+    }
+
+    pub fn tile_cache_path(&self, survey: &HipsSurvey, depth: u8, hash: u64) -> Option<PathBuf> {
+        self.cache_dir.as_ref().map(|root| {
+            root.join(survey.slug())
+                .join(survey.tile_relative_path(depth, hash))
+        })
     }
 
     pub async fn fetch_tile(
@@ -174,15 +177,11 @@ impl HipsTileFetcher {
         depth: u8,
         hash: u64,
     ) -> Result<Vec<u8>, TileFetchError> {
-        if let Some(ref root) = self.cache_dir {
-            let path = root
-                .join(survey.slug())
-                .join(survey.tile_relative_path(depth, hash));
-            if path.exists() {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    return Ok(bytes);
-                }
-            }
+        if let Some(path) = self.tile_cache_path(survey, depth, hash)
+            && path.exists()
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            return Ok(bytes);
         }
 
         let url = survey.tile_url(depth, hash);
@@ -197,10 +196,7 @@ impl HipsTileFetcher {
 
         let bytes = resp.bytes().await?.to_vec();
 
-        if let Some(ref root) = self.cache_dir {
-            let path = root
-                .join(survey.slug())
-                .join(survey.tile_relative_path(depth, hash));
+        if let Some(path) = self.tile_cache_path(survey, depth, hash) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }

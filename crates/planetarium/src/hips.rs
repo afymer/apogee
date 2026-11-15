@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub use ::hips::{HipsGrid, HipsGridConfig, HipsSurvey, HipsTileFetcher};
@@ -113,18 +116,34 @@ pub enum TileLoadResult {
     Failed { depth: u8, hash: u64 },
 }
 
+type TileRequest = (Arc<HipsSurvey>, u8, u64);
+
 #[derive(Resource)]
 pub struct HipsTileLoader {
-    request_tx: tokio::sync::mpsc::UnboundedSender<(Arc<HipsSurvey>, u8, u64)>,
+    pending_queue: Arc<Mutex<Vec<TileRequest>>>,
+    notify: Arc<tokio::sync::Notify>,
+    shutdown: Arc<AtomicBool>,
     result_rx: crossbeam_channel::Receiver<TileLoadResult>,
     in_flight: HashSet<(u8, u64)>,
 }
 
+impl Drop for HipsTileLoader {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+}
+
 impl HipsTileLoader {
     pub fn new(bridge: Option<BevyBridge>) -> Self {
-        let (request_tx, mut req_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(Arc<HipsSurvey>, u8, u64)>();
+        let pending_queue = Arc::new(Mutex::new(Vec::<TileRequest>::new()));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
         let (res_tx, result_rx) = crossbeam_channel::unbounded::<TileLoadResult>();
+
+        let worker_queue = Arc::clone(&pending_queue);
+        let worker_notify = Arc::clone(&notify);
+        let worker_shutdown = Arc::clone(&shutdown);
 
         std::thread::Builder::new()
             .name("hips-tile-fetcher".into())
@@ -138,13 +157,27 @@ impl HipsTileLoader {
                 };
 
                 rt.block_on(async move {
-                    let fetcher =
-                        HipsTileFetcher::new(HipsTileFetcher::default_cache_root());
+                    let fetcher = HipsTileFetcher::new(HipsTileFetcher::default_cache_root());
                     let sem = Arc::new(tokio::sync::Semaphore::new(8));
 
-                    while let Some((survey, depth, hash)) = req_rx.recv().await {
+                    loop {
+                        if worker_shutdown.load(Ordering::Acquire) {
+                            break;
+                        }
                         let Ok(permit) = sem.clone().acquire_owned().await else {
                             break;
+                        };
+                        let next = {
+                            let mut q = worker_queue.lock().unwrap_or_else(|e| e.into_inner());
+                            q.pop()
+                        };
+                        let Some((survey, depth, hash)) = next else {
+                            drop(permit);
+                            if worker_shutdown.load(Ordering::Acquire) {
+                                break;
+                            }
+                            worker_notify.notified().await;
+                            continue;
                         };
                         let fetcher = fetcher.clone();
                         let res_tx = res_tx.clone();
@@ -191,9 +224,49 @@ impl HipsTileLoader {
             .expect("Failed to spawn hips-tile-fetcher thread");
 
         Self {
-            request_tx,
+            pending_queue,
+            notify,
+            shutdown,
             result_rx,
             in_flight: HashSet::new(),
+        }
+    }
+
+    fn clear_pending(&mut self) {
+        let mut q = self.pending_queue.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, depth, hash) in q.drain(..) {
+            self.in_flight.remove(&(depth, hash));
+        }
+    }
+
+    fn retain_pending(&mut self, survey_name: &str, keep: &HashSet<(u8, u64)>) {
+        let mut q = self.pending_queue.lock().unwrap_or_else(|e| e.into_inner());
+        q.retain(|(req_survey, d, h)| {
+            let keep_item =
+                req_survey.name == survey_name && (*d == 0 || keep.contains(&(*d, *h)));
+            if !keep_item {
+                self.in_flight.remove(&(*d, *h));
+            }
+            keep_item
+        });
+    }
+
+    fn enqueue(&mut self, survey: &Arc<HipsSurvey>, keys: &[(u8, u64)]) {
+        if keys.is_empty() {
+            return;
+        }
+        let mut pushed = false;
+        {
+            let mut q = self.pending_queue.lock().unwrap_or_else(|e| e.into_inner());
+            for &(depth, hash) in keys {
+                if self.in_flight.insert((depth, hash)) {
+                    q.push((Arc::clone(survey), depth, hash));
+                    pushed = true;
+                }
+            }
+        }
+        if pushed {
+            self.notify.notify_one();
         }
     }
 }
@@ -388,19 +461,18 @@ pub(crate) fn hips_survey_system(
         active_survey_tiles.tiles.clear();
         image_cache.images.clear();
         mesh_cache.meshes.clear();
+        loader.clear_pending();
         loader.in_flight.clear();
         active_survey_tiles.current_survey_name = Some(survey_name.clone());
         active_survey_tiles.current_depth = None;
 
         let survey_arc = Arc::new(settings.survey.clone());
-        for h in 0..12 {
-            let key = (0, h);
-            loader.in_flight.insert(key);
-            let _ = loader.request_tx.send((Arc::clone(&survey_arc), 0, h));
-        }
+        let base_keys: Vec<(u8, u64)> = (0..12).map(|h| (0, h)).collect();
+        loader.enqueue(&survey_arc, &base_keys);
     }
 
     if !settings.enabled {
+        loader.clear_pending();
         if !active_survey_tiles.tiles.is_empty() {
             for entity in active_survey_tiles.tiles.values() {
                 commands.entity(*entity).despawn();
@@ -439,14 +511,20 @@ pub(crate) fn hips_survey_system(
     let survey_arc = Arc::new(settings.survey.clone());
 
     let visible_cells = HipsGrid::query_visible_cells(center_icrs, half_diag, target_depth);
+    let visible_keys: HashSet<(u8, u64)> = visible_cells
+        .iter()
+        .map(|&hash| (target_depth, hash))
+        .collect();
+    loader.retain_pending(&settings.survey.name, &visible_keys);
+
+    let mut missing_keys = Vec::new();
     for hash in visible_cells {
         let key = (target_depth, hash);
         if image_cache.images.contains_key(&key) {
             desired_set.insert(key);
         } else {
             if !loader.in_flight.contains(&key) {
-                loader.in_flight.insert(key);
-                let _ = loader.request_tx.send((Arc::clone(&survey_arc), target_depth, hash));
+                missing_keys.push(key);
             }
             let mut fallback_depth = target_depth;
             let mut fallback_hash = hash;
@@ -461,6 +539,23 @@ pub(crate) fn hips_survey_system(
             }
         }
     }
+    loader.enqueue(&survey_arc, &missing_keys);
+
+    // Prune descendant tiles when an ancestor fallback tile is already rendered
+    // to prevent parent/child double-blending.
+    let active_candidates = desired_set.clone();
+    desired_set.retain(|&(depth, hash)| {
+        let mut anc_depth = depth;
+        let mut anc_hash = hash;
+        while anc_depth > 0 {
+            anc_depth -= 1;
+            anc_hash >>= 2;
+            if active_candidates.contains(&(anc_depth, anc_hash)) {
+                return false;
+            }
+        }
+        true
+    });
 
     let mut to_remove = Vec::new();
     for (&key, &entity) in &active_survey_tiles.tiles {

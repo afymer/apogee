@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 glam.workspace = true
 serde.workspace = true
-thiserror.workspace = true
 hifitime.workspace = true
 bytemuck.workspace = true
 zstd.workspace = true

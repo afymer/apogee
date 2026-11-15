@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::sync::oneshot;
 
 #[derive(Debug, thiserror::Error)]
@@ -34,7 +36,7 @@ pub struct CameraFileRef {
 
 pub enum CameraCommand {
     Capture {
-        exposure_secs: u32,
+        exposure: Duration,
         reply: oneshot::Sender<Result<CameraFileRef, CaptureError>>,
     },
     Download {

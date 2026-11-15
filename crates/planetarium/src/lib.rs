@@ -692,7 +692,7 @@ impl PlanetariumRenderer {
                     let mesh_handle = {
                         let _span =
                             tracing::info_span!("create_star_mesh_step", star_count).entered();
-                        let star_mesh = stars::create_star_quad_mesh(star_count);
+                        let star_mesh = stars::create_star_quad_mesh();
                         app.world_mut()
                             .resource_mut::<Assets<Mesh>>()
                             .add(star_mesh)
@@ -713,6 +713,7 @@ impl PlanetariumRenderer {
                                 padding: 0.0,
                             },
                             stars: buffer_handle,
+                            star_count: star_count as u32,
                         }
                     };
 

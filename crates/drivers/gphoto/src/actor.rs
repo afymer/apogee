@@ -101,14 +101,13 @@ impl CameraActor {
             tokio::select! {
                 cmd = self.rx.recv() => {
                     match cmd {
-                        Some(CameraCommand::Capture {
-                            exposure_secs,
-                            reply,
-                        }) => {
-                            let capture_timeout = Duration::from_secs((exposure_secs as u64) + 20).max(Duration::from_secs(25));
+                        Some(CameraCommand::Capture { exposure, reply }) => {
+                            let capture_timeout = exposure
+                                .saturating_add(Duration::from_secs(20))
+                                .max(Duration::from_secs(25));
                             let capture_res = tokio::time::timeout(
                                 capture_timeout,
-                                Self::execute_capture(driver, exposure_secs),
+                                Self::execute_capture(driver, exposure),
                             )
                             .await;
 
@@ -200,13 +199,28 @@ impl CameraActor {
 
     async fn execute_capture(
         driver: &mut Driver<Initialized>,
-        exposure_secs: u32,
+        exposure: Duration,
     ) -> Result<CameraFileRef, CaptureError> {
         let camera = driver.camera();
-        info!("Triggering camera capture (exposure_secs={exposure_secs})...");
+        info!("Triggering camera capture (exposure={exposure:?})...");
 
-        let capture_timeout =
-            Duration::from_secs((exposure_secs as u64) + 15).max(Duration::from_secs(20));
+        if let Ok(shutter) = camera
+            .config_key::<gphoto2::widget::RadioWidget>("shutterspeed")
+            .await
+        {
+            let choices: Vec<String> = shutter.choices_iter().collect();
+            if let Some(choice) =
+                select_closest_shutter_choice(choices.iter().map(String::as_str), exposure)
+            {
+                let _ = shutter.set_choice(choice);
+                let _ = camera.set_config(&shutter).await;
+                info!("Camera shutterspeed config updated to '{choice}'");
+            }
+        }
+
+        let capture_timeout = exposure
+            .saturating_add(Duration::from_secs(15))
+            .max(Duration::from_secs(20));
         let file_path = tokio::time::timeout(capture_timeout, camera.capture_image())
             .await
             .map_err(|_| CaptureError::Fatal("Capture shutter release timed out".into()))?
@@ -351,4 +365,51 @@ impl CameraActor {
     fn set_status(&self, status: CameraStatus) {
         self.status_tx.send(status).ok();
     }
+}
+
+fn parse_shutter_choice_secs(choice: &str) -> Option<f64> {
+    let trimmed = choice.trim();
+    let stripped = trimmed
+        .strip_suffix(['s', 'S'])
+        .unwrap_or(trimmed)
+        .trim();
+    if stripped.is_empty()
+        || stripped.eq_ignore_ascii_case("bulb")
+        || stripped.eq_ignore_ascii_case("time")
+    {
+        return None;
+    }
+
+    let secs = if let Some((num, den)) = stripped.split_once('/') {
+        let n: f64 = num.trim().parse().ok()?;
+        let d: f64 = den.trim().parse().ok()?;
+        if d <= 0.0 {
+            return None;
+        }
+        n / d
+    } else {
+        stripped.replace('"', ".").parse::<f64>().ok()?
+    };
+
+    (secs.is_finite() && secs > 0.0).then_some(secs)
+}
+
+fn select_closest_shutter_choice<'a>(
+    choices: impl IntoIterator<Item = &'a str>,
+    target: Duration,
+) -> Option<&'a str> {
+    let target_secs = target.as_secs_f64();
+    if !target_secs.is_finite() || target_secs <= 0.0 {
+        return None;
+    }
+
+    choices
+        .into_iter()
+        .filter_map(|choice| {
+            let secs = parse_shutter_choice_secs(choice)?;
+            let log_dist = (secs / target_secs).ln().abs();
+            Some((choice, log_dist))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(choice, _)| choice)
 }

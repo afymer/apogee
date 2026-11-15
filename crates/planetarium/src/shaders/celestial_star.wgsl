@@ -22,7 +22,7 @@ struct StarRecord {
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
 }
 
 struct VertexOutput {
@@ -57,7 +57,7 @@ fn bp_rp_to_srgb(bp_rp: f32) -> vec3<f32> {
 fn vertex(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    let star_index = input.vertex_index / 4u;
+    let star_index = input.instance_index;
     if (star_index >= arrayLength(&stars)) {
         out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
         out.uv = vec2<f32>(0.0, 0.0);

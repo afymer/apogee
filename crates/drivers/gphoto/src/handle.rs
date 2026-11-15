@@ -17,11 +17,14 @@ impl CameraHandle {
         Self { cmd_tx, status_rx }
     }
 
-    pub async fn capture(&self, exposure_secs: u32) -> Result<CameraFileRef, CaptureError> {
+    pub async fn capture(
+        &self,
+        exposure: std::time::Duration,
+    ) -> Result<CameraFileRef, CaptureError> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         let cmd = CameraCommand::Capture {
-            exposure_secs,
+            exposure,
             reply: reply_tx,
         };
 
@@ -30,7 +33,8 @@ impl CameraHandle {
             .await
             .map_err(|_| CaptureError::ActorDisconnected)?;
 
-        let timeout_duration = std::time::Duration::from_secs((exposure_secs as u64) + 25)
+        let timeout_duration = exposure
+            .saturating_add(std::time::Duration::from_secs(25))
             .max(std::time::Duration::from_secs(30));
 
         match tokio::time::timeout(timeout_duration, reply_rx).await {

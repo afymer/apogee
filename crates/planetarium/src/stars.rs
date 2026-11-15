@@ -41,12 +41,14 @@ pub struct CelestialStarUniforms {
 pub struct CelestialStarMaterial {
     pub uniforms: CelestialStarUniforms,
     pub stars: Handle<ShaderBuffer>,
+    pub star_count: u32,
 }
 
 #[derive(Component, Clone, Copy, Debug)]
 pub struct CelestialStarDraw {
     pub mesh: AssetId<Mesh>,
     pub stars: AssetId<ShaderBuffer>,
+    pub star_count: u32,
 }
 
 impl SyncComponent for CelestialStarMaterial {
@@ -70,6 +72,7 @@ impl ExtractComponent for CelestialStarMaterial {
             CelestialStarDraw {
                 mesh: mesh.id(),
                 stars: material.stars.id(),
+                star_count: material.star_count,
             },
         ))
     }
@@ -115,25 +118,15 @@ impl SpecializedMeshPipeline for CelestialStarPipeline {
     }
 }
 
-pub fn create_star_quad_mesh(star_count: usize) -> Mesh {
-    let _span = tracing::info_span!("create_star_quad_mesh", star_count).entered();
-    let mut positions = Vec::with_capacity(star_count * 4);
-    let mut indices = Vec::with_capacity(star_count * 6);
-
-    for i in 0..star_count {
-        let base = (i * 4) as u32;
-        positions.push(Vec3::new(-1.0, -1.0, 0.0));
-        positions.push(Vec3::new(1.0, -1.0, 0.0));
-        positions.push(Vec3::new(1.0, 1.0, 0.0));
-        positions.push(Vec3::new(-1.0, 1.0, 0.0));
-
-        indices.push(base);
-        indices.push(base + 1);
-        indices.push(base + 2);
-        indices.push(base);
-        indices.push(base + 2);
-        indices.push(base + 3);
-    }
+pub fn create_star_quad_mesh() -> Mesh {
+    let _span = tracing::info_span!("create_star_quad_mesh").entered();
+    let positions = vec![
+        Vec3::new(-1.0, -1.0, 0.0),
+        Vec3::new(1.0, -1.0, 0.0),
+        Vec3::new(1.0, 1.0, 0.0),
+        Vec3::new(-1.0, 1.0, 0.0),
+    ];
+    let indices = vec![0u32, 1, 2, 0, 2, 3];
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
