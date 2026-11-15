@@ -371,3 +371,55 @@ impl PlanetariumCamera {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_spherical_bounds_poles_and_wrapping() {
+        // Near north pole: longitude interval becomes full circle and latitude clamps at +90 deg.
+        let north = compute_spherical_bounds(1.0, 85.0_f64.to_radians(), 20.0_f64.to_radians(), 1.0);
+        assert!((north.lon.span().radians() - TAU).abs() < 1e-10);
+        assert!((north.lat.end().degrees() - 90.0).abs() < 1e-10);
+
+        // Near south pole: longitude interval becomes full circle and latitude clamps at -90 deg.
+        let south =
+            compute_spherical_bounds(1.0, -85.0_f64.to_radians(), 20.0_f64.to_radians(), 1.0);
+        assert!((south.lon.span().radians() - TAU).abs() < 1e-10);
+        assert!((south.lat.start().degrees() + 90.0).abs() < 1e-10);
+
+        // Centered near lon = 2 deg on the equator: interval wraps across 0 / 2pi.
+        let wrapped =
+            compute_spherical_bounds(2.0_f64.to_radians(), 0.0, 10.0_f64.to_radians(), 1.0);
+        assert!(wrapped.lon.is_wrapping());
+        assert!(wrapped.lon.contains(Angle::ZERO));
+        assert!(wrapped.lon.contains(Angle::from_degrees(2.0)));
+        assert!(!wrapped.lon.contains(Angle::PI));
+    }
+
+    #[test]
+    fn test_set_view_mode_preserves_world_forward_direction() {
+        let mut camera = PlanetariumCamera {
+            view_mode: ViewMode::Horizontal,
+            yaw: 1.2,
+            pitch: 0.45,
+            target_yaw: 1.2,
+            target_pitch: 0.45,
+            ..Default::default()
+        };
+
+        let eq_before = camera.forward_direction_eq();
+        let topo_before = camera.forward_direction_topo();
+
+        camera.set_view_mode(ViewMode::Equatorial);
+        assert_eq!(camera.view_mode, ViewMode::Equatorial);
+        assert!(camera.forward_direction_eq().distance(eq_before) < 1e-12);
+        assert!(camera.forward_direction_topo().distance(topo_before) < 1e-12);
+
+        camera.set_view_mode(ViewMode::Horizontal);
+        assert_eq!(camera.view_mode, ViewMode::Horizontal);
+        assert!(camera.forward_direction_eq().distance(eq_before) < 1e-12);
+        assert!(camera.forward_direction_topo().distance(topo_before) < 1e-12);
+    }
+}
