@@ -339,6 +339,22 @@ impl PlanetariumCamera {
         (level, minor_alpha)
     }
 
+    /// Computes the idle redraw interval so Earth's sidereal rotation moves
+    /// by at most ~0.25 physical pixels per update, clamped between 16 ms (~60 Hz)
+    /// at high zoom and 5 s at wide FOV.
+    pub fn sky_rotation_update_interval(&self, viewport_height_px: u32) -> std::time::Duration {
+        const SIDEREAL_RAD_PER_SEC: f64 = 7.292_115e-5;
+        const MAX_DRIFT_PX: f64 = 0.25;
+        const MIN_INTERVAL_SECS: f64 = 0.016;
+        const MAX_INTERVAL_SECS: f64 = 5.0;
+
+        let height_px = f64::from(viewport_height_px.max(1));
+        // Factor of 2 accounts for stereographic edge magnification.
+        let rad_per_px = self.fov_y.max(Self::MIN_FOV_RAD) / (height_px * 2.0);
+        let secs = (MAX_DRIFT_PX * rad_per_px) / SIDEREAL_RAD_PER_SEC;
+        std::time::Duration::from_secs_f64(secs.clamp(MIN_INTERVAL_SECS, MAX_INTERVAL_SECS))
+    }
+
     pub fn view_info(&self) -> PlanetariumViewInfo {
         let (az, alt, ra, dec) = match self.view_mode {
             ViewMode::Horizontal => {

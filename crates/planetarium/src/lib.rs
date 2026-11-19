@@ -10,10 +10,7 @@ pub mod viewport;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
 
 use std::{
-    sync::{
-        Arc, Condvar, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Condvar, Mutex, PoisonError},
     thread::JoinHandle,
     time::Duration,
 };
@@ -57,6 +54,7 @@ pub struct BridgeSnapshot {
 pub struct BevyBridgeState {
     pub is_playing: bool,
     pub is_dirty: bool,
+    pub shutdown: bool,
     pub latest_texture: Option<Arc<wgpu::TextureView>>,
     pub last_size: Option<(u32, u32)>,
     pub view_info: PlanetariumViewInfo,
@@ -72,7 +70,6 @@ impl BevyBridgeState {
 struct BridgeInner {
     state: Mutex<BevyBridgeState>,
     cvar: Condvar,
-    shutdown: AtomicBool,
     notify_ui_fn: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -88,13 +85,13 @@ impl BevyBridge {
                 state: Mutex::new(BevyBridgeState {
                     is_dirty: true,
                     is_playing: false,
+                    shutdown: false,
                     latest_texture: None,
                     last_size: None,
                     view_info: PlanetariumViewInfo::default(),
                     pending_commands: Vec::new(),
                 }),
                 cvar: Condvar::new(),
-                shutdown: AtomicBool::new(false),
                 notify_ui_fn: Box::new(notify_ui),
             }),
         }
@@ -172,6 +169,31 @@ impl BevyBridge {
         self.send_command(ViewportCommand::SetHipsSurvey(survey));
     }
 
+    pub fn resize(&self, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
+        let changed = {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if guard.last_size == Some((width, height)) {
+                false
+            } else {
+                guard.last_size = Some((width, height));
+                guard
+                    .pending_commands
+                    .push(ViewportCommand::Resize(width, height));
+                guard.is_dirty = true;
+                true
+            }
+        };
+        if changed {
+            self.inner.cvar.notify_one();
+        }
+    }
+
     pub fn request_redraw(&self) {
         {
             let mut guard = self
@@ -186,7 +208,6 @@ impl BevyBridge {
 
     pub fn request_frame(&self) {
         self.request_redraw();
-        self.notify_frame_ready();
     }
 
     pub fn notify_frame_ready(&self) {
@@ -194,7 +215,14 @@ impl BevyBridge {
     }
 
     pub fn shutdown(&self) {
-        self.inner.shutdown.store(true, Ordering::Release);
+        {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.shutdown = true;
+        }
         self.inner.cvar.notify_all();
     }
 }
@@ -223,11 +251,16 @@ struct GridMeshState {
     pitch: f64,
     is_zoomed_in: bool,
     view_mode: ViewMode,
-    mesh_rotation: glam::DMat3,
+    topo_to_cam: glam::DMat3,
+    eq_to_cam: glam::DMat3,
+    epoch_secs: f64,
+    last_uniform_epoch_secs: f64,
 }
 
 impl Default for GridMeshState {
     fn default() -> Self {
+        let cam = PlanetariumCamera::default();
+        let epoch_secs = cam.observer.epoch_unix_seconds();
         Self {
             level: None,
             fov_y: 0.0,
@@ -235,7 +268,10 @@ impl Default for GridMeshState {
             pitch: 0.0,
             is_zoomed_in: false,
             view_mode: ViewMode::Horizontal,
-            mesh_rotation: PlanetariumCamera::default().camera_rotation_matrix(),
+            topo_to_cam: cam.topocentric_to_camera_matrix(),
+            eq_to_cam: cam.icrs_to_camera_matrix(),
+            epoch_secs,
+            last_uniform_epoch_secs: epoch_secs,
         }
     }
 }
@@ -243,10 +279,21 @@ impl Default for GridMeshState {
 #[derive(Resource, Default)]
 struct PendingCommands(Vec<ViewportCommand>);
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct CameraSyncState {
     view_info: PlanetariumViewInfo,
     is_interpolating: bool,
+    idle_update_interval: Duration,
+}
+
+impl Default for CameraSyncState {
+    fn default() -> Self {
+        Self {
+            view_info: PlanetariumViewInfo::default(),
+            is_interpolating: false,
+            idle_update_interval: Duration::from_secs(5),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
@@ -285,14 +332,13 @@ fn camera_movement_and_interpolation_system(
             ViewportCommand::Resize(_, _) => {
                 moved = true;
             }
-            ViewportCommand::ToggleHipsGrid(_) => {
-                moved = true;
-            }
-            ViewportCommand::ToggleHipsSurvey(_) | ViewportCommand::SetHipsSurvey(_) => {
-                moved = true;
-            }
+            _ => {}
         }
     }
+
+    camera.observer.update_epoch_now();
+    let epoch_secs = camera.observer.epoch_unix_seconds();
+    let epoch_changed = (epoch_secs - grid_state.last_uniform_epoch_secs).abs() > 1e-6;
 
     let prev_yaw = camera.yaw;
     let prev_pitch = camera.pitch;
@@ -319,7 +365,7 @@ fn camera_movement_and_interpolation_system(
         *is_initialized = true;
     }
 
-    if moved || is_interpolating || is_first_run {
+    if moved || is_interpolating || is_first_run || epoch_changed {
         let aspect = dims.width as f32 / dims.height as f32;
         let proj_params = camera.projection_params(aspect);
 
@@ -335,10 +381,12 @@ fn camera_movement_and_interpolation_system(
             diff_yaw = std::f64::consts::TAU - diff_yaw;
         }
         let effective_yaw_diff = diff_yaw * camera.pitch.cos().abs();
+        let sidereal_drift = (epoch_secs - grid_state.epoch_secs).abs() * 7.292_115e-5;
         let moved_significantly = is_zoomed_in
             && (zoom_ratio_diff > 0.15
                 || effective_yaw_diff > camera.fov_y * 0.1
-                || (camera.pitch - grid_state.pitch).abs() > camera.fov_y * 0.1);
+                || (camera.pitch - grid_state.pitch).abs() > camera.fov_y * 0.1
+                || sidereal_drift > camera.fov_y * 0.05);
 
         let needs_rebuild = grid_state.level != Some(grid_level)
             || grid_state.is_zoomed_in != is_zoomed_in
@@ -411,24 +459,32 @@ fn camera_movement_and_interpolation_system(
             grid_state.pitch = camera.pitch;
             grid_state.is_zoomed_in = is_zoomed_in;
             grid_state.view_mode = camera.view_mode;
-            grid_state.mesh_rotation = camera.camera_rotation_matrix();
+            grid_state.topo_to_cam = topo_to_cam;
+            grid_state.eq_to_cam = eq_to_cam;
+            grid_state.epoch_secs = epoch_secs;
         }
 
-        let delta_rot = camera.camera_rotation_matrix() * grid_state.mesh_rotation.transpose();
-        let delta_transform = glam::DMat4::from_mat3(delta_rot).as_mat4();
+        let delta_topo = glam::DMat4::from_mat3(
+            camera.topocentric_to_camera_matrix() * grid_state.topo_to_cam.transpose(),
+        )
+        .as_mat4();
+        let delta_eq = glam::DMat4::from_mat3(
+            camera.icrs_to_camera_matrix() * grid_state.eq_to_cam.transpose(),
+        )
+        .as_mat4();
 
         if let Ok(mut mat) = line_materials.get_mut(handles.horizon_entity) {
-            mat.uniforms.transform = delta_transform;
+            mat.uniforms.transform = delta_topo;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = 1.0;
         }
         if let Ok(mut mat) = line_materials.get_mut(handles.altaz_entity) {
-            mat.uniforms.transform = delta_transform;
+            mat.uniforms.transform = delta_topo;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = minor_alpha;
         }
         if let Ok(mut mat) = line_materials.get_mut(handles.eq_entity) {
-            mat.uniforms.transform = delta_transform;
+            mat.uniforms.transform = delta_eq;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = minor_alpha;
         }
@@ -443,8 +499,10 @@ fn camera_movement_and_interpolation_system(
             }
         }
 
+        grid_state.last_uniform_epoch_secs = epoch_secs;
         camera_sync.view_info = camera.view_info();
         camera_sync.is_interpolating = is_interpolating;
+        camera_sync.idle_update_interval = camera.sky_rotation_update_interval(dims.height);
     }
 }
 
@@ -557,7 +615,9 @@ impl PlanetariumRenderer {
                         .state
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner);
-                    guard.last_size = Some((width, height));
+                    if guard.last_size.is_none() {
+                        guard.last_size = Some((width, height));
+                    }
                 }
 
                 {
@@ -807,44 +867,54 @@ impl PlanetariumRenderer {
                 let mut current_width = width;
                 let mut current_height = height;
                 let mut is_first_frame = true;
+                let mut last_frame_start: Option<std::time::Instant> = None;
+                let mut idle_update_interval = Duration::from_secs(5);
+                const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
-                while !bridge.inner.shutdown.load(Ordering::Acquire) {
+                loop {
                     let mut guard = bridge
                         .inner
                         .state
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner);
-                    if !guard.is_dirty
-                        && !guard.is_playing
-                        && !bridge.inner.shutdown.load(Ordering::Acquire)
+                    if guard.shutdown {
+                        break;
+                    }
+                    if !guard.is_dirty && !guard.is_playing {
+                        let wait_for = last_frame_start.map_or(idle_update_interval, |start| {
+                            idle_update_interval.saturating_sub(start.elapsed())
+                        });
+                        if !wait_for.is_zero() {
+                            guard = bridge
+                                .inner
+                                .cvar
+                                .wait_timeout_while(guard, wait_for, |s| {
+                                    !s.is_dirty && !s.is_playing && !s.shutdown
+                                })
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .0;
+                        }
+                    } else if let Some(remaining) = last_frame_start
+                        .and_then(|start| MIN_FRAME_INTERVAL.checked_sub(start.elapsed()))
                     {
                         guard = bridge
                             .inner
                             .cvar
-                            .wait_while(guard, |s| {
-                                !s.is_dirty
-                                    && !s.is_playing
-                                    && !bridge.inner.shutdown.load(Ordering::Acquire)
-                            })
-                            .unwrap_or_else(PoisonError::into_inner);
-                    } else if guard.is_playing || guard.is_dirty {
-                        guard = bridge
-                            .inner
-                            .cvar
-                            .wait_timeout(guard, Duration::from_millis(16))
+                            .wait_timeout_while(guard, remaining, |s| !s.shutdown)
                             .unwrap_or_else(PoisonError::into_inner)
                             .0;
                     }
-                    if bridge.inner.shutdown.load(Ordering::Acquire) {
+                    if guard.shutdown {
                         break;
                     }
                     guard.is_dirty = false;
                     let commands = std::mem::take(&mut guard.pending_commands);
                     drop(guard);
 
+                    last_frame_start = Some(std::time::Instant::now());
                     let first_frame = is_first_frame;
                     #[cfg(all(debug_assertions, feature = "tracy"))]
-                    let frame_span = tracy_client::non_continuous_frame!("Frame");
+                    let _frame_span = tracy_client::non_continuous_frame!("Frame");
 
                     let resized_size = {
                         let _span = tracing::info_span!("process_viewport_commands").entered();
@@ -896,12 +966,21 @@ impl PlanetariumRenderer {
                         needs_frame_dirty = true;
                     }
 
-                    let (view_info, is_interpolating) =
+                    let (view_info, is_interpolating, next_idle_interval) =
                         if let Some(sync) = app.world().get_resource::<CameraSyncState>() {
-                            (sync.view_info, sync.is_interpolating)
+                            (
+                                sync.view_info,
+                                sync.is_interpolating,
+                                sync.idle_update_interval,
+                            )
                         } else {
-                            (PlanetariumViewInfo::default(), false)
+                            (
+                                PlanetariumViewInfo::default(),
+                                false,
+                                Duration::from_secs(5),
+                            )
                         };
+                    idle_update_interval = next_idle_interval;
 
                     {
                         let mut guard = bridge

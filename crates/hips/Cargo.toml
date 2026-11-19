@@ -10,6 +10,7 @@ celestial.workspace = true
 thiserror.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, features = ["fs", "rt"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

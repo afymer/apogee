@@ -45,7 +45,7 @@ pub fn create_grid_mesh_mapped(
     map_point: impl Fn(Angle, Angle) -> Vec3,
 ) -> Mesh {
     let n = subdivision_count.max(1);
-    let major_cuts = (n as f64).powi(start_level as i32);
+    let major_cuts = (n as f64).powi(start_level.min(20) as i32);
     let major_step = Angle::from_radians(Angle::TAU.radians() / major_cuts);
     create_hierarchical_grid_mesh_mapped(bounds, major_step, major_step, n, map_point)
 }
@@ -68,21 +68,25 @@ pub fn create_hierarchical_grid_mesh_mapped(
     subdivisions: u32,
     map_point: impl Fn(Angle, Angle) -> Vec3,
 ) -> Mesh {
-    let subdivisions = subdivisions.max(2) as i32;
+    let subdivisions = subdivisions.max(2) as i64;
     let tau = Angle::TAU.radians();
 
-    let major_lon_cuts = (tau / lon_major.radians()).round() as i32;
-    let total_lon_cuts = major_lon_cuts * subdivisions;
+    let major_lon_cuts = (tau / lon_major.radians().abs().max(1e-12))
+        .round()
+        .clamp(1.0, 1e12) as i64;
+    let total_lon_cuts = major_lon_cuts.saturating_mul(subdivisions);
 
-    let major_lat_cuts = (tau / lat_major.radians()).round() as i32;
-    let total_lat_cuts = major_lat_cuts * subdivisions;
+    let major_lat_cuts = (tau / lat_major.radians().abs().max(1e-12))
+        .round()
+        .clamp(1.0, 1e12) as i64;
+    let total_lat_cuts = major_lat_cuts.saturating_mul(subdivisions);
     let n_pole = total_lat_cuts / 4;
 
     let total_lon_cuts_f = total_lon_cuts as f64;
     let total_lat_cuts_f = total_lat_cuts as f64;
 
     let span_cuts_f = bounds.lon.span().radians() / tau * total_lon_cuts_f;
-    let is_full_circle = span_cuts_f.round() as i32 >= total_lon_cuts;
+    let is_full_circle = span_cuts_f.round() >= total_lon_cuts_f;
 
     let mut positions: Vec<Vec3> = Vec::new();
     let mut line_tiers: Vec<f32> = Vec::new();
@@ -90,15 +94,36 @@ pub fn create_hierarchical_grid_mesh_mapped(
     // Parallels, aka "big circles" according to Stellarium
     let lat_start_f = bounds.lat.start().radians() / tau * total_lat_cuts_f;
     let lat_end_f = bounds.lat.end().radians() / tau * total_lat_cuts_f;
-    let j_min = lat_start_f.ceil() as i32;
-    let j_max = lat_end_f.floor() as i32;
+    let j_min = lat_start_f.ceil() as i64;
+    let j_max = lat_end_f.floor() as i64;
     let j_start = j_min.max(-n_pole + 1);
     let j_end = j_max.min(n_pole - 1);
+    let mut j_stride: i64 = 1;
+    let lat_lines = j_end.saturating_sub(j_start).saturating_add(1);
+    while lat_lines / j_stride > 144 {
+        let Some(next) = j_stride.checked_mul(subdivisions) else {
+            break;
+        };
+        if next >= total_lat_cuts || next <= j_stride {
+            break;
+        }
+        j_stride = next;
+    }
+    let j_first = if j_stride > 1 {
+        j_start.div_euclid(j_stride) * j_stride
+            + if j_start.rem_euclid(j_stride) == 0 {
+                0
+            } else {
+                j_stride
+            }
+    } else {
+        j_start
+    };
 
     let num_lon_segs = if is_full_circle {
         128
     } else {
-        ((span_cuts_f.ceil() as usize * 4).max(8)).min(128)
+        ((span_cuts_f.ceil() as usize).saturating_mul(4).max(8)).min(128)
     };
 
     let lon_start_rad = if is_full_circle {
@@ -112,7 +137,7 @@ pub fn create_hierarchical_grid_mesh_mapped(
         bounds.lon.span().radians()
     };
 
-    for j in j_start..=j_end {
+    for j in (j_first..=j_end).step_by(j_stride as usize) {
         let lat = Angle::from_radians(tau * j as f64 / total_lat_cuts_f);
         let tier = if j % subdivisions == 0 || j == n_pole - 1 || j == -n_pole + 1 {
             GridLineTier::Major
@@ -145,13 +170,19 @@ pub fn create_hierarchical_grid_mesh_mapped(
     let reg_lat_span_rad = reg_lat_end - reg_lat_start;
 
     if reg_lat_span_rad > 0.0 {
-        let reg_lat_cuts = (((reg_lat_span_rad / tau) * total_lat_cuts_f).ceil() as i32).max(1);
-        let num_reg_lat_segs = ((reg_lat_cuts * 4).max(4)).min(90) as usize;
+        let reg_lat_cuts = (((reg_lat_span_rad / tau) * total_lat_cuts_f).ceil() as i64).max(1);
+        let num_reg_lat_segs = (reg_lat_cuts.saturating_mul(4).max(4)).min(90) as usize;
 
         if is_full_circle {
-            let mut stride = 1;
+            let mut stride: i64 = 1;
             while total_lon_cuts / stride > 72 {
-                stride *= subdivisions;
+                let Some(next) = stride.checked_mul(subdivisions) else {
+                    break;
+                };
+                if next >= total_lon_cuts || next <= stride {
+                    break;
+                }
+                stride = next;
             }
 
             for c in (0..total_lon_cuts).step_by(stride as usize) {
@@ -180,14 +211,20 @@ pub fn create_hierarchical_grid_mesh_mapped(
         } else {
             let start_cut_f = bounds.lon.start().radians() / tau * total_lon_cuts_f;
             let end_cut_f = start_cut_f + span_cuts_f;
-            let end_cut = end_cut_f.floor() as i32;
-            let span_cuts = span_cuts_f.ceil() as i32;
-            let mut stride: i32 = 1;
+            let end_cut = end_cut_f.floor() as i64;
+            let span_cuts = span_cuts_f.ceil() as i64;
+            let mut stride: i64 = 1;
             while span_cuts / stride > 72 {
-                stride *= subdivisions;
+                let Some(next) = stride.checked_mul(subdivisions) else {
+                    break;
+                };
+                if next >= total_lon_cuts || next <= stride {
+                    break;
+                }
+                stride = next;
             }
 
-            let c_start = (start_cut_f / stride as f64).ceil() as i32 * stride;
+            let c_start = (start_cut_f / stride as f64).ceil() as i64 * stride;
             for c in (c_start..=end_cut).step_by(stride as usize) {
                 let cut_index = c.rem_euclid(total_lon_cuts);
                 let lon = Angle::from_radians(tau * cut_index as f64 / total_lon_cuts_f);
@@ -218,8 +255,8 @@ pub fn create_hierarchical_grid_mesh_mapped(
     let north_cap_end = bounds.lat.end().radians().min(tau / 4.0);
     if north_cap_start < north_cap_end {
         let span = north_cap_end - north_cap_start;
-        let cap_cuts = (((span / tau) * total_lat_cuts_f).ceil() as i32).max(1);
-        let num_cap_segs = ((cap_cuts * 4).max(2)).min(45) as usize;
+        let cap_cuts = (((span / tau) * total_lat_cuts_f).ceil() as i64).max(1);
+        let num_cap_segs = (cap_cuts.saturating_mul(4).max(2)).min(45) as usize;
 
         for k in 0..4 {
             let lon = Angle::from_radians(k as f64 * (tau / 4.0));
@@ -244,8 +281,8 @@ pub fn create_hierarchical_grid_mesh_mapped(
     let south_cap_end = bounds.lat.end().radians().min(lat_south_limit);
     if south_cap_start < south_cap_end {
         let span = south_cap_end - south_cap_start;
-        let cap_cuts = (((span / tau) * total_lat_cuts_f).ceil() as i32).max(1);
-        let num_cap_segs = ((cap_cuts * 4).max(2)).min(45) as usize;
+        let cap_cuts = (((span / tau) * total_lat_cuts_f).ceil() as i64).max(1);
+        let num_cap_segs = (cap_cuts.saturating_mul(4).max(2)).min(45) as usize;
 
         for k in 0..4 {
             let lon = Angle::from_radians(k as f64 * (tau / 4.0));

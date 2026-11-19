@@ -245,10 +245,10 @@ impl SpecializedMeshPipeline for CelestialLinePipeline {
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mut descriptor =
             pipeline_descriptor("celestial_line_pipeline", &self.layout, &self.shader, key);
-        let mut vertex_attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
-        if layout.0.contains(crate::grids::ATTRIBUTE_LINE_TIER) {
-            vertex_attributes.push(crate::grids::ATTRIBUTE_LINE_TIER.at_shader_location(1));
-        }
+        let vertex_attributes = vec![
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            crate::grids::ATTRIBUTE_LINE_TIER.at_shader_location(1),
+        ];
         let vertex_layout = layout.0.get_layout(&vertex_attributes)?;
         descriptor.vertex.buffers = vec![vertex_layout];
         Ok(descriptor)
@@ -507,6 +507,9 @@ fn draw_celestial(
             tile_bind_groups.cache.clear();
             tile_bind_groups.buffer_id = current_buf_id;
         }
+        tile_bind_groups
+            .cache
+            .retain(|img_id, _| images.get(*img_id).is_some());
 
         let mut sorted_tiles: Vec<_> = tiles.iter().collect();
         sorted_tiles.sort_by_key(|(draw, _, _)| draw.depth);

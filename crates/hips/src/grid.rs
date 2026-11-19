@@ -29,13 +29,15 @@ impl HipsGrid {
         current_depth: Option<u8>,
         config: &HipsGridConfig,
     ) -> u8 {
+        let min_d = config.min_depth.min(config.max_depth);
+        let max_d = config.min_depth.max(config.max_depth);
         if fov_y_rad >= (120.0_f64).to_radians() {
-            return config.min_depth;
+            return min_d;
         }
 
         let h = (viewport_height_px as f64).max(1.0);
         let fov = fov_y_rad.clamp(1e-6, PI);
-        let tile_size = config.tile_px_size as f64;
+        let tile_size = config.tile_px_size.max(1) as f64;
 
         let sqrt_pi_over_3 = (PI / 3.0).sqrt();
         let target_tile_angle = tile_size * (fov / h);
@@ -53,7 +55,7 @@ impl HipsGrid {
             continuous_depth.round().max(0.0) as u8
         };
 
-        target_d.clamp(config.min_depth, config.max_depth)
+        target_d.clamp(min_d, max_d)
     }
 
     #[inline]
@@ -72,7 +74,7 @@ impl HipsGrid {
 
     pub fn query_visible_cells(center_icrs: DVec3, radius_rad: f64, depth: u8) -> Vec<u64> {
         let (lon, lat) = Self::vector_to_spherical(center_icrs);
-        let layer = cdshealpix::nested::get(depth);
+        let layer = cdshealpix::nested::get(depth.min(29));
         let radius = radius_rad.clamp(1e-6, PI);
         let bmoc = layer.cone_coverage_approx(lon, lat, radius);
         let mut cells: Vec<u64> = bmoc.flat_iter().collect();

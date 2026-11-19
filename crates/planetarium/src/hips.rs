@@ -4,9 +4,10 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
-pub use ::hips::{HipsGrid, HipsGridConfig, HipsSurvey, HipsTileFetcher};
+pub use ::hips::{HipsGrid, HipsGridConfig, HipsSurvey, HipsTileFetcher, TileFetchError};
 use bevy::{
     asset::RenderAssetUsages,
     mesh::Indices,
@@ -104,6 +105,7 @@ impl Default for HipsSurveySettings {
 }
 
 pub struct LoadedTile {
+    pub generation: u64,
     pub depth: u8,
     pub hash: u64,
     pub width: u32,
@@ -113,10 +115,15 @@ pub struct LoadedTile {
 
 pub enum TileLoadResult {
     Success(LoadedTile),
-    Failed { depth: u8, hash: u64 },
+    Failed {
+        generation: u64,
+        depth: u8,
+        hash: u64,
+        is_not_found: bool,
+    },
 }
 
-type TileRequest = (Arc<HipsSurvey>, u8, u64);
+type TileRequest = (u64, Arc<HipsSurvey>, u8, u64);
 
 #[derive(Resource)]
 pub struct HipsTileLoader {
@@ -125,6 +132,8 @@ pub struct HipsTileLoader {
     shutdown: Arc<AtomicBool>,
     result_rx: crossbeam_channel::Receiver<TileLoadResult>,
     in_flight: HashSet<(u8, u64)>,
+    failed_tiles: HashMap<(u8, u64), Option<Instant>>,
+    generation: u64,
 }
 
 impl Drop for HipsTileLoader {
@@ -171,7 +180,7 @@ impl HipsTileLoader {
                             let mut q = worker_queue.lock().unwrap_or_else(|e| e.into_inner());
                             q.pop()
                         };
-                        let Some((survey, depth, hash)) = next else {
+                        let Some((generation, survey, depth, hash)) = next else {
                             drop(permit);
                             if worker_shutdown.load(Ordering::Acquire) {
                                 break;
@@ -197,6 +206,7 @@ impl HipsTileLoader {
 
                                     if let Ok(Some((width, height, rgba))) = decode_res {
                                         let _ = res_tx.send(TileLoadResult::Success(LoadedTile {
+                                            generation,
                                             depth,
                                             hash,
                                             width,
@@ -207,14 +217,25 @@ impl HipsTileLoader {
                                             b.request_frame();
                                         }
                                     } else {
-                                        let _ = res_tx.send(TileLoadResult::Failed { depth, hash });
+                                        let _ = res_tx.send(TileLoadResult::Failed {
+                                            generation,
+                                            depth,
+                                            hash,
+                                            is_not_found: false,
+                                        });
                                     }
                                 }
                                 Err(err) => {
+                                    let is_not_found = matches!(err, TileFetchError::NotFound(_));
                                     tracing::debug!(
                                         "Failed to fetch tile ({depth}, {hash}): {err}"
                                     );
-                                    let _ = res_tx.send(TileLoadResult::Failed { depth, hash });
+                                    let _ = res_tx.send(TileLoadResult::Failed {
+                                        generation,
+                                        depth,
+                                        hash,
+                                        is_not_found,
+                                    });
                                 }
                             }
                         });
@@ -229,21 +250,25 @@ impl HipsTileLoader {
             shutdown,
             result_rx,
             in_flight: HashSet::new(),
+            failed_tiles: HashMap::new(),
+            generation: 0,
         }
     }
 
     fn clear_pending(&mut self) {
         let mut q = self.pending_queue.lock().unwrap_or_else(|e| e.into_inner());
-        for (_, depth, hash) in q.drain(..) {
+        for (_, _, depth, hash) in q.drain(..) {
             self.in_flight.remove(&(depth, hash));
         }
     }
 
     fn retain_pending(&mut self, survey_name: &str, keep: &HashSet<(u8, u64)>) {
+        let generation = self.generation;
         let mut q = self.pending_queue.lock().unwrap_or_else(|e| e.into_inner());
-        q.retain(|(req_survey, d, h)| {
-            let keep_item =
-                req_survey.name == survey_name && (*d == 0 || keep.contains(&(*d, *h)));
+        q.retain(|(req_gen, req_survey, d, h)| {
+            let keep_item = *req_gen == generation
+                && req_survey.name == survey_name
+                && (*d == 0 || keep.contains(&(*d, *h)));
             if !keep_item {
                 self.in_flight.remove(&(*d, *h));
             }
@@ -251,16 +276,32 @@ impl HipsTileLoader {
         });
     }
 
+    fn is_in_failure_cooldown(&mut self, key: (u8, u64)) -> bool {
+        match self.failed_tiles.get(&key) {
+            None => false,
+            Some(None) => true,
+            Some(Some(until)) => {
+                if Instant::now() < *until {
+                    true
+                } else {
+                    self.failed_tiles.remove(&key);
+                    false
+                }
+            }
+        }
+    }
+
     fn enqueue(&mut self, survey: &Arc<HipsSurvey>, keys: &[(u8, u64)]) {
         if keys.is_empty() {
             return;
         }
+        let generation = self.generation;
         let mut pushed = false;
         {
             let mut q = self.pending_queue.lock().unwrap_or_else(|e| e.into_inner());
             for &(depth, hash) in keys {
                 if self.in_flight.insert((depth, hash)) {
-                    q.push((Arc::clone(survey), depth, hash));
+                    q.push((generation, Arc::clone(survey), depth, hash));
                     pushed = true;
                 }
             }
@@ -284,7 +325,7 @@ pub(crate) fn create_tile_boundary_mesh(depth: u8, hash: u64) -> Mesh {
         line_tiers.push(0.0);
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::RENDER_WORLD);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(ATTRIBUTE_LINE_TIER, line_tiers);
     mesh
@@ -296,7 +337,7 @@ pub(crate) fn create_tile_surface_mesh(depth: u8, hash: u64) -> Mesh {
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, geom.positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, geom.uvs);
@@ -432,7 +473,11 @@ pub(crate) fn hips_survey_system(
     while let Ok(result) = loader.result_rx.try_recv() {
         match result {
             TileLoadResult::Success(tile) => {
+                if tile.generation != loader.generation {
+                    continue;
+                }
                 loader.in_flight.remove(&(tile.depth, tile.hash));
+                loader.failed_tiles.remove(&(tile.depth, tile.hash));
                 let image = Image::new(
                     Extent3d {
                         width: tile.width,
@@ -442,13 +487,27 @@ pub(crate) fn hips_survey_system(
                     TextureDimension::D2,
                     tile.rgba,
                     TextureFormat::Rgba8UnormSrgb,
-                    RenderAssetUsages::default(),
+                    RenderAssetUsages::RENDER_WORLD,
                 );
                 let handle = images.add(image);
                 image_cache.images.insert((tile.depth, tile.hash), handle);
             }
-            TileLoadResult::Failed { depth, hash } => {
+            TileLoadResult::Failed {
+                generation,
+                depth,
+                hash,
+                is_not_found,
+            } => {
+                if generation != loader.generation {
+                    continue;
+                }
                 loader.in_flight.remove(&(depth, hash));
+                let until = if is_not_found {
+                    None
+                } else {
+                    Some(Instant::now() + Duration::from_secs(30))
+                };
+                loader.failed_tiles.insert((depth, hash), until);
             }
         }
     }
@@ -461,8 +520,10 @@ pub(crate) fn hips_survey_system(
         active_survey_tiles.tiles.clear();
         image_cache.images.clear();
         mesh_cache.meshes.clear();
+        loader.generation = loader.generation.wrapping_add(1);
         loader.clear_pending();
         loader.in_flight.clear();
+        loader.failed_tiles.clear();
         active_survey_tiles.current_survey_name = Some(survey_name.clone());
         active_survey_tiles.current_depth = None;
 
@@ -523,7 +584,7 @@ pub(crate) fn hips_survey_system(
         if image_cache.images.contains_key(&key) {
             desired_set.insert(key);
         } else {
-            if !loader.in_flight.contains(&key) {
+            if !loader.in_flight.contains(&key) && !loader.is_in_failure_cooldown(key) {
                 missing_keys.push(key);
             }
             let mut fallback_depth = target_depth;
@@ -540,22 +601,6 @@ pub(crate) fn hips_survey_system(
         }
     }
     loader.enqueue(&survey_arc, &missing_keys);
-
-    // Prune descendant tiles when an ancestor fallback tile is already rendered
-    // to prevent parent/child double-blending.
-    let active_candidates = desired_set.clone();
-    desired_set.retain(|&(depth, hash)| {
-        let mut anc_depth = depth;
-        let mut anc_hash = hash;
-        while anc_depth > 0 {
-            anc_depth -= 1;
-            anc_hash >>= 2;
-            if active_candidates.contains(&(anc_depth, anc_hash)) {
-                return false;
-            }
-        }
-        true
-    });
 
     let mut to_remove = Vec::new();
     for (&key, &entity) in &active_survey_tiles.tiles {
@@ -619,11 +664,11 @@ pub(crate) fn hips_survey_system(
     if mesh_cache.meshes.len() > 1024 {
         mesh_cache
             .meshes
-            .retain(|key, _| active_survey_tiles.tiles.contains_key(key));
+            .retain(|key, _| key.0 == 0 || active_survey_tiles.tiles.contains_key(key));
     }
     if image_cache.images.len() > 1024 {
         image_cache
             .images
-            .retain(|key, _| active_survey_tiles.tiles.contains_key(key));
+            .retain(|key, _| key.0 == 0 || active_survey_tiles.tiles.contains_key(key));
     }
 }

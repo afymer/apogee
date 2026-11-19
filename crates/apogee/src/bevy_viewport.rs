@@ -6,7 +6,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
     ScrollWheelEvent, Window, div, prelude::*, rgb,
 };
-use planetarium::{BevyBridge, PlanetariumRenderer, ViewMode, ViewportCommand};
+use planetarium::{BevyBridge, PlanetariumRenderer, ViewMode};
 use theme::ActiveTheme;
 use ui::{
     Button, ButtonCommon, ButtonStyle, Clickable, Color, Label, LabelCommon, LabelSize, h_flex,
@@ -57,7 +57,7 @@ impl PlanetariumPanel {
 
             let notify_ui = {
                 move || {
-                    if let Ok(mut tx) = tx.try_lock() {
+                    if let Ok(mut tx) = tx.lock() {
                         let _ = tx.try_send(());
                     }
                 }
@@ -101,19 +101,30 @@ impl PlanetariumPanel {
         })
     }
 
-    fn handle_mouse_down(&mut self, event: &MouseDownEvent, _cx: &mut Context<Self>) {
+    fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         self.is_dragging = true;
         self.last_mouse_pos = Some(event.position);
+        cx.notify();
     }
 
-    fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+    fn handle_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.is_dragging {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.handle_mouse_up(cx);
             return;
         }
 
         let last_pos = self.last_mouse_pos.unwrap_or(event.position);
-        let dx = f32::from(event.position.x - last_pos.x) as f64;
-        let dy = f32::from(event.position.y - last_pos.y) as f64;
+        let scale = f64::from(window.scale_factor());
+        let dx = f32::from(event.position.x - last_pos.x) as f64 * scale;
+        let dy = f32::from(event.position.y - last_pos.y) as f64 * scale;
 
         // dx > 0 when dragging right
         // dy > 0 when dragging down
@@ -206,8 +217,8 @@ impl Render for PlanetariumPanel {
                     this.handle_mouse_down(event, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                this.handle_mouse_move(event, cx);
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.handle_mouse_move(event, window, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -231,7 +242,7 @@ impl Render for PlanetariumPanel {
                         let width = (f32::from(bounds.size.width) * scale).round() as u32;
                         let height = (f32::from(bounds.size.height) * scale).round() as u32;
                         if width > 0 && height > 0 && last_size != Some((width, height)) {
-                            bridge.send_command(ViewportCommand::Resize(width, height));
+                            bridge.resize(width, height);
                         }
                     },
                     |_bounds, _state, _window, _cx| {},

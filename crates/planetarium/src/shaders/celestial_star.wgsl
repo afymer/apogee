@@ -100,8 +100,11 @@ fn vertex(input: VertexInput) -> VertexOutput {
     let total_alpha = star_alpha * mag_cutoff_alpha;
 
     let v_cam = (uniforms.transform * vec4<f32>(star.pos, 0.0)).xyz;
+    let v_len = length(v_cam);
+    let v_cam_z = select(0.0, v_cam.z / v_len, v_len > 1e-6);
+    let min_z = mix(-0.98, 0.02, uniforms.projection.blend_factor);
 
-    if (uniforms.projection.blend_factor > 0.5 && v_cam.z <= 0.02) {
+    if (v_cam_z <= min_z) {
         out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
         out.uv = vec2<f32>(0.0, 0.0);
         out.color = vec3<f32>(0.0, 0.0, 0.0);
@@ -135,7 +138,7 @@ fn vertex(input: VertexInput) -> VertexOutput {
         center_clip.w
     );
     out.uv = corner;
-    out.color = bp_rp_to_srgb(bp_rp);
+    out.color = pow(max(bp_rp_to_srgb(bp_rp), vec3<f32>(0.0)), vec3<f32>(2.2));
     out.alpha = total_alpha;
     return out;
 }

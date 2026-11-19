@@ -1,4 +1,8 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use crate::grid::HipsGrid;
 
@@ -152,6 +156,8 @@ impl HipsTileFetcher {
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
         let client = reqwest::Client::builder()
             .user_agent("ApogeePlanetarium/0.1.0")
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
             .build()
             .unwrap_or_default();
         Self { client, cache_dir }
@@ -177,9 +183,10 @@ impl HipsTileFetcher {
         depth: u8,
         hash: u64,
     ) -> Result<Vec<u8>, TileFetchError> {
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
         if let Some(path) = self.tile_cache_path(survey, depth, hash)
-            && path.exists()
-            && let Ok(bytes) = std::fs::read(&path)
+            && let Ok(bytes) = tokio::fs::read(&path).await
         {
             return Ok(bytes);
         }
@@ -198,11 +205,14 @@ impl HipsTileFetcher {
 
         if let Some(path) = self.tile_cache_path(survey, depth, hash) {
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = tokio::fs::create_dir_all(parent).await;
             }
-            let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-            if std::fs::write(&tmp_path, &bytes).is_ok() {
-                let _ = std::fs::rename(&tmp_path, &path);
+            let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let tmp_path = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
+            if tokio::fs::write(&tmp_path, &bytes).await.is_ok()
+                && tokio::fs::rename(&tmp_path, &path).await.is_err()
+            {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
             }
         }
 
