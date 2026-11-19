@@ -75,7 +75,8 @@ impl Angle {
     #[inline]
     #[must_use]
     pub fn normalize(self) -> Self {
-        Self(self.0.rem_euclid(Self::TAU.0))
+        let r = self.0.rem_euclid(Self::TAU.0);
+        Self(if r >= Self::TAU.0 { 0.0 } else { r })
     }
 
     #[inline]
@@ -214,15 +215,25 @@ impl AngleInterval {
     }
 
     pub fn contains(&self, angle: Angle) -> bool {
-        let a = angle.radians();
         let s = self.start.radians();
         let e = self.end.radians();
         if self.is_wrapping() {
             let a_norm = angle.normalize().radians();
             let s_norm = self.start.normalize().radians();
             let e_norm = self.end.normalize().radians();
-            a_norm >= s_norm || a_norm <= e_norm
+            if s_norm <= e_norm {
+                a_norm >= s_norm && a_norm <= e_norm
+            } else {
+                a_norm >= s_norm || a_norm <= e_norm
+            }
+        } else if s >= 0.0 && e <= Angle::TAU.0 {
+            if e - s >= Angle::TAU.0 - 1e-12 {
+                return true;
+            }
+            let a_norm = angle.normalize().radians();
+            a_norm >= s && a_norm <= e
         } else {
+            let a = angle.radians();
             a >= s && a <= e
         }
     }
@@ -304,7 +315,10 @@ pub fn canonical_spherical_to_cartesian(lon: Angle, lat: Angle) -> glam::DVec3 {
 
 #[inline]
 pub fn cartesian_to_canonical_spherical(v: glam::DVec3) -> (Angle, Angle) {
-    let norm = v.normalize();
+    let norm = v.normalize_or_zero();
+    if norm == glam::DVec3::ZERO {
+        return (Angle::ZERO, Angle::ZERO);
+    }
     let lat = Angle::from_radians(norm.z.clamp(-1.0, 1.0).asin());
     let lon = Angle::from_radians_normalized(norm.y.atan2(norm.x));
     (lon, lat)
@@ -319,7 +333,10 @@ pub fn topocentric_spherical_to_enu(az: Angle, alt: Angle) -> glam::DVec3 {
 
 #[inline]
 pub fn topocentric_enu_to_spherical(v: glam::DVec3) -> (Angle, Angle) {
-    let norm = v.normalize();
+    let norm = v.normalize_or_zero();
+    if norm == glam::DVec3::ZERO {
+        return (Angle::ZERO, Angle::ZERO);
+    }
     let alt = Angle::from_radians(norm.z.clamp(-1.0, 1.0).asin());
     let az = Angle::from_radians_normalized(norm.x.atan2(norm.y));
     (az, alt)

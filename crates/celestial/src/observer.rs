@@ -30,6 +30,30 @@ impl ObservationContext {
         Self { location, epoch }
     }
 
+    pub fn update_epoch_now(&mut self) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        self.epoch = Epoch::now().unwrap_or_else(|_| Epoch::from_unix_seconds(secs));
+    }
+
+    pub fn epoch_unix_seconds(&self) -> f64 {
+        self.epoch.to_unix_seconds()
+    }
+
+    /// IAU 1976 / Lieske equatorial precession matrix from J2000/ICRS to mean equator & equinox of date.
+    pub fn precession_matrix(&self) -> DMat3 {
+        let t = (self.epoch.to_jde_tt_days() - 2451545.0) / 36525.0;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let arcsec_to_rad = std::f64::consts::PI / (180.0 * 3600.0);
+        let zeta = (2306.2181 * t + 0.30188 * t2 + 0.017998 * t3) * arcsec_to_rad;
+        let z = (2306.2181 * t + 1.09468 * t2 + 0.018203 * t3) * arcsec_to_rad;
+        let theta = (2004.3109 * t - 0.42665 * t2 - 0.041833 * t3) * arcsec_to_rad;
+        DMat3::from_rotation_z(z) * DMat3::from_rotation_y(-theta) * DMat3::from_rotation_z(zeta)
+    }
+
     /// IAU 1982/2000 formula
     pub fn gmst(&self) -> Angle {
         let jd = self.epoch.to_jde_utc_days();
@@ -54,11 +78,12 @@ impl ObservationContext {
         // Row 0 (East):  [-sin_theta, cos_theta, 0]
         // Row 1 (North): [-sin_phi * cos_theta, -sin_phi * sin_theta, cos_phi]
         // Row 2 (Up):    [cos_phi * cos_theta, cos_phi * sin_theta, sin_phi]
-        DMat3::from_cols(
+        let enu_of_date = DMat3::from_cols(
             DVec3::new(-sin_theta, -sin_phi * cos_theta, cos_phi * cos_theta),
             DVec3::new(cos_theta, -sin_phi * sin_theta, cos_phi * sin_theta),
             DVec3::new(0.0, cos_phi, sin_phi),
-        )
+        );
+        enu_of_date * self.precession_matrix()
     }
 
     /// Rotation matrix from ENU to Equatorial ICRS

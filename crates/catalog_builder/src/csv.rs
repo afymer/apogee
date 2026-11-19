@@ -81,6 +81,7 @@ fn parse_csv_reader<R: std::io::Read>(reader: R, max_mag: f32) -> Result<Vec<Sta
         let bp_rp: f32 = color_idx
             .and_then(|idx| record.get(idx))
             .and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
             .unwrap_or(0.8); // 0.8 because...it looks good :)
 
         let star =

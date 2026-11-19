@@ -50,20 +50,20 @@ impl CameraProjection {
 
     /// Radial projection distance for an angle theta from the optical axis in radians
     #[inline]
-    pub fn radial_distance(&self, theta: f64) -> Angle {
+    pub fn radial_distance(&self, theta: f64) -> f64 {
         let b = self.blend_factor();
         let r_stereo = 2.0 * (theta * 0.5).tan();
         if b <= 0.0 {
-            Angle::from_radians(r_stereo)
+            r_stereo
         } else {
             let r_persp = if theta < FRAC_PI_2 { theta.tan() } else { 1e6 };
-            Angle::from_radians((1.0 - b) * r_stereo + b * r_persp)
+            (1.0 - b) * r_stereo + b * r_persp
         }
     }
 
     /// Maps fov_y / 2 to screen radius 1.0 vertically
     #[inline]
     pub fn scale_factor(&self) -> f64 {
-        self.radial_distance(self.fov_y.radians() * 0.5).radians()
+        self.radial_distance(self.fov_y.radians() * 0.5)
     }
 }

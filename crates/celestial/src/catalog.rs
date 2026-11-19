@@ -99,18 +99,34 @@ impl StarCatalogHeader {
 pub fn read_stars_from_zst(
     reader: impl Read,
 ) -> Result<(StarCatalogHeader, Vec<StarRecord>), std::io::Error> {
+    const MAX_STAR_COUNT: u32 = 50_000_000;
     let mut decoder = zstd::stream::Decoder::new(reader)?;
 
     let mut header = StarCatalogHeader::zeroed();
     decoder.read_exact(bytemuck::bytes_of_mut(&mut header))?;
     header.validate()?;
 
-    let count = header.star_count as usize;
-    let expected_bytes = count * std::mem::size_of::<StarRecord>();
-    let mut raw_bytes = vec![0u8; expected_bytes];
-    decoder.read_exact(&mut raw_bytes)?;
+    if header.star_count > MAX_STAR_COUNT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Star count {} exceeds maximum supported ({MAX_STAR_COUNT})",
+                header.star_count
+            ),
+        ));
+    }
 
-    let records: Vec<StarRecord> = bytemuck::cast_slice(&raw_bytes).to_vec();
+    let count = header.star_count as usize;
+    let _expected_bytes = count
+        .checked_mul(std::mem::size_of::<StarRecord>())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Star catalog size overflows usize",
+            )
+        })?;
+    let mut records = vec![StarRecord::zeroed(); count];
+    decoder.read_exact(bytemuck::cast_slice_mut(&mut records))?;
     Ok((header, records))
 }
 
@@ -120,6 +136,16 @@ pub fn write_stars_to_zst(
     stars: &[StarRecord],
     compression_level: i32,
 ) -> Result<(), std::io::Error> {
+    if header.star_count as usize != stars.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Star catalog header count ({}) does not match slice length ({})",
+                header.star_count,
+                stars.len()
+            ),
+        ));
+    }
     let mut encoder = zstd::stream::Encoder::new(writer, compression_level)?;
     encoder.write_all(bytemuck::bytes_of(header))?;
     encoder.write_all(bytemuck::cast_slice(stars))?;
