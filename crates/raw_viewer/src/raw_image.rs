@@ -41,6 +41,12 @@ impl RawImage {
         if width == 0 || height == 0 {
             return Err(RawError::InvalidDimensions(width, height));
         }
+        if raw_image.cpp != 1 {
+            return Err(RawError::DecodeFailed(format!(
+                "Unsupported multi-component RAW image (cpp={}, expected 1)",
+                raw_image.cpp
+            )));
+        }
 
         let raw_pixels = match raw_image.data {
             rawloader::RawImageData::Integer(v) => v,
@@ -50,6 +56,11 @@ impl RawImage {
                 .collect(),
         };
 
+        let expected_pixels = (width as usize).checked_mul(height as usize);
+        if expected_pixels != Some(raw_pixels.len()) {
+            return Err(RawError::InvalidDimensions(width, height));
+        }
+
         let cfa_pattern = [
             raw_image.cfa.color_at(0, 0) as u32,
             raw_image.cfa.color_at(0, 1) as u32,
@@ -57,15 +68,12 @@ impl RawImage {
             raw_image.cfa.color_at(1, 1) as u32,
         ];
 
-        let mut black_levels = [
+        let black_levels = [
             raw_image.blacklevels[0] as f32,
             raw_image.blacklevels[1] as f32,
             raw_image.blacklevels[2] as f32,
             raw_image.blacklevels[3] as f32,
         ];
-        if black_levels.iter().all(|&b| b == 0.0) {
-            black_levels = [0.0, 0.0, 0.0, 0.0];
-        }
 
         let mut white_levels = [
             raw_image.whitelevels[0] as f32,
@@ -100,9 +108,11 @@ impl RawImage {
             },
         ];
         if wb_coeffs[1] > 0.0 {
-            wb_coeffs[0] /= wb_coeffs[1];
-            wb_coeffs[2] /= wb_coeffs[1];
+            let g = wb_coeffs[1];
+            wb_coeffs[0] /= g;
             wb_coeffs[1] = 1.0;
+            wb_coeffs[2] /= g;
+            wb_coeffs[3] /= g;
         }
 
         info!(

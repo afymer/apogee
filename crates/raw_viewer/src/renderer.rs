@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     histogram::HistogramData,
@@ -451,6 +451,23 @@ impl RawViewerRenderer {
     ) -> Option<HistogramData> {
         let width = image.width;
         let height = image.height;
+        let max_dim = self.device.limits().max_texture_dimension_2d;
+        let expected_pixels = (width as usize).checked_mul(height as usize);
+        if width == 0
+            || height == 0
+            || width > max_dim
+            || height > max_dim
+            || expected_pixels != Some(image.raw_pixels.len())
+        {
+            error!(
+                "Invalid RAW image dimensions or pixel buffer size: {}x{} ({} pixels, max_dim={})",
+                width,
+                height,
+                image.raw_pixels.len(),
+                max_dim
+            );
+            return None;
+        }
 
         let needs_realloc = match &self.raw_texture {
             Some((_, w, h)) => *w != width || *h != height,

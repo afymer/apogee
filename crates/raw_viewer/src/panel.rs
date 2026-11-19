@@ -21,6 +21,7 @@ use crate::{
     bridge::RawViewerBridge,
     histogram::HistogramWidget,
     raw_image::{RawError, RawImage},
+    types::ViewTransform,
 };
 use ui::{Button, ButtonStyle, Color, Label, LabelSize, prelude::*};
 
@@ -63,7 +64,7 @@ impl RawViewerPanel {
 
         let notify_ui = {
             move || {
-                if let Ok(mut tx) = tx.try_lock() {
+                if let Ok(mut tx) = tx.lock() {
                     let _ = tx.try_send(());
                 }
             }
@@ -278,7 +279,8 @@ impl RawViewerPanel {
 
                 let drag_delta = (dy + dx) * 0.008;
                 let zoom_factor = (2.0f32).powf(drag_delta);
-                let new_zoom = (start_zoom * zoom_factor).clamp(0.05, 50.0);
+                let new_zoom =
+                    (start_zoom * zoom_factor).clamp(ViewTransform::MIN_ZOOM, ViewTransform::MAX_ZOOM);
                 let ratio = new_zoom / start_zoom;
                 let new_pan = anchor_pan - (anchor_pan - start_pan) * ratio;
                 self.bridge.set_pan_zoom(new_pan, new_zoom);
@@ -313,7 +315,7 @@ impl RawViewerPanel {
         let factor = (1.15f32).powf(delta_lines.clamp(-5.0, 5.0));
         let anchor_pan = self.screen_to_pan_space(event.position, bounds);
         let (pan, zoom) = self.bridge.pan_zoom();
-        let new_zoom = (zoom * factor).clamp(0.05, 50.0);
+        let new_zoom = (zoom * factor).clamp(ViewTransform::MIN_ZOOM, ViewTransform::MAX_ZOOM);
         let ratio = new_zoom / zoom;
         let new_pan = anchor_pan - (anchor_pan - pan) * ratio;
         self.bridge.set_pan_zoom(new_pan, new_zoom);
@@ -327,6 +329,24 @@ impl Render for RawViewerPanel {
         let bridge = self.bridge.clone();
         let last_size = self.bridge.last_size();
         let (_, current_zoom) = self.bridge.pan_zoom();
+        let display_zoom_pct = if let (Some((raw_w, raw_h)), Some((view_w, view_h))) =
+            (self.bridge.image_size(), last_size)
+        {
+            let view_w = (view_w as f32).max(1.0);
+            let view_h = (view_h as f32).max(1.0);
+            let raw_w = (raw_w as f32).max(1.0);
+            let raw_h = (raw_h as f32).max(1.0);
+            let screen_aspect = view_w / view_h;
+            let img_aspect = raw_w / raw_h;
+            let fitted_w = if screen_aspect > img_aspect {
+                view_h * img_aspect
+            } else {
+                view_w
+            };
+            current_zoom * (fitted_w / raw_w) * 100.0
+        } else {
+            current_zoom * 100.0
+        };
 
         let bounds_store = self.viewport_bounds.clone();
         let resize_canvas = gpui::canvas(
@@ -430,7 +450,7 @@ impl Render for RawViewerPanel {
                             .border_1()
                             .border_color(cx.theme().colors().border_variant)
                             .child(
-                                Label::new(format!("{:.0}%", current_zoom * 100.0))
+                                Label::new(format!("{display_zoom_pct:.0}%"))
                                     .size(LabelSize::Small)
                                     .color(Color::Default),
                             ),

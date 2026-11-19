@@ -1,3 +1,8 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
 use client::{DaemonCommandSender, GlobalDaemonState};
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Window,
@@ -20,6 +25,7 @@ pub struct CaptureControlPanel {
     bridge: RawViewerBridge,
     focus_handle: FocusHandle,
     last_frame_id: Option<u64>,
+    decode_generation: Arc<AtomicU64>,
 }
 
 impl EventEmitter<PanelEvent> for CaptureControlPanel {}
@@ -27,6 +33,7 @@ impl EventEmitter<PanelEvent> for CaptureControlPanel {}
 impl CaptureControlPanel {
     pub fn build(bridge: RawViewerBridge, cx: &mut App) -> Entity<Self> {
         cx.new(|cx| {
+            let decode_generation = Arc::new(AtomicU64::new(0));
             let global_state = cx.try_global::<GlobalDaemonState>().map(|g| g.0.clone());
             if let Some(state_entity) = global_state {
                 cx.observe(&state_entity, |this: &mut Self, model, cx| {
@@ -34,13 +41,18 @@ impl CaptureControlPanel {
                     if let Some(frame) = &model_ref.latest_frame {
                         if this.last_frame_id != Some(frame.frame_id) {
                             this.last_frame_id = Some(frame.frame_id);
+                            let generation =
+                                this.decode_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                            let decode_gen = Arc::clone(&this.decode_generation);
                             let data = frame.data.clone();
                             let bridge = this.bridge.clone();
                             cx.background_executor()
                                 .spawn(async move {
                                     match RawImage::decode_from_memory(&data) {
                                         Ok(image) => {
-                                            bridge.set_image(image);
+                                            if decode_gen.load(Ordering::Acquire) == generation {
+                                                bridge.set_image(image);
+                                            }
                                         }
                                         Err(err) => {
                                             tracing::error!("Failed to decode raw image: {err}");
@@ -59,16 +71,14 @@ impl CaptureControlPanel {
                 bridge,
                 focus_handle: cx.focus_handle(),
                 last_frame_id: None,
+                decode_generation,
             }
         })
     }
 
     pub fn trigger_capture(&mut self, cx: &mut Context<Self>) {
         if let Some(sender) = cx.try_global::<DaemonCommandSender>() {
-            let frame_id = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
+            let frame_id = client::next_frame_id();
 
             let frame = Frame {
                 id: frame_id,
@@ -103,24 +113,25 @@ impl Render for CaptureControlPanel {
         };
 
         let daemon_model = cx.try_global::<GlobalDaemonState>().map(|g| g.0.read(cx));
-        let (_is_capturing, can_capture, capture_label) = if let Some(model) = daemon_model {
-            let capturing = model.state.daemon == DaemonStatus::Capturing;
-            let ready = model.state.connection == ConnectionState::Connected
-                && model.state.camera == CameraStatus::Ready
-                && !capturing;
-            let label = if capturing {
-                "Capturing..."
-            } else if model.state.connection != ConnectionState::Connected {
-                "Daemon Disconnected"
-            } else if model.state.camera != CameraStatus::Ready {
-                "Camera Offline"
+        let (_is_capturing, can_capture, capture_label, last_error) =
+            if let Some(model) = daemon_model {
+                let capturing = model.state.daemon == DaemonStatus::Capturing;
+                let ready = model.state.connection == ConnectionState::Connected
+                    && model.state.camera == CameraStatus::Ready
+                    && !capturing;
+                let label = if capturing {
+                    "Capturing..."
+                } else if model.state.connection != ConnectionState::Connected {
+                    "Daemon Disconnected"
+                } else if model.state.camera != CameraStatus::Ready {
+                    "Camera Offline"
+                } else {
+                    "Capture Frame"
+                };
+                (capturing, ready, label, model.last_error.clone())
             } else {
-                "Capture Frame"
+                (false, false, "Capture Frame", None)
             };
-            (capturing, ready, label)
-        } else {
-            (false, false, "Capture Frame")
-        };
 
         v_flex()
             .size_full()
@@ -146,6 +157,11 @@ impl Render for CaptureControlPanel {
                         this.trigger_capture(cx);
                     })),
             )
+            .children(last_error.map(|(frame_id, message)| {
+                Label::new(format!("Frame #{frame_id}: {message}"))
+                    .size(LabelSize::Small)
+                    .color(Color::Error)
+            }))
             .child(
                 Button::new("toggle_demosaic_btn", demosaic_label)
                     .style(ButtonStyle::Subtle)

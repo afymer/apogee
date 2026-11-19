@@ -20,7 +20,7 @@ fn map_value_to_bin(val: f32, x_log: u32) -> u32 {
     var norm = t;
     if (x_log != 0u) {
         const C: f32 = 100.0;
-        const INV_LOG_C_PLUS_1: f32 = 0.21668499; // 1.0 / log(101.0)
+        const INV_LOG_C_PLUS_1: f32 = 0.21667907; // 1.0 / log(101.0)
         norm = log(1.0 + C * t) * INV_LOG_C_PLUS_1;
     }
     return clamp(u32(norm * 255.0), 0u, 255u);

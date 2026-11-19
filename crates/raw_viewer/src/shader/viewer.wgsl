@@ -35,10 +35,23 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Fetch raw 16-bit integer sensor value with border clamping
+fn mirror_coord(v: i32, limit: i32) -> i32 {
+    if (limit <= 1) {
+        return 0;
+    }
+    if (v < 0) {
+        return min(-v, limit - 1);
+    }
+    if (v >= limit) {
+        return max(2 * (limit - 1) - v, 0);
+    }
+    return v;
+}
+
+// Fetch raw 16-bit integer sensor value with parity-preserving mirror clamping
 fn get_raw(x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(img.image_size.x) - 1);
-    let cy = clamp(y, 0, i32(img.image_size.y) - 1);
+    let cx = mirror_coord(x, i32(img.image_size.x));
+    let cy = mirror_coord(y, i32(img.image_size.y));
     return f32(textureLoad(raw_texture, vec2<i32>(cx, cy), 0).r);
 }
 

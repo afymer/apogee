@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        Arc, Condvar, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Condvar, Mutex, PoisonError},
     thread::JoinHandle,
 };
 
@@ -27,6 +24,7 @@ pub struct PendingChanges {
 
 pub struct RawViewerBridgeState {
     pub is_dirty: bool,
+    pub shutdown: bool,
     pub latest_texture: Option<Arc<wgpu::TextureView>>,
     pub last_size: Option<(u32, u32)>,
     pub image_size: Option<(u32, u32)>,
@@ -42,6 +40,7 @@ impl Default for RawViewerBridgeState {
     fn default() -> Self {
         Self {
             is_dirty: true,
+            shutdown: false,
             latest_texture: None,
             last_size: None,
             image_size: None,
@@ -58,7 +57,6 @@ impl Default for RawViewerBridgeState {
 struct BridgeInner {
     state: Mutex<RawViewerBridgeState>,
     cvar: Condvar,
-    shutdown: AtomicBool,
     notify_ui_fn: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -73,7 +71,6 @@ impl RawViewerBridge {
             inner: Arc::new(BridgeInner {
                 state: Mutex::new(RawViewerBridgeState::default()),
                 cvar: Condvar::new(),
-                shutdown: AtomicBool::new(false),
                 notify_ui_fn: Box::new(notify_ui),
             }),
         }
@@ -182,8 +179,18 @@ impl RawViewerBridge {
     }
 
     pub fn toggle_demosaic(&self) {
-        let current = self.demosaic();
-        self.set_demosaic(!current);
+        {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let enabled = !guard.demosaic;
+            guard.demosaic = enabled;
+            guard.pending.demosaic = Some(enabled);
+            guard.is_dirty = true;
+        }
+        self.inner.cvar.notify_one();
     }
 
     pub fn display_range(&self) -> (f32, f32) {
@@ -292,23 +299,35 @@ impl RawViewerBridge {
     }
 
     pub fn resize(&self, width: u32, height: u32) {
+        let changed = {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if guard.last_size == Some((width, height)) {
+                false
+            } else {
+                guard.pending.resize = Some((width, height));
+                guard.last_size = Some((width, height));
+                guard.is_dirty = true;
+                true
+            }
+        };
+        if changed {
+            self.inner.cvar.notify_one();
+        }
+    }
+
+    pub fn shutdown(&self) {
         {
             let mut guard = self
                 .inner
                 .state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if guard.last_size != Some((width, height)) {
-                guard.pending.resize = Some((width, height));
-                guard.last_size = Some((width, height));
-                guard.is_dirty = true;
-            }
+            guard.shutdown = true;
         }
-        self.inner.cvar.notify_one();
-    }
-
-    pub fn shutdown(&self) {
-        self.inner.shutdown.store(true, Ordering::Release);
         self.inner.cvar.notify_all();
     }
 
@@ -324,16 +343,24 @@ impl RawViewerBridge {
             .name("Raw viewer renderer".to_string())
             .spawn(move || {
                 let mut renderer = RawViewerRenderer::new(device, queue);
-                let mut current_size = (initial_width.max(1), initial_height.max(1));
-
-                {
+                let mut current_size = {
                     let mut guard = bridge
                         .inner
                         .state
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner);
-                    guard.last_size = Some(current_size);
-                }
+                    if let Some((w, h)) = guard.last_size {
+                        let size = (w.max(1), h.max(1));
+                        if guard.pending.resize == Some((w, h)) {
+                            guard.pending.resize = None;
+                        }
+                        size
+                    } else {
+                        let size = (initial_width.max(1), initial_height.max(1));
+                        guard.last_size = Some(size);
+                        size
+                    }
+                };
 
                 let initial_view = renderer.render(current_size.0, current_size.1);
                 {
@@ -346,24 +373,22 @@ impl RawViewerBridge {
                 }
                 (bridge.inner.notify_ui_fn)();
 
-                while !bridge.inner.shutdown.load(Ordering::Acquire) {
+                loop {
                     let mut guard = bridge
                         .inner
                         .state
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner);
 
-                    if !guard.is_dirty && !bridge.inner.shutdown.load(Ordering::Acquire) {
+                    if !guard.is_dirty && !guard.shutdown {
                         guard = bridge
                             .inner
                             .cvar
-                            .wait_while(guard, |s| {
-                                !s.is_dirty && !bridge.inner.shutdown.load(Ordering::Acquire)
-                            })
+                            .wait_while(guard, |s| !s.is_dirty && !s.shutdown)
                             .unwrap_or_else(PoisonError::into_inner);
                     }
 
-                    if bridge.inner.shutdown.load(Ordering::Acquire) {
+                    if guard.shutdown {
                         break;
                     }
 

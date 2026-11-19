@@ -157,8 +157,9 @@ impl Render for HistogramWidget {
         let show_b = self.show_b;
         let show_l = self.show_l;
 
+        let entity_id = cx.entity_id();
         let mut root = div()
-            .id("histogram_widget_root")
+            .id(format!("histogram_widget_root_{entity_id:?}"))
             .w(px(290.0))
             .p_2()
             .gap_1p5()
@@ -195,7 +196,7 @@ impl Render for HistogramWidget {
                             .color(Color::Muted),
                     )
                     .child(
-                        Button::new("hist_x_scale_btn", x_scale_label)
+                        Button::new(format!("hist_x_scale_btn_{entity_id:?}"), x_scale_label)
                             .style(if x_scale_mode == ScaleMode::Log {
                                 ButtonStyle::Filled
                             } else {
@@ -207,7 +208,7 @@ impl Render for HistogramWidget {
                             })),
                     )
                     .child(
-                        Button::new("hist_y_scale_btn", y_scale_label)
+                        Button::new(format!("hist_y_scale_btn_{entity_id:?}"), y_scale_label)
                             .style(if y_scale_mode == ScaleMode::Log {
                                 ButtonStyle::Filled
                             } else {
@@ -224,7 +225,7 @@ impl Render for HistogramWidget {
                     .gap_1()
                     .items_center()
                     .child(
-                        Button::new("hist_toggle_r", "R")
+                        Button::new(format!("hist_toggle_r_{entity_id:?}"), "R")
                             .style(if show_r {
                                 ButtonStyle::Filled
                             } else {
@@ -236,7 +237,7 @@ impl Render for HistogramWidget {
                             })),
                     )
                     .child(
-                        Button::new("hist_toggle_g", "G")
+                        Button::new(format!("hist_toggle_g_{entity_id:?}"), "G")
                             .style(if show_g {
                                 ButtonStyle::Filled
                             } else {
@@ -248,7 +249,7 @@ impl Render for HistogramWidget {
                             })),
                     )
                     .child(
-                        Button::new("hist_toggle_b", "B")
+                        Button::new(format!("hist_toggle_b_{entity_id:?}"), "B")
                             .style(if show_b {
                                 ButtonStyle::Filled
                             } else {
@@ -260,7 +261,7 @@ impl Render for HistogramWidget {
                             })),
                     )
                     .child(
-                        Button::new("hist_toggle_l", "L")
+                        Button::new(format!("hist_toggle_l_{entity_id:?}"), "L")
                             .style(if show_l {
                                 ButtonStyle::Filled
                             } else {
