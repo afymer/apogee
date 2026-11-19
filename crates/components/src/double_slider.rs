@@ -51,8 +51,11 @@ impl DoubleSlider {
     }
 
     fn set_range_internal(&mut self, min: f32, max: f32, cx: &mut Context<Self>, emit: bool) {
-        let min = min.clamp(0.0, 0.999);
-        let max = max.clamp(min + 0.001, 1.0);
+        let min = if min.is_finite() { min } else { 0.0 }.clamp(0.0, 0.999);
+        let max = if max.is_finite() { max } else { 1.0 }.clamp(min + 0.001, 1.0);
+        if (self.min_val - min).abs() < 1e-6 && (self.max_val - max).abs() < 1e-6 {
+            return;
+        }
         self.min_val = min;
         self.max_val = max;
         if emit {
@@ -279,6 +282,7 @@ impl Render for DoubleSlider {
         .top_0()
         .left_0();
 
+        let entity_id = cx.entity_id();
         let p = if self.active_knob == ActiveKnob::None {
             self.proximity
         } else {
@@ -289,11 +293,18 @@ impl Render for DoubleSlider {
         let track_top = (24.0 - track_h) / 2.0;
         let r = track_h / 2.0;
 
-        let track_alpha = 0.10 + 0.08 * p;
-        let track_bg = hsla(0.0, 0.0, 1.0, track_alpha);
+        let lerp_hsla = |a: gpui::Hsla, b: gpui::Hsla, t: f32| -> gpui::Hsla {
+            let t = t.clamp(0.0, 1.0);
+            hsla(
+                a.h + (b.h - a.h) * t,
+                a.s + (b.s - a.s) * t,
+                a.l + (b.l - a.l) * t,
+                a.a + (b.a - a.a) * t,
+            )
+        };
 
-        let active_alpha = 0.85 - 0.35 * p;
-        let active_bg = hsla(0.0, 0.0, 1.0, active_alpha);
+        let track_bg = lerp_hsla(colors.track_background, colors.track_background_hover, p);
+        let active_bg = lerp_hsla(colors.active_track_idle, colors.active_track, p);
 
         let active_bar = div()
             .absolute()
@@ -316,11 +327,21 @@ impl Render for DoubleSlider {
 
         if p > 0.02 {
             let knob_opacity = p.powf(1.5);
-            let knob_bg = hsla(0.0, 0.0, 1.0, knob_opacity);
-            let knob_border = hsla(0.0, 0.0, 0.0, 0.25 * knob_opacity);
+            let knob_bg = hsla(
+                colors.knob_background.h,
+                colors.knob_background.s,
+                colors.knob_background.l,
+                colors.knob_background.a * knob_opacity,
+            );
+            let knob_border = hsla(
+                colors.knob_border.h,
+                colors.knob_border.s,
+                colors.knob_border.l,
+                colors.knob_border.a * knob_opacity,
+            );
 
             let mut min_knob = div()
-                .id("double_slider_min_knob")
+                .id(format!("double_slider_min_knob_{entity_id:?}"))
                 .absolute()
                 .top_0()
                 .left(relative(self.min_val))
@@ -355,7 +376,7 @@ impl Render for DoubleSlider {
                 );
 
             let mut max_knob = div()
-                .id("double_slider_max_knob")
+                .id(format!("double_slider_max_knob_{entity_id:?}"))
                 .absolute()
                 .top_0()
                 .left(relative(self.max_val))
@@ -402,7 +423,7 @@ impl Render for DoubleSlider {
         }
 
         div()
-            .id("double_slider_root")
+            .id(format!("double_slider_root_{entity_id:?}"))
             .relative()
             .w_full()
             .h(px(24.0))

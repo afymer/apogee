@@ -63,16 +63,36 @@ impl Render for Dock {
             .active_index
             .and_then(|i| self.panels.get(i))
             .map(|panel| div().flex_1().overflow_hidden().child(panel.to_any()));
+
+        if self.position == DockPosition::Center {
+            return root.children(active_panel);
+        }
+
+        let tabs = self.panels.iter().enumerate().map(|(idx, panel)| {
+            let is_active = self.active_index == Some(idx);
+            let title = panel.title(cx);
+            Button::new(format!("{}_tab_{idx}", self.title), title)
+                .style(if is_active {
+                    ButtonStyle::Filled
+                } else {
+                    ButtonStyle::Subtle
+                })
+                .label_size(LabelSize::Small)
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if this.active_index != Some(idx) {
+                        this.active_index = Some(idx);
+                        cx.notify();
+                    }
+                }))
+        });
+
         root.child(
             h_flex()
                 .px_2()
                 .py_1()
+                .gap_1()
                 .bg(cx.theme().colors().panel_background)
-                .child(
-                    Label::new(self.title.clone())
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
+                .children(tabs),
         )
         .children(active_panel)
     }

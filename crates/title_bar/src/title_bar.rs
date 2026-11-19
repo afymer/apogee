@@ -62,7 +62,45 @@ impl TitleBar {
             )
             .menu(|window, cx| {
                 Some(ContextMenu::build(window, cx, |menu, _window, _cx| {
-                    menu.entry("Capture Frame", None, |_window, _cx| {})
+                    menu.entry("Capture Frame", None, |_window, cx| {
+                        let can_capture =
+                            cx.try_global::<client::GlobalDaemonState>()
+                                .is_some_and(|global| {
+                                    let state = &global.0.read(cx).state;
+                                    state.connection == protocol::ConnectionState::Connected
+                                        && state.camera == protocol::CameraStatus::Ready
+                                        && state.daemon != protocol::DaemonStatus::Capturing
+                                });
+                        if !can_capture {
+                            tracing::warn!(
+                                "Capture Frame ignored: daemon or camera is not ready"
+                            );
+                            return;
+                        }
+                        if let Some(sender) = cx.try_global::<client::DaemonCommandSender>() {
+                            let frame = protocol::Frame {
+                                id: client::next_frame_id(),
+                                target_name: "capture".to_string(),
+                                frame_type: protocol::FrameType::Light,
+                                params: protocol::CaptureParams {
+                                    exposure: std::time::Duration::from_secs(1),
+                                    iso: None,
+                                },
+                                save_config: protocol::SaveLocationConfig::default(),
+                            };
+                            if sender
+                                .0
+                                .try_send(protocol::ViewerMessage::StartCapture(frame))
+                                .is_err()
+                            {
+                                tracing::error!("Failed to send StartCapture command to daemon");
+                            }
+                        } else {
+                            tracing::warn!(
+                                "Capture Frame ignored: DaemonCommandSender global unavailable"
+                            );
+                        }
+                    })
                 }))
             })
     }

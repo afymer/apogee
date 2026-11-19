@@ -8,6 +8,9 @@ gpui.workspace = true
 ui.workspace = true
 theme.workspace = true
 workspace.workspace = true
+client.workspace = true
+protocol.workspace = true
+tracing.workspace = true
 
 [lib]
 name = "title_bar"
