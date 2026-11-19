@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use protocol::camera::CameraStatus;
 use tokio::sync::{mpsc, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     Driver, Initialized, Uninitialized,
@@ -83,7 +83,7 @@ impl CameraActor {
             self.set_status(CameraStatus::Ready);
 
             let failure_reason = self.serve_requests(&mut driver).await;
-            driver.close();
+            driver.close().await;
 
             if failure_reason.is_none() {
                 return;
@@ -101,28 +101,39 @@ impl CameraActor {
             tokio::select! {
                 cmd = self.rx.recv() => {
                     match cmd {
-                        Some(CameraCommand::Capture { exposure, reply }) => {
+                        Some(CameraCommand::Capture { exposure, iso, mut cancel, reply }) => {
+                            if *cancel.borrow() {
+                                let _ = reply.send(Err(CaptureError::Interrupted));
+                                continue;
+                            }
                             let capture_timeout = exposure
-                                .saturating_add(Duration::from_secs(20))
-                                .max(Duration::from_secs(25));
+                                .saturating_add(Duration::from_secs(25))
+                                .max(Duration::from_secs(30));
                             let capture_res = tokio::time::timeout(
                                 capture_timeout,
-                                Self::execute_capture(driver, exposure),
+                                Self::execute_capture(driver, exposure, iso, &mut cancel),
                             )
                             .await;
 
                             match capture_res {
-                                Ok(Ok(captured)) => {
+                                Ok(CaptureOutcome::Completed(Ok(captured))) => {
                                     let _ = reply.send(Ok(captured));
                                     keep_alive_interval.reset();
                                 }
-                                Ok(Err(err)) => {
+                                Ok(CaptureOutcome::Completed(Err(err))) => {
                                     error!("Capture execution failed: {err:?}");
                                     let is_fatal = matches!(err, CaptureError::Fatal(_));
                                     let _ = reply.send(Err(err));
                                     if is_fatal {
                                         return Some("Fatal hardware error during capture".into());
                                     }
+                                }
+                                Ok(CaptureOutcome::Cancelled { needs_reconnect }) => {
+                                    let _ = reply.send(Err(CaptureError::Interrupted));
+                                    if needs_reconnect {
+                                        return Some("Capture aborted; reconnecting camera".into());
+                                    }
+                                    keep_alive_interval.reset();
                                 }
                                 Err(_) => {
                                     error!("Capture timed out after {capture_timeout:?}!");
@@ -138,8 +149,18 @@ impl CameraActor {
                             filename,
                             reply,
                         }) => {
-                            let res = Self::execute_download(driver, &folder, &filename).await;
-                            let _ = reply.send(res);
+                            match Self::execute_download(driver, &folder, &filename).await {
+                                Ok(data) => {
+                                    let _ = reply.send(Ok(data));
+                                    keep_alive_interval.reset();
+                                }
+                                Err((err, timed_out)) => {
+                                    let _ = reply.send(Err(err));
+                                    if timed_out {
+                                        return Some("Camera download timed out".into());
+                                    }
+                                }
+                            }
                         }
                         Some(CameraCommand::DeleteFile {
                             folder,
@@ -158,6 +179,7 @@ impl CameraActor {
                                 Ok(Ok(())) => {
                                     info!("Successfully deleted {folder}/{filename} from camera");
                                     let _ = reply.send(Ok(()));
+                                    keep_alive_interval.reset();
                                 }
                                 Ok(Err(err)) => {
                                     warn!("Failed to delete {folder}/{filename} from camera: {err}");
@@ -168,6 +190,7 @@ impl CameraActor {
                                     let _ = reply.send(Err(DeleteError::Failed(
                                         "Delete file timed out".into(),
                                     )));
+                                    return Some("Camera delete timed out".into());
                                 }
                             }
                         }
@@ -200,68 +223,302 @@ impl CameraActor {
     async fn execute_capture(
         driver: &mut Driver<Initialized>,
         exposure: Duration,
-    ) -> Result<CameraFileRef, CaptureError> {
+        iso: Option<u32>,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> CaptureOutcome {
         let camera = driver.camera();
-        info!("Triggering camera capture (exposure={exposure:?})...");
+        info!("Triggering camera capture (exposure={exposure:?}, iso={iso:?})...");
 
-        if let Ok(shutter) = camera
-            .config_key::<gphoto2::widget::RadioWidget>("shutterspeed")
+        if let Some(target_iso) = iso {
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                camera.config_key::<gphoto2::widget::RadioWidget>("iso"),
+            )
             .await
-        {
-            let choices: Vec<String> = shutter.choices_iter().collect();
-            if let Some(choice) =
-                select_closest_shutter_choice(choices.iter().map(String::as_str), exposure)
             {
-                let _ = shutter.set_choice(choice);
-                let _ = camera.set_config(&shutter).await;
-                info!("Camera shutterspeed config updated to '{choice}'");
+                Ok(Ok(iso_widget)) => {
+                    let choices: Vec<String> = iso_widget.choices_iter().collect();
+                    if let Some(choice) =
+                        select_closest_iso_choice(choices.iter().map(String::as_str), target_iso)
+                    {
+                        if let Err(err) = iso_widget.set_choice(choice) {
+                            warn!("Failed to set ISO choice '{choice}': {err}");
+                        } else {
+                            match tokio::time::timeout(
+                                Duration::from_secs(5),
+                                camera.set_config(&iso_widget),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => info!("Camera ISO config updated to '{choice}'"),
+                                Ok(Err(err)) => {
+                                    warn!("Failed to apply ISO config '{choice}': {err}");
+                                }
+                                Err(_) => warn!("Timed out applying ISO config '{choice}'"),
+                            }
+                        }
+                    } else {
+                        warn!("No numeric ISO choice matched requested ISO {target_iso}");
+                    }
+                }
+                Ok(Err(err)) => warn!("Failed to read camera ISO config: {err}"),
+                Err(_) => warn!("Timed out reading camera ISO config"),
             }
+        }
+
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            camera.config_key::<gphoto2::widget::RadioWidget>("shutterspeed"),
+        )
+        .await
+        {
+            Ok(Ok(shutter)) => {
+                let choices: Vec<String> = shutter.choices_iter().collect();
+                let max_finite = choices
+                    .iter()
+                    .filter_map(|c| parse_shutter_choice_secs(c))
+                    .reduce(f64::max);
+
+                if let Some(max_s) = max_finite
+                    && exposure.as_secs_f64() > max_s * 1.15
+                {
+                    let bulb_choice = choices
+                        .iter()
+                        .map(String::as_str)
+                        .find(|c| c.trim().eq_ignore_ascii_case("bulb"));
+
+                    let bulb_toggle = match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        camera.config_key::<gphoto2::widget::ToggleWidget>("bulb"),
+                    )
+                    .await
+                    {
+                        Ok(Ok(widget)) => Some(widget),
+                        Ok(Err(err)) => {
+                            warn!("Camera bulb toggle widget unavailable: {err}");
+                            None
+                        }
+                        Err(_) => {
+                            warn!("Timed out reading camera bulb toggle widget");
+                            None
+                        }
+                    };
+
+                    let (Some(b_choice), Some(bulb_widget)) = (bulb_choice, bulb_toggle) else {
+                        return CaptureOutcome::Completed(Err(CaptureError::Fatal(format!(
+                            "Requested exposure {exposure:?} exceeds max fixed shutter speed ({max_s:.1}s) and camera bulb mode is unavailable"
+                        ))));
+                    };
+
+                    if let Err(err) = shutter.set_choice(b_choice) {
+                        return CaptureOutcome::Completed(Err(CaptureError::Fatal(format!(
+                            "Failed to select bulb shutterspeed '{b_choice}': {err}"
+                        ))));
+                    }
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        camera.set_config(&shutter),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => info!("Camera shutterspeed config updated to '{b_choice}'"),
+                        Ok(Err(err)) => {
+                            return CaptureOutcome::Completed(Err(CaptureError::Fatal(format!(
+                                "Failed to apply bulb shutterspeed '{b_choice}': {err}"
+                            ))));
+                        }
+                        Err(_) => {
+                            return CaptureOutcome::Completed(Err(CaptureError::Fatal(
+                                "Timed out applying bulb shutterspeed".into(),
+                            )));
+                        }
+                    }
+
+                    bulb_widget.set_toggled(true);
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        camera.set_config(&bulb_widget),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            return CaptureOutcome::Completed(Err(CaptureError::Fatal(format!(
+                                "Failed to open bulb shutter: {err}"
+                            ))));
+                        }
+                        Err(_) => {
+                            return CaptureOutcome::Completed(Err(CaptureError::Fatal(
+                                "Timed out opening bulb shutter".into(),
+                            )));
+                        }
+                    }
+
+                    let was_cancelled = tokio::select! {
+                        () = tokio::time::sleep(exposure) => false,
+                        () = wait_for_cancel(cancel) => true,
+                    };
+
+                    bulb_widget.set_toggled(false);
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        camera.set_config(&bulb_widget),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            return CaptureOutcome::Completed(Err(CaptureError::Fatal(format!(
+                                "Failed to close bulb shutter: {err}"
+                            ))));
+                        }
+                        Err(_) => {
+                            return CaptureOutcome::Completed(Err(CaptureError::Fatal(
+                                "Timed out closing bulb shutter".into(),
+                            )));
+                        }
+                    }
+
+                    if was_cancelled {
+                        return CaptureOutcome::Cancelled {
+                            needs_reconnect: false,
+                        };
+                    }
+
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                    loop {
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        if remaining.is_zero() {
+                            return CaptureOutcome::Completed(Err(CaptureError::Fatal(
+                                "Timed out waiting for bulb capture file event".into(),
+                            )));
+                        }
+                        let step = remaining.min(Duration::from_secs(2));
+                        match tokio::time::timeout(
+                            step + Duration::from_secs(2),
+                            driver.wait_event(step),
+                        )
+                        .await
+                        {
+                            Ok(Ok(gphoto2::camera::CameraEvent::NewFile(file_path))) => {
+                                let folder = file_path.folder().to_string();
+                                let name = file_path.name().to_string();
+                                info!("Captured bulb file on camera storage: {folder}/{name}");
+                                return CaptureOutcome::Completed(Ok(CameraFileRef {
+                                    folder,
+                                    filename: name,
+                                }));
+                            }
+                            Ok(Ok(_)) => continue,
+                            Ok(Err(err)) => {
+                                return CaptureOutcome::Completed(Err(CaptureError::Fatal(
+                                    format!("Error waiting for bulb capture file event: {err}"),
+                                )));
+                            }
+                            Err(_) => {
+                                return CaptureOutcome::Completed(Err(CaptureError::Fatal(
+                                    "Camera wait_event timed out during bulb capture".into(),
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                if let Some(choice) =
+                    select_closest_shutter_choice(choices.iter().map(String::as_str), exposure)
+                {
+                    if let Err(err) = shutter.set_choice(choice) {
+                        warn!("Failed to select shutterspeed choice '{choice}': {err}");
+                    } else {
+                        match tokio::time::timeout(
+                            Duration::from_secs(5),
+                            camera.set_config(&shutter),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {
+                                info!("Camera shutterspeed config updated to '{choice}'");
+                            }
+                            Ok(Err(err)) => {
+                                warn!("Failed to apply shutterspeed config '{choice}': {err}");
+                            }
+                            Err(_) => {
+                                warn!("Timed out applying shutterspeed config '{choice}'");
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Err(err)) => debug!("Camera shutterspeed config unavailable: {err}"),
+            Err(_) => warn!("Timed out reading camera shutterspeed config"),
         }
 
         let capture_timeout = exposure
             .saturating_add(Duration::from_secs(15))
             .max(Duration::from_secs(20));
-        let file_path = tokio::time::timeout(capture_timeout, camera.capture_image())
-            .await
-            .map_err(|_| CaptureError::Fatal("Capture shutter release timed out".into()))?
-            .map_err(|err| {
-                error!("Camera capture_image error: {err}");
-                CaptureError::Fatal(err.to_string())
-            })?;
 
-        let folder = file_path.folder().to_string();
-        let name = file_path.name().to_string();
-        info!("Captured file on camera storage: {folder}/{name}");
-
-        Ok(CameraFileRef {
-            folder,
-            filename: name,
-        })
+        tokio::select! {
+            res = tokio::time::timeout(capture_timeout, camera.capture_image()) => {
+                match res {
+                    Ok(Ok(file_path)) => {
+                        let folder = file_path.folder().to_string();
+                        let name = file_path.name().to_string();
+                        info!("Captured file on camera storage: {folder}/{name}");
+                        CaptureOutcome::Completed(Ok(CameraFileRef {
+                            folder,
+                            filename: name,
+                        }))
+                    }
+                    Ok(Err(err)) => {
+                        error!("Camera capture_image error: {err}");
+                        CaptureOutcome::Completed(Err(CaptureError::Fatal(err.to_string())))
+                    }
+                    Err(_) => CaptureOutcome::Completed(Err(CaptureError::Fatal(
+                        "Capture shutter release timed out".into(),
+                    ))),
+                }
+            }
+            () = wait_for_cancel(cancel) => {
+                CaptureOutcome::Cancelled { needs_reconnect: true }
+            }
+        }
     }
 
     async fn execute_download(
         driver: &Driver<Initialized>,
         folder: &str,
         filename: &str,
-    ) -> Result<Vec<u8>, DownloadError> {
+    ) -> Result<Vec<u8>, (DownloadError, bool)> {
         let camera = driver.camera();
         info!("Downloading {folder}/{filename} from camera...");
 
         let download_timeout = Duration::from_secs(30);
-        let camera_file = tokio::time::timeout(download_timeout, camera.fs().download(folder, filename))
-            .await
-            .map_err(|_| DownloadError::Failed("Downloading file from camera timed out".into()))?
-            .map_err(|err| {
-                error!("Camera download error: {err}");
-                DownloadError::Failed(err.to_string())
-            })?;
+        let camera_file =
+            tokio::time::timeout(download_timeout, camera.fs().download(folder, filename))
+                .await
+                .map_err(|_| {
+                    (
+                        DownloadError::Failed("Downloading file from camera timed out".into()),
+                        true,
+                    )
+                })?
+                .map_err(|err| {
+                    error!("Camera download error: {err}");
+                    (DownloadError::Failed(err.to_string()), false)
+                })?;
 
         let data = tokio::time::timeout(download_timeout, camera_file.get_data(camera))
             .await
-            .map_err(|_| DownloadError::Failed("Reading file data from camera timed out".into()))?
+            .map_err(|_| {
+                (
+                    DownloadError::Failed("Reading file data from camera timed out".into()),
+                    true,
+                )
+            })?
             .map_err(|err| {
                 error!("Camera get_data error: {err}");
-                DownloadError::Failed(err.to_string())
+                (DownloadError::Failed(err.to_string()), false)
             })?;
 
         info!("Downloaded {} bytes for file {filename}", data.len());
@@ -341,22 +598,58 @@ impl CameraActor {
 
     async fn try_detect_once(&mut self) -> Option<Driver<Initialized>> {
         let uninit = Driver::<Uninitialized>::default();
-        let ctx = gphoto2::Context::new().ok()?;
+        let ctx = match gphoto2::Context::new() {
+            Ok(ctx) => ctx,
+            Err(err) => {
+                warn!("Failed to create gphoto2 context: {err}");
+                return None;
+            }
+        };
 
-        let driver = tokio::time::timeout(Duration::from_secs(5), uninit.initialize(&ctx))
-            .await
-            .ok()? // No timeout
-            .ok()?; // initialization succeeded
+        let driver = match tokio::time::timeout(Duration::from_secs(5), uninit.initialize(&ctx)).await
+        {
+            Ok(Ok(driver)) => driver,
+            Ok(Err(err)) => {
+                debug!("Camera autodetect failed: {err}");
+                return None;
+            }
+            Err(_) => {
+                warn!("Timed out waiting for camera autodetect");
+                return None;
+            }
+        };
 
         // Attempt to disable auto power-off if supported by camera model
-        if let Ok(autopoweroff) = driver
-            .camera()
-            .config_key::<gphoto2::widget::RadioWidget>("autopoweroff")
-            .await
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            driver
+                .camera()
+                .config_key::<gphoto2::widget::RadioWidget>("autopoweroff"),
+        )
+        .await
         {
-            let _ = autopoweroff.set_choice("0");
-            let _ = driver.camera().set_config(&autopoweroff).await;
-            info!("Camera autopoweroff config updated to 0 (Disabled)");
+            Ok(Ok(autopoweroff)) => {
+                if let Err(err) = autopoweroff.set_choice("0") {
+                    warn!("Failed to select autopoweroff=0: {err}");
+                } else {
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        driver.camera().set_config(&autopoweroff),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            info!("Camera autopoweroff config updated to 0 (Disabled)");
+                        }
+                        Ok(Err(err)) => {
+                            warn!("Failed to apply autopoweroff=0 config: {err}");
+                        }
+                        Err(_) => warn!("Timed out applying autopoweroff=0 config"),
+                    }
+                }
+            }
+            Ok(Err(err)) => debug!("Camera autopoweroff config unavailable: {err}"),
+            Err(_) => warn!("Timed out reading camera autopoweroff config"),
         }
 
         Some(driver)
@@ -365,6 +658,49 @@ impl CameraActor {
     fn set_status(&self, status: CameraStatus) {
         self.status_tx.send(status).ok();
     }
+}
+
+enum CaptureOutcome {
+    Completed(Result<CameraFileRef, CaptureError>),
+    Cancelled { needs_reconnect: bool },
+}
+
+async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    if cancel.wait_for(|&c| c).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+fn select_closest_iso_choice<'a>(
+    choices: impl IntoIterator<Item = &'a str>,
+    target_iso: u32,
+) -> Option<&'a str> {
+    let target = f64::from(target_iso);
+    if target <= 0.0 {
+        return None;
+    }
+
+    choices
+        .into_iter()
+        .filter_map(|choice| {
+            let trimmed = choice.trim();
+            let numeric_part = trimmed
+                .strip_prefix("ISO")
+                .or_else(|| trimmed.strip_prefix("iso"))
+                .unwrap_or(trimmed)
+                .trim();
+            let val: f64 = numeric_part.parse().ok()?;
+            if !val.is_finite() || val <= 0.0 {
+                return None;
+            }
+            let log_dist = (val / target).ln().abs();
+            Some((choice, log_dist))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(choice, _)| choice)
 }
 
 fn parse_shutter_choice_secs(choice: &str) -> Option<f64> {

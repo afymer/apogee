@@ -20,11 +20,24 @@ impl CameraHandle {
     pub async fn capture(
         &self,
         exposure: std::time::Duration,
+        iso: Option<u32>,
+    ) -> Result<CameraFileRef, CaptureError> {
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        self.capture_with_cancel(exposure, iso, cancel_rx).await
+    }
+
+    pub async fn capture_with_cancel(
+        &self,
+        exposure: std::time::Duration,
+        iso: Option<u32>,
+        cancel: watch::Receiver<bool>,
     ) -> Result<CameraFileRef, CaptureError> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         let cmd = CameraCommand::Capture {
             exposure,
+            iso,
+            cancel,
             reply: reply_tx,
         };
 
@@ -34,8 +47,8 @@ impl CameraHandle {
             .map_err(|_| CaptureError::ActorDisconnected)?;
 
         let timeout_duration = exposure
-            .saturating_add(std::time::Duration::from_secs(25))
-            .max(std::time::Duration::from_secs(30));
+            .saturating_add(std::time::Duration::from_secs(35))
+            .max(std::time::Duration::from_secs(40));
 
         match tokio::time::timeout(timeout_duration, reply_rx).await {
             Ok(Ok(result)) => result,
@@ -60,7 +73,7 @@ impl CameraHandle {
             .await
             .map_err(|_| DownloadError::ActorDisconnected)?;
 
-        let timeout_duration = std::time::Duration::from_secs(35);
+        let timeout_duration = std::time::Duration::from_secs(65);
         match tokio::time::timeout(timeout_duration, reply_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(DownloadError::ActorDisconnected),
@@ -82,7 +95,7 @@ impl CameraHandle {
             .await
             .map_err(|_| DeleteError::ActorDisconnected)?;
 
-        let timeout_duration = std::time::Duration::from_secs(10);
+        let timeout_duration = std::time::Duration::from_secs(15);
         match tokio::time::timeout(timeout_duration, reply_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(DeleteError::ActorDisconnected),

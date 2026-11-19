@@ -8,11 +8,12 @@ mod tests;
 use gphoto::handle::CameraHandle;
 use protocol::{DaemonStatus, Frame};
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub use crate::capture::{
     CapturedFrame, delete_camera_file, download_captured_file, execute_capture,
-    should_delete_from_camera, should_download, trigger_camera_exposure,
+    execute_capture_with_cancel, should_delete_from_camera, should_download,
+    trigger_camera_exposure, trigger_camera_exposure_with_cancel,
 };
 pub use crate::controller_handle::{ControllerCommand, ControllerError, ControllerHandle};
 pub use crate::controller_job::ControllerJob;
@@ -26,6 +27,7 @@ pub enum ControllerEvent {
 
 enum InternalMessage {
     CaptureFinished {
+        job_id: u64,
         frame_id: u64,
         result: Result<capture::CapturedFrame, capture::CaptureExecutionError>,
     },
@@ -38,8 +40,9 @@ pub struct Controller {
     internal_rx: mpsc::Receiver<InternalMessage>,
     status_tx: watch::Sender<DaemonStatus>,
     event_tx: broadcast::Sender<ControllerEvent>,
-    #[allow(dead_code)]
     current_job: Option<ControllerJob>,
+    active_job_id: u64,
+    current_cancel_tx: Option<watch::Sender<bool>>,
     current_abort_handle: Option<tokio::task::AbortHandle>,
 }
 
@@ -62,6 +65,8 @@ impl Controller {
             status_tx,
             event_tx,
             current_job: None,
+            active_job_id: 0,
+            current_cancel_tx: None,
             current_abort_handle: None,
         };
 
@@ -83,6 +88,9 @@ impl Controller {
                         }
                         None => {
                             info!("Controller command channel closed, shutting down controller");
+                            if let Some(cancel_tx) = self.current_cancel_tx.take() {
+                                let _ = cancel_tx.send(true);
+                            }
                             if let Some(abort) = self.current_abort_handle.take() {
                                 abort.abort();
                             }
@@ -91,8 +99,8 @@ impl Controller {
                     }
                 }
                 internal_msg = self.internal_rx.recv() => {
-                    if let Some(InternalMessage::CaptureFinished { frame_id, result }) = internal_msg {
-                        self.handle_capture_finished(frame_id, result);
+                    if let Some(InternalMessage::CaptureFinished { job_id, frame_id, result }) = internal_msg {
+                        self.handle_capture_finished(job_id, frame_id, result);
                     }
                 }
             }
@@ -119,8 +127,13 @@ impl Controller {
             return;
         }
 
+        self.active_job_id = self.active_job_id.wrapping_add(1);
+        let job_id = self.active_job_id;
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+
         self.set_status(DaemonStatus::Capturing);
         self.current_job = Some(ControllerJob::Capture(frame.clone()));
+        self.current_cancel_tx = Some(cancel_tx);
 
         let camera = self.camera.clone();
         let internal_tx = self.internal_tx.clone();
@@ -128,9 +141,10 @@ impl Controller {
         let capture_frame = frame.clone();
 
         let task = tokio::spawn(async move {
-            let res = execute_capture(&camera, &capture_frame).await;
+            let res = execute_capture_with_cancel(&camera, &capture_frame, cancel_rx).await;
             let _ = internal_tx
                 .send(InternalMessage::CaptureFinished {
+                    job_id,
                     frame_id,
                     result: res,
                 })
@@ -142,6 +156,10 @@ impl Controller {
 
     fn handle_abort(&mut self) {
         warn!("Controller received Abort command");
+        self.active_job_id = self.active_job_id.wrapping_add(1);
+        if let Some(cancel_tx) = self.current_cancel_tx.take() {
+            let _ = cancel_tx.send(true);
+        }
         if let Some(abort) = self.current_abort_handle.take() {
             abort.abort();
             info!("Aborted running capture task");
@@ -152,10 +170,20 @@ impl Controller {
 
     fn handle_capture_finished(
         &mut self,
+        job_id: u64,
         frame_id: u64,
         result: Result<capture::CapturedFrame, capture::CaptureExecutionError>,
     ) {
+        if job_id != self.active_job_id || self.current_job.is_none() {
+            debug!(
+                "Ignoring stale capture completion for frame {frame_id} (job {job_id}, active {})",
+                self.active_job_id
+            );
+            return;
+        }
+
         self.current_abort_handle = None;
+        self.current_cancel_tx = None;
         self.current_job = None;
 
         match result {

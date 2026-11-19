@@ -1,25 +1,27 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Router,
     extract::{
-        Path, State, WebSocketUpgrade,
+        Path as AxumPath, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
-use controller::{ControllerEvent, ControllerHandle};
+use controller::{CapturedFrame, ControllerEvent, ControllerHandle};
 use futures::{SinkExt, StreamExt};
-use protocol::{CameraStatus, DaemonMessage, DaemonStatus, ViewerMessage};
+use protocol::{CameraStatus, DaemonMessage, DaemonStatus, FrameType, ViewerMessage};
 use serde::Serialize;
 use tokio::sync::{RwLock, broadcast};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -28,14 +30,156 @@ use tracing::{error, info, warn};
 pub struct FrameCacheEntry {
     pub data: Vec<u8>,
     pub mime_type: String,
+    pub filename: String,
+}
+
+#[derive(Default)]
+pub struct FrameCache {
+    entries: HashMap<u64, FrameCacheEntry>,
+    order: VecDeque<u64>,
+}
+
+impl FrameCache {
+    fn insert(&mut self, frame_id: u64, entry: FrameCacheEntry) {
+        const MAX_CACHED_FRAMES: usize = 10;
+
+        if let std::collections::hash_map::Entry::Occupied(mut occupied) =
+            self.entries.entry(frame_id)
+        {
+            occupied.insert(entry);
+            return;
+        }
+
+        while self.entries.len() >= MAX_CACHED_FRAMES {
+            if let Some(oldest_id) = self.order.pop_front() {
+                self.entries.remove(&oldest_id);
+            } else {
+                break;
+            }
+        }
+
+        self.entries.insert(frame_id, entry);
+        self.order.push_back(frame_id);
+    }
+
+    fn get(&self, frame_id: u64) -> Option<&FrameCacheEntry> {
+        self.entries.get(&frame_id)
+    }
 }
 
 pub struct ServerState {
     pub controller: ControllerHandle,
     pub broadcast_tx: broadcast::Sender<DaemonMessage>,
-    pub frame_cache: Arc<RwLock<HashMap<u64, FrameCacheEntry>>>,
+    pub frame_cache: Arc<RwLock<FrameCache>>,
     pub latest_preview: Arc<RwLock<Option<(u64, Vec<u8>)>>>,
     pub active_viewers_count: Arc<AtomicUsize>,
+    pub capture_dir: PathBuf,
+}
+
+fn default_capture_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("APOGEE_CAPTURE_DIR") {
+        let path = PathBuf::from(dir);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join("apogee-daemon-test-captures")
+    }
+
+    #[cfg(not(test))]
+    {
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+            let p = PathBuf::from(data_home);
+            if !p.as_os_str().is_empty() {
+                return p.join("apogee").join("captures");
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("apogee")
+                .join("captures");
+        }
+        std::env::temp_dir().join("apogee-captures")
+    }
+}
+
+fn sanitize_filename_component(input: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('.');
+    if trimmed.is_empty() || trimmed.contains("..") {
+        "frame".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn build_capture_filename(captured: &CapturedFrame, template_override: Option<&str>) -> String {
+    let frame = &captured.frame;
+    let template = template_override.unwrap_or(&frame.save_config.common_template);
+    let frame_type = match frame.frame_type {
+        FrameType::Light => "light",
+        FrameType::Dark => "dark",
+        FrameType::Flat => "flat",
+        FrameType::Bias => "bias",
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let exposure_ms = frame.params.exposure.as_millis();
+
+    let rendered = template
+        .replace("{target}", &frame.target_name)
+        .replace("{frame_type}", frame_type)
+        .replace("{exposure_ms}", &exposure_ms.to_string())
+        .replace("{timestamp}", &timestamp.to_string())
+        .replace("{frame_id}", &frame.id.to_string());
+
+    let stem = sanitize_filename_component(&rendered);
+    let ext = Path::new(&captured.file_ref.filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            e.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+        })
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| "raw".to_string());
+
+    format!("{stem}.{ext}")
+}
+
+fn detect_raw_mime_type(filename: &str) -> &'static str {
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("cr2") => "image/x-canon-cr2",
+        Some("cr3") => "image/x-canon-cr3",
+        Some("nef") => "image/x-nikon-nef",
+        Some("arw") => "image/x-sony-arw",
+        Some("dng") => "image/x-adobe-dng",
+        Some("orf") => "image/x-olympus-orf",
+        Some("raf") => "image/x-fuji-raf",
+        Some("fits" | "fit") => "application/fits",
+        _ => "application/octet-stream",
+    }
 }
 
 impl ServerState {
@@ -45,9 +189,10 @@ impl ServerState {
         Self {
             controller,
             broadcast_tx,
-            frame_cache: Arc::new(RwLock::new(HashMap::new())),
+            frame_cache: Arc::new(RwLock::new(FrameCache::default())),
             latest_preview: Arc::new(RwLock::new(None)),
             active_viewers_count: Arc::new(AtomicUsize::new(0)),
+            capture_dir: default_capture_dir(),
         }
     }
 
@@ -55,16 +200,79 @@ impl ServerState {
         let _ = self.broadcast_tx.send(msg);
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn store_frame(&self, frame_id: u64, data: Vec<u8>, mime_type: String) {
-        const MAX_CACHED_FRAMES: usize = 10;
+        self.store_frame_with_name(frame_id, format!("frame_{frame_id}.raw"), data, mime_type)
+            .await;
+    }
+
+    pub async fn store_frame_with_name(
+        &self,
+        frame_id: u64,
+        filename: String,
+        data: Vec<u8>,
+        mime_type: String,
+    ) {
         let mut cache = self.frame_cache.write().await;
-        if cache.len() >= MAX_CACHED_FRAMES {
-            if let Some(&oldest_id) = cache.keys().min() {
-                cache.remove(&oldest_id);
-            }
+        cache.insert(
+            frame_id,
+            FrameCacheEntry {
+                data,
+                mime_type,
+                filename,
+            },
+        );
+    }
+
+    pub async fn persist_frame_to_disk(
+        &self,
+        captured: &CapturedFrame,
+        data: &[u8],
+    ) -> std::io::Result<PathBuf> {
+        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+        tokio::fs::create_dir_all(&self.capture_dir).await?;
+
+        let template_override = captured
+            .frame
+            .save_config
+            .server
+            .as_ref()
+            .and_then(|s| s.override_template.as_deref());
+        let filename = build_capture_filename(captured, template_override);
+        let mut dest_path = self.capture_dir.join(&filename);
+        if dest_path.exists() {
+            let stem = dest_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("frame")
+                .to_string();
+            let ext = dest_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("raw")
+                .to_string();
+            let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+            dest_path = self
+                .capture_dir
+                .join(format!("{stem}_{}_{seq}.{ext}", captured.frame.id));
         }
-        cache.insert(frame_id, FrameCacheEntry { data, mime_type });
+
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = self.capture_dir.join(format!(
+            ".{}.{}.{}.tmp",
+            captured.frame.id,
+            std::process::id(),
+            seq
+        ));
+
+        tokio::fs::write(&tmp_path, data).await?;
+        if let Err(err) = tokio::fs::rename(&tmp_path, &dest_path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(err);
+        }
+
+        Ok(dest_path)
     }
 
     #[allow(dead_code)]
@@ -108,15 +316,19 @@ async fn status_handler(State(state): State<Arc<ServerState>>) -> impl IntoRespo
     })
 }
 
-async fn frame_raw_handler(Path(id): Path<u64>, State(state): State<Arc<ServerState>>) -> Response {
+async fn frame_raw_handler(
+    AxumPath(id): AxumPath<u64>,
+    State(state): State<Arc<ServerState>>,
+) -> Response {
     let cache = state.frame_cache.read().await;
-    if let Some(entry) = cache.get(&id) {
+    if let Some(entry) = cache.get(id) {
         let mut response = (StatusCode::OK, entry.data.clone()).into_response();
         if let Ok(mime) = HeaderValue::from_str(&entry.mime_type) {
             response.headers_mut().insert(header::CONTENT_TYPE, mime);
         }
-        let filename = format!("attachment; filename=\"frame_{id}.raw\"");
-        if let Ok(disp) = HeaderValue::from_str(&filename) {
+        let safe_name = sanitize_filename_component(&entry.filename);
+        let disposition = format!("attachment; filename=\"{safe_name}\"");
+        if let Ok(disp) = HeaderValue::from_str(&disposition) {
             response
                 .headers_mut()
                 .insert(header::CONTENT_DISPOSITION, disp);
@@ -135,7 +347,7 @@ async fn frame_raw_handler(Path(id): Path<u64>, State(state): State<Arc<ServerSt
 }
 
 async fn frame_preview_handler(
-    Path(id): Path<u64>,
+    AxumPath(id): AxumPath<u64>,
     State(state): State<Arc<ServerState>>,
 ) -> Response {
     let preview_guard = state.latest_preview.read().await;
@@ -290,30 +502,74 @@ async fn handle_viewer_command(msg: ViewerMessage, state: &Arc<ServerState>) {
 pub fn spawn_controller_event_forwarder(state: Arc<ServerState>) {
     let mut event_rx = state.controller.subscribe_events();
     tokio::spawn(async move {
-        while let Ok(event) = event_rx.recv().await {
+        loop {
+            let event = match event_rx.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!("Controller event forwarder lagged by {skipped} messages; continuing");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+
             match event {
                 ControllerEvent::Status(status) => {
                     state.broadcast(DaemonMessage::Status(status));
                 }
                 ControllerEvent::FrameCaptured(captured) => {
-                    let filename = &captured.file_ref.filename;
-                    let mime = if filename.to_lowercase().ends_with(".cr2") {
-                        "image/x-canon-cr2"
-                    } else if filename.to_lowercase().ends_with(".cr3") {
-                        "image/x-canon-cr3"
+                    let frame_id = captured.frame.id;
+                    let mime = detect_raw_mime_type(&captured.file_ref.filename);
+                    let save_to_server = captured.frame.save_config.server.is_some();
+                    let save_to_viewer = captured.frame.save_config.viewer.is_some();
+
+                    if let Some(data) = captured.data.as_ref() {
+                        let mut persist_ok = true;
+                        if save_to_server {
+                            match state.persist_frame_to_disk(&captured, data).await {
+                                Ok(path) => {
+                                    info!("Saved frame {frame_id} to {}", path.display());
+                                }
+                                Err(err) => {
+                                    error!("Failed to save frame {frame_id} to disk: {err}");
+                                    persist_ok = false;
+                                    state.broadcast(DaemonMessage::CaptureError {
+                                        frame_id,
+                                        message: format!(
+                                            "Failed to save frame to server storage: {err}"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+
+                        if save_to_viewer {
+                            let filename = if captured.file_ref.filename.is_empty() {
+                                format!("frame_{frame_id}.raw")
+                            } else {
+                                captured.file_ref.filename.clone()
+                            };
+                            state
+                                .store_frame_with_name(
+                                    frame_id,
+                                    filename,
+                                    data.clone(),
+                                    mime.into(),
+                                )
+                                .await;
+                            let raw_url = format!("/api/frames/{frame_id}/raw");
+                            state.broadcast(DaemonMessage::FrameReady {
+                                frame_id,
+                                url: raw_url,
+                            });
+                        } else if persist_ok {
+                            state.broadcast(DaemonMessage::FrameReady {
+                                frame_id,
+                                url: String::new(),
+                            });
+                        }
                     } else {
-                        "application/octet-stream"
-                    };
-                    if let Some(data) = captured.data {
-                        state.store_frame(captured.frame.id, data, mime.into()).await;
-                        let raw_url = format!("/api/frames/{}/raw", captured.frame.id);
                         state.broadcast(DaemonMessage::FrameReady {
-                            frame_id: captured.frame.id,
-                            url: raw_url,
-                        });
-                    } else {
-                        state.broadcast(DaemonMessage::FrameReady {
-                            frame_id: captured.frame.id,
+                            frame_id,
                             url: String::new(),
                         });
                     }

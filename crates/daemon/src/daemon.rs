@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use controller::Controller;
 use gphoto::actor::CameraActor;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod server;
@@ -26,10 +26,16 @@ async fn main() -> anyhow::Result<()> {
     let camera_handle = CameraActor::spawn();
     let controller_handle = Controller::spawn(camera_handle);
 
-    let bind_addr: SocketAddr = std::env::var("APOGEE_DAEMON_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:4000".to_string())
-        .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 4000)));
+    let bind_addr: SocketAddr = match std::env::var("APOGEE_DAEMON_ADDR") {
+        Ok(raw_addr) => match raw_addr.parse() {
+            Ok(addr) => addr,
+            Err(err) => {
+                warn!("Invalid APOGEE_DAEMON_ADDR '{raw_addr}': {err}. Falling back to 0.0.0.0:4000");
+                SocketAddr::from(([0, 0, 0, 0], 4000))
+            }
+        },
+        Err(_) => SocketAddr::from(([0, 0, 0, 0], 4000)),
+    };
 
     server::start_server(bind_addr, controller_handle).await?;
 

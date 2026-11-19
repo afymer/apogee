@@ -53,15 +53,7 @@ impl Driver<Initialized> {
         self.state.camera.wait_event(timeout).await
     }
 
-    pub fn close(self) {
-        // Because the doc of from_ref states that
-        // the recommended way to write this code is
-        // to avoid relying on lifetime extension
-        // when raw pointers are involved
-        let ptr = self.state.camera.as_ref();
-        let cam_ptr = std::ptr::from_ref(ptr).cast_mut();
-        unsafe {
-            let _ = gphoto2::libgphoto2_sys::gp_camera_exit(cam_ptr, std::ptr::null_mut());
-        }
+    pub async fn close(self) {
+        let _ = tokio::task::spawn_blocking(move || drop(self)).await;
     }
 }
