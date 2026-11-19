@@ -38,8 +38,25 @@ impl ObservationContext {
         self.epoch = Epoch::now().unwrap_or_else(|_| Epoch::from_unix_seconds(secs));
     }
 
+    pub fn set_epoch_unix_seconds(&mut self, unix_seconds: f64) {
+        self.epoch = Epoch::from_unix_seconds(unix_seconds);
+    }
+
     pub fn epoch_unix_seconds(&self) -> f64 {
         self.epoch.to_unix_seconds()
+    }
+
+    pub fn local_sidereal_time_hms(&self) -> (u8, u8, u8) {
+        let total_secs = (self.local_sidereal_time().hours() * 3600.0).round() as u64 % 86_400;
+        let h = (total_secs / 3600) as u8;
+        let m = ((total_secs % 3600) / 60) as u8;
+        let s = (total_secs % 60) as u8;
+        (h, m, s)
+    }
+
+    pub fn format_lst_hms(&self) -> String {
+        let (h, m, s) = self.local_sidereal_time_hms();
+        format!("{h:02}h {m:02}m {s:02}s")
     }
 
     /// IAU 1976 / Lieske equatorial precession matrix from J2000/ICRS to mean equator & equinox of date.

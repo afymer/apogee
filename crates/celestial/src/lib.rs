@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod coords;
 pub mod observer;
 pub mod projection;
+pub mod solar;
 
 pub use catalog::{
     read_stars_from_zst, write_stars_to_zst, StarCatalogHeader, StarRecord, STAR_CATALOG_MAGIC,
