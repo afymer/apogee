@@ -16,6 +16,7 @@ tracing-subscriber.workspace = true
 glam.workspace = true
 zstd.workspace = true
 bytemuck.workspace = true
+flate2 = "1"
 
 [lints]
 workspace = true

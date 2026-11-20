@@ -1,4 +1,5 @@
 mod bevy_viewport;
+mod star_details;
 mod theme_loader;
 mod theme_provider;
 mod tracing;
@@ -77,6 +78,10 @@ fn main() {
         {
             let _span = ::tracing::info_span!("title_bar_init").entered();
             title_bar::init(cx);
+        }
+        {
+            let _span = ::tracing::info_span!("star_details_init").entered();
+            star_details::init(cx);
         }
         {
             let _span = ::tracing::info_span!("bevy_viewport_init").entered();

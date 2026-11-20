@@ -281,6 +281,7 @@ dependencies = [
  "client",
  "components",
  "futures",
+ "glam",
  "gpui",
  "gpui_platform",
  "observer",
@@ -1866,6 +1867,7 @@ dependencies = [
  "celestial",
  "clap",
  "csv",
+ "flate2",
  "glam",
  "indicatif",
  "reqwest",
@@ -6056,6 +6058,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bytemuck",
+ "cdshealpix",
  "celestial",
  "crossbeam-channel",
  "glam",

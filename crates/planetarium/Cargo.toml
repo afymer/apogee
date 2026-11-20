@@ -8,6 +8,7 @@ bevy.workspace = true
 wgpu.workspace = true
 tracing.workspace = true
 celestial.workspace = true
+cdshealpix.workspace = true
 hips.workspace = true
 glam.workspace = true
 bytemuck.workspace = true

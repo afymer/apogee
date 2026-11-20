@@ -109,6 +109,29 @@ impl CameraProjection {
         let scale_xy = (2.0 * t * inv) / r;
         DVec3::new(px * scale_xy, py * scale_xy, (1.0 - t2) * inv)
     }
+
+    /// Projects a camera-space direction vector (`+Z` forward, `+X` right, `+Y` up) into NDC (`[-1, 1]^2`),
+    /// returning `None` when behind the projection horizon cutoff (`norm.z <= -0.98 + blend_factor`).
+    pub fn project_cam_dir(&self, v_cam: DVec3) -> Option<(f64, f64)> {
+        let norm = v_cam.normalize_or_zero();
+        if norm == DVec3::ZERO {
+            return None;
+        }
+        let b = self.blend_factor();
+        let min_z = -0.98 + b;
+        if norm.z <= min_z {
+            return None;
+        }
+        let nz = norm.z.clamp(-1.0, 1.0);
+        let stereo_factor = 2.0 / (1.0 + nz).max(0.002);
+        let persp_factor = 1.0 / nz.max(0.005);
+        let factor = stereo_factor + (persp_factor - stereo_factor) * b;
+        let scale = self.scale_factor().max(1e-12);
+        Some((
+            (norm.x * factor) / (self.aspect_ratio * scale),
+            (norm.y * factor) / scale,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +183,14 @@ mod tests {
                     assert!(
                         (re_x - ndc_x).abs() < 1e-10 && (re_y - ndc_y).abs() < 1e-10,
                         "round-trip failed for fov={fov_deg}, aspect={aspect}, ndc=({ndc_x}, {ndc_y}): got ({re_x}, {re_y})"
+                    );
+
+                    let projected = proj
+                        .project_cam_dir(v)
+                        .expect("unprojected sample within visible projection domain");
+                    assert!(
+                        (projected.0 - ndc_x).abs() < 1e-10 && (projected.1 - ndc_y).abs() < 1e-10,
+                        "project_cam_dir round-trip failed for fov={fov_deg}, aspect={aspect}, ndc=({ndc_x}, {ndc_y}): got {projected:?}"
                     );
                 }
             }

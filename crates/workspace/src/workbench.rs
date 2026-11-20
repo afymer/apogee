@@ -66,13 +66,13 @@ impl Workbench {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let handle: Arc<dyn PanelHandle> = Arc::new(panel);
-        self.registered_panels.push(handle.clone());
         for workspace in self.workspaces.values() {
             workspace.update(cx, |ws, cx| {
-                ws.add_panel_if_enabled(handle.clone(), cx);
+                ws.add_panel_if_enabled(panel.clone(), cx);
             });
         }
+        let handle: Arc<dyn PanelHandle> = Arc::new(panel);
+        self.registered_panels.push(handle);
     }
 }
 

@@ -10,6 +10,7 @@ ui.workspace = true
 theme.workspace = true
 assets.workspace = true
 wgpu.workspace = true
+glam.workspace = true
 planetarium.workspace = true
 celestial.workspace = true
 observer.workspace = true

@@ -99,7 +99,8 @@ fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
     }
 }
 
-fn solar_altitude_to_sky_color(alt_deg: f64) -> Rgba {
+/// Maps solar geometric altitude in degrees to the continuous sky-ribbon RGB tint.
+pub fn solar_altitude_to_sky_color(alt_deg: f64) -> Rgba {
     const STOPS: &[(f64, u32)] = &[
         (-24.0, 0x070b16),
         (-18.0, 0x0c1428),
@@ -135,7 +136,8 @@ fn alt_to_y(alt_deg: f64, bounds: Bounds<Pixels>) -> f32 {
     top + usable_h * (1.0 - norm)
 }
 
-fn paint_circle(window: &mut Window, center: Point<Pixels>, radius: f32, color: Rgba) {
+/// Paints a filled antialiased-polygon circle at `center`.
+pub fn paint_circle(window: &mut Window, center: Point<Pixels>, radius: f32, color: Rgba) {
     const SEGMENTS: usize = 32;
     let cx = f32::from(center.x);
     let cy = f32::from(center.y);
@@ -152,25 +154,22 @@ fn paint_circle(window: &mut Window, center: Point<Pixels>, radius: f32, color: 
     }
 }
 
-fn sample_solar_profile(solar_profile: &[f64], hour_of_day: f64) -> f64 {
-    if solar_profile.is_empty() {
+/// Linearly interpolates a daily `[0h..24h]` altitude profile at `hour_of_day`.
+pub fn sample_day_profile(profile: &[f64], hour_of_day: f64) -> f64 {
+    if profile.is_empty() {
         return -20.0;
     }
-    if solar_profile.len() == 1 {
-        return solar_profile[0];
+    if profile.len() == 1 {
+        return profile[0];
     }
-    let frac = (hour_of_day / 24.0).clamp(0.0, 1.0) * (solar_profile.len() - 1) as f64;
-    let idx = (frac.floor() as usize).min(solar_profile.len() - 2);
+    let frac = (hour_of_day / 24.0).clamp(0.0, 1.0) * (profile.len() - 1) as f64;
+    let idx = (frac.floor() as usize).min(profile.len() - 2);
     let t = frac - idx as f64;
-    solar_profile[idx] * (1.0 - t) + solar_profile[idx + 1] * t
+    profile[idx] * (1.0 - t) + profile[idx + 1] * t
 }
 
-fn paint_sky_canvas(
-    bounds: Bounds<Pixels>,
-    hour_of_day: f64,
-    solar_profile: &[f64],
-    window: &mut Window,
-) {
+/// Paints the 24-hour twilight atmospheric sky gradient and subtle darkness starfield specks.
+pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], window: &mut Window) {
     let width = f32::from(bounds.size.width);
     let height = f32::from(bounds.size.height);
     if width <= 2.0 || height <= 2.0 {
@@ -191,8 +190,8 @@ fn paint_sky_canvas(
         if x1 <= x0 {
             continue;
         }
-        let c0 = solar_altitude_to_sky_color(sample_solar_profile(solar_profile, f64::from(t0) * 24.0));
-        let c1 = solar_altitude_to_sky_color(sample_solar_profile(solar_profile, f64::from(t1) * 24.0));
+        let c0 = solar_altitude_to_sky_color(sample_day_profile(solar_profile, f64::from(t0) * 24.0));
+        let c1 = solar_altitude_to_sky_color(sample_day_profile(solar_profile, f64::from(t1) * 24.0));
         let strip_bounds = Bounds::new(
             point(px(x0), px(origin_y)),
             Size::new(px(x1 - x0), px(height)),
@@ -224,7 +223,7 @@ fn paint_sky_canvas(
         (0.96, 0.20, 1.5),
     ];
     for &(xf, yf, sz) in STARS {
-        let alt = sample_solar_profile(solar_profile, f64::from(xf) * 24.0);
+        let alt = sample_day_profile(solar_profile, f64::from(xf) * 24.0);
         if alt < -9.0 {
             let fade = (((-9.0 - alt) / 9.0).clamp(0.0, 1.0) * 0.75) as f32;
             let star_bounds = Bounds::new(
@@ -234,6 +233,24 @@ fn paint_sky_canvas(
             window.paint_quad(fill(star_bounds, rgb(0xe8f1ff).alpha(fade)));
         }
     }
+}
+
+fn paint_sky_canvas(
+    bounds: Bounds<Pixels>,
+    hour_of_day: f64,
+    solar_profile: &[f64],
+    window: &mut Window,
+) {
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    if width <= 2.0 || height <= 2.0 {
+        return;
+    }
+
+    let origin_x = f32::from(bounds.origin.x);
+    let origin_y = f32::from(bounds.origin.y);
+
+    paint_twilight_backdrop(bounds, solar_profile, window);
 
     // 3. Horizon (0°) and astro-dark (-18°) reference lines.
     let horizon_y = alt_to_y(0.0, bounds);
@@ -317,7 +334,7 @@ fn paint_sky_canvas(
     // 5. Subtle playhead beam and fixed-size bordered orb filled with the active sky color.
     let t = (hour_of_day / 24.0).clamp(0.0, 1.0) as f32;
     let playhead_x = origin_x + t * width;
-    let current_alt = sample_solar_profile(solar_profile, hour_of_day);
+    let current_alt = sample_day_profile(solar_profile, hour_of_day);
     let handle_y = alt_to_y(current_alt, bounds);
     let handle_pt = point(px(playhead_x), px(handle_y));
     let sky_color = solar_altitude_to_sky_color(current_alt);

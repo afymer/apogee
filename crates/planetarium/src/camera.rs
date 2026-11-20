@@ -86,9 +86,29 @@ impl PlanetariumViewInfo {
             dec_deg: dec.degrees(),
         }
     }
+
+    /// Projects a unit ICRS equatorial vector into screen NDC (`[-1, 1]^2`), returning `None` if culled.
+    pub fn project_icrs_to_ndc(&self, v_icrs: DVec3) -> Option<(f64, f64)> {
+        let v_cam = self.camera_to_icrs.transpose() * v_icrs;
+        self.projection.project_cam_dir(v_cam)
+    }
+
+    /// Converts an ICRS equatorial direction into topocentric `(az_deg, alt_deg)`.
+    pub fn icrs_to_topocentric_deg(&self, v_icrs: DVec3) -> (f64, f64) {
+        let v_topo = self.camera_to_topo * (self.camera_to_icrs.transpose() * v_icrs);
+        let (az, alt) = topocentric_enu_to_spherical(v_topo);
+        (az.degrees(), alt.degrees())
+    }
 }
 
 use bevy::prelude::Component;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ZoomAnchor {
+    pub(crate) ndc: (f64, f64),
+    pub(crate) aspect: f64,
+    pub(crate) frame_dir: DVec3,
+}
 
 #[derive(Component, Debug, Clone)]
 pub struct PlanetariumCamera {
@@ -102,6 +122,7 @@ pub struct PlanetariumCamera {
     pub target_fov_y: f64,
     pub yaw_vel: f64,
     pub pitch_vel: f64,
+    pub(crate) zoom_anchor: Option<ZoomAnchor>,
 }
 
 impl Default for PlanetariumCamera {
@@ -117,6 +138,7 @@ impl Default for PlanetariumCamera {
             target_fov_y: PI,
             yaw_vel: 0.0,
             pitch_vel: 0.0,
+            zoom_anchor: None,
         }
     }
 }
@@ -161,6 +183,70 @@ pub fn compute_spherical_bounds(
     };
 
     SphericalRect::new(lon_interval, AngleInterval::from_radians(lat_min, lat_max))
+}
+
+fn wrap_pi(angle: f64) -> f64 {
+    (angle + PI).rem_euclid(TAU) - PI
+}
+
+fn solve_orientation_for_anchor(
+    view_mode: ViewMode,
+    frame_dir: DVec3,
+    cam_dir: DVec3,
+    fallback_yaw: f64,
+    fallback_pitch: f64,
+) -> (f64, f64) {
+    let ax = frame_dir.x;
+    let ay = frame_dir.y;
+    let az = frame_dir.z;
+    let cx = cam_dir.x;
+    let cy = cam_dir.y;
+    let cz = cam_dir.z;
+
+    let amp = cy.hypot(cz);
+    let phi = cy.atan2(cz);
+    let cand_pitches = if amp <= 1e-12 {
+        [fallback_pitch.clamp(-FRAC_PI_2, FRAC_PI_2); 2]
+    } else {
+        let s = (az / amp).clamp(-1.0, 1.0).asin();
+        [
+            wrap_pi(s - phi).clamp(-FRAC_PI_2, FRAC_PI_2),
+            wrap_pi(PI - s - phi).clamp(-FRAC_PI_2, FRAC_PI_2),
+        ]
+    };
+
+    let ref_rot = PlanetariumCamera::rotation_matrix_for(view_mode, fallback_yaw, fallback_pitch);
+    let evaluate = |cand_p: f64| -> (f64, f64, f64, f64) {
+        let (sin_p, cos_p) = cand_p.sin_cos();
+        let wy = cos_p * cz - sin_p * cy;
+        let (sin_num, cos_num) = match view_mode {
+            ViewMode::Horizontal => (ax * wy - ay * cx, ax * cx + ay * wy),
+            ViewMode::Equatorial => (ax * cx + ay * wy, ax * wy - ay * cx),
+        };
+        let cand_yaw = if sin_num.hypot(cos_num) <= 1e-12 {
+            fallback_yaw.rem_euclid(TAU)
+        } else {
+            sin_num.atan2(cos_num).rem_euclid(TAU)
+        };
+        let cand_rot = PlanetariumCamera::rotation_matrix_for(view_mode, cand_yaw, cand_p);
+        let residual = (cand_rot * frame_dir - cam_dir).length_squared();
+        let rot_trace = cand_rot.x_axis.dot(ref_rot.x_axis)
+            + cand_rot.y_axis.dot(ref_rot.y_axis)
+            + cand_rot.z_axis.dot(ref_rot.z_axis);
+        let rot_dist = 3.0 - rot_trace;
+        (cand_yaw, cand_p, residual, rot_dist)
+    };
+
+    let first = evaluate(cand_pitches[0]);
+    let second = evaluate(cand_pitches[1]);
+    let chosen = if (first.2 - second.2).abs() <= 1e-10 {
+        if first.3 <= second.3 { first } else { second }
+    } else if first.2 <= second.2 {
+        first
+    } else {
+        second
+    };
+    (chosen.0, chosen.1)
 }
 
 impl PlanetariumCamera {
@@ -208,9 +294,11 @@ impl PlanetariumCamera {
         self.view_mode = mode;
         self.yaw_vel = 0.0;
         self.pitch_vel = 0.0;
+        self.zoom_anchor = None;
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64, viewport_height: f64) {
+        self.zoom_anchor = None;
         let proj = self.projection(1.0);
         let scale = proj.scale_factor();
         let h = viewport_height.max(1.0);
@@ -233,14 +321,96 @@ impl PlanetariumCamera {
     }
 
     pub fn zoom(&mut self, delta: f64) {
+        self.zoom_anchor = None;
         let zoom_factor = (-delta * 0.15).exp();
         self.target_fov_y =
             (self.target_fov_y * zoom_factor).clamp(Self::MIN_FOV_RAD, Self::MAX_FOV_RAD);
     }
 
+    /// Zooms toward a normalized cursor coordinate (`[-1, 1]^2`), pinning the sky direction under
+    /// that cursor position throughout the smooth zoom interpolation.
+    pub fn zoom_at(&mut self, delta: f64, cursor_ndc: (f64, f64), aspect_ratio: f32) {
+        let aspect = f64::from(aspect_ratio);
+        let zoom_factor = (-delta * 0.15).exp();
+        let next_target_fov =
+            (self.target_fov_y * zoom_factor).clamp(Self::MIN_FOV_RAD, Self::MAX_FOV_RAD);
+        if (next_target_fov - self.target_fov_y).abs() <= 1e-12
+            && (self.target_fov_y - self.fov_y).abs() <= 1e-9
+        {
+            return;
+        }
+
+        let reuse_anchor = self.zoom_anchor.filter(|existing| {
+            (existing.ndc.0 - cursor_ndc.0).hypot(existing.ndc.1 - cursor_ndc.1) < 1e-3
+                && (existing.aspect - aspect).abs() < 1e-4
+        });
+
+        let (frame_dir, fallback_yaw, fallback_pitch) = if let Some(existing) = reuse_anchor {
+            (existing.frame_dir, self.target_yaw, self.target_pitch)
+        } else {
+            let v_cam_now = self
+                .projection(aspect_ratio)
+                .unproject_ndc(cursor_ndc.0, cursor_ndc.1);
+            let frame_dir = (self.camera_rotation_matrix().transpose() * v_cam_now).normalize();
+            (frame_dir, self.yaw, self.pitch)
+        };
+
+        self.target_fov_y = next_target_fov;
+        let v_cam_target = Self::projection_for_fov(self.target_fov_y, aspect_ratio)
+            .unproject_ndc(cursor_ndc.0, cursor_ndc.1);
+        let (target_yaw, target_pitch) = solve_orientation_for_anchor(
+            self.view_mode,
+            frame_dir,
+            v_cam_target,
+            fallback_yaw,
+            fallback_pitch,
+        );
+        self.target_yaw = target_yaw;
+        self.target_pitch = target_pitch;
+        let rho = frame_dir.x.hypot(frame_dir.y);
+        self.zoom_anchor = if v_cam_target.x.abs() <= rho * 0.995 {
+            Some(ZoomAnchor {
+                ndc: cursor_ndc,
+                aspect,
+                frame_dir,
+            })
+        } else {
+            None
+        };
+    }
+
     pub fn update(&mut self, dt_seconds: f64) {
         let dt = dt_seconds.clamp(0.0, 0.1);
         let factor = 1.0 - (-12.0 * dt).exp();
+
+        if let Some(anchor) = self.zoom_anchor {
+            self.fov_y += (self.target_fov_y - self.fov_y) * factor;
+            if (self.target_fov_y - self.fov_y).abs() <= 1e-7 {
+                self.fov_y = self.target_fov_y;
+                self.yaw = self.target_yaw;
+                self.pitch = self.target_pitch;
+                self.zoom_anchor = None;
+                return;
+            }
+            let v_cam = Self::projection_for_fov(self.fov_y, anchor.aspect as f32)
+                .unproject_ndc(anchor.ndc.0, anchor.ndc.1);
+            let rho = anchor.frame_dir.x.hypot(anchor.frame_dir.y);
+            if v_cam.x.abs() <= rho * 0.995 {
+                let (yaw, pitch) = solve_orientation_for_anchor(
+                    self.view_mode,
+                    anchor.frame_dir,
+                    v_cam,
+                    self.yaw,
+                    self.pitch,
+                );
+                self.yaw = yaw;
+                self.pitch = pitch;
+                return;
+            }
+            self.zoom_anchor = None;
+        } else {
+            self.fov_y += (self.target_fov_y - self.fov_y) * factor;
+        }
 
         let mut diff_yaw = self.target_yaw - self.yaw;
         if diff_yaw > PI {
@@ -251,7 +421,6 @@ impl PlanetariumCamera {
 
         self.yaw = (self.yaw + diff_yaw * factor).rem_euclid(TAU);
         self.pitch += (self.target_pitch - self.pitch) * factor;
-        self.fov_y += (self.target_fov_y - self.fov_y) * factor;
     }
 
     pub fn forward_direction(&self) -> DVec3 {
@@ -281,11 +450,11 @@ impl PlanetariumCamera {
         }
     }
 
-    pub fn camera_rotation_matrix(&self) -> DMat3 {
-        let (sin_y, cos_y) = self.yaw.sin_cos();
-        let (sin_p, cos_p) = self.pitch.sin_cos();
+    pub fn rotation_matrix_for(view_mode: ViewMode, yaw: f64, pitch: f64) -> DMat3 {
+        let (sin_y, cos_y) = yaw.sin_cos();
+        let (sin_p, cos_p) = pitch.sin_cos();
 
-        let (r, u, f) = match self.view_mode {
+        let (r, u, f) = match view_mode {
             ViewMode::Horizontal => {
                 let r = DVec3::new(cos_y, -sin_y, 0.0);
                 let u = DVec3::new(-sin_p * sin_y, -sin_p * cos_y, cos_p);
@@ -305,6 +474,10 @@ impl PlanetariumCamera {
             DVec3::new(r.y, u.y, f.y),
             DVec3::new(r.z, u.z, f.z),
         )
+    }
+
+    pub fn camera_rotation_matrix(&self) -> DMat3 {
+        Self::rotation_matrix_for(self.view_mode, self.yaw, self.pitch)
     }
 
     pub fn topocentric_to_camera_matrix(&self) -> DMat3 {
@@ -333,8 +506,8 @@ impl PlanetariumCamera {
         DMat4::from_mat3(self.topocentric_to_camera_matrix()).as_mat4()
     }
 
-    pub fn projection(&self, aspect_ratio: f32) -> CameraProjection {
-        let fov_deg = self.fov_y.to_degrees();
+    pub fn projection_for_fov(fov_y: f64, aspect_ratio: f32) -> CameraProjection {
+        let fov_deg = fov_y.to_degrees();
         let kind = if fov_deg >= 60.0 {
             ProjectionKind::Stereographic
         } else if fov_deg <= 20.0 {
@@ -343,7 +516,11 @@ impl PlanetariumCamera {
             ProjectionKind::Blended((60.0 - fov_deg) / 40.0)
         };
 
-        CameraProjection::new(Angle::from_radians(self.fov_y), aspect_ratio as f64, kind)
+        CameraProjection::new(Angle::from_radians(fov_y), aspect_ratio as f64, kind)
+    }
+
+    pub fn projection(&self, aspect_ratio: f32) -> CameraProjection {
+        Self::projection_for_fov(self.fov_y, aspect_ratio)
     }
 
     pub fn projection_params(&self, aspect_ratio: f32) -> ProjectionParams {
@@ -516,5 +693,186 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_zoom_at_keeps_cursor_sky_point_pinned_across_modes_and_projections() {
+        let aspect = 16.0_f32 / 9.0;
+        let modes = [ViewMode::Horizontal, ViewMode::Equatorial];
+        let cases = [
+            // Zoom in across Stereographic, Blended, Perspective, and crossing 60 -> 20 deg
+            (120.0_f64, 2.0_f64),
+            (45.0_f64, 2.0_f64),
+            (12.0_f64, 2.0_f64),
+            (80.0_f64, 10.0_f64),
+            // Reachable zoom-outs in Blended and Perspective projections
+            (45.0_f64, -2.0_f64),
+            (12.0_f64, -2.0_f64),
+        ];
+        let ndc_points = [(0.45_f64, 0.3_f64), (-0.6_f64, -0.35_f64)];
+
+        for mode in modes {
+            for (fov_deg, delta) in cases {
+                for (nx, ny) in ndc_points {
+                    let yaw_rad = 110.0_f64.to_radians();
+                    let pitch_rad = 35.0_f64.to_radians();
+                    let fov_rad = fov_deg.to_radians();
+                    let mut cam = PlanetariumCamera {
+                        view_mode: mode,
+                        yaw: yaw_rad,
+                        pitch: pitch_rad,
+                        fov_y: fov_rad,
+                        target_yaw: yaw_rad,
+                        target_pitch: pitch_rad,
+                        target_fov_y: fov_rad,
+                        ..Default::default()
+                    };
+
+                    let v_anchor = (cam.camera_rotation_matrix().transpose()
+                        * cam.projection(aspect).unproject_ndc(nx, ny))
+                    .normalize();
+
+                    cam.zoom_at(delta, (nx, ny), aspect);
+
+                    for step in 0..120 {
+                        cam.update(1.0 / 60.0);
+                        let projected = cam
+                            .projection(aspect)
+                            .project_cam_dir(cam.camera_rotation_matrix() * v_anchor)
+                            .expect("anchored sky point must remain projectable during zoom");
+                        let err = (projected.0 - nx).hypot(projected.1 - ny);
+                        assert!(
+                            err < 1e-6,
+                            "drift at step={step}, mode={mode:?}, fov={fov_deg}, ndc=({nx}, {ny}), delta={delta}: got {projected:?} (err={err})"
+                        );
+                    }
+
+                    assert!(
+                        cam.zoom_anchor.is_none(),
+                        "zoom_anchor should clear after convergence for mode={mode:?}, fov={fov_deg}, delta={delta}"
+                    );
+                    let final_proj = cam
+                        .projection(aspect)
+                        .project_cam_dir(cam.camera_rotation_matrix() * v_anchor)
+                        .expect("anchored sky point must project cleanly at target");
+                    let final_err = (final_proj.0 - nx).hypot(final_proj.1 - ny);
+                    assert!(
+                        final_err < 1e-6,
+                        "final drift for mode={mode:?}, fov={fov_deg}, delta={delta}: {final_err}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_zoom_at_unreachable_wide_fov_clamps_smoothly_and_optimally() {
+        let aspect = 16.0_f32 / 9.0;
+        let ndc = (0.45_f64, 0.3_f64);
+        let yaw_rad = 110.0_f64.to_radians();
+        let pitch_rad = 35.0_f64.to_radians();
+        let fov_rad = 120.0_f64.to_radians();
+        let mut cam = PlanetariumCamera {
+            view_mode: ViewMode::Horizontal,
+            yaw: yaw_rad,
+            pitch: pitch_rad,
+            fov_y: fov_rad,
+            target_yaw: yaw_rad,
+            target_pitch: pitch_rad,
+            target_fov_y: fov_rad,
+            ..Default::default()
+        };
+
+        let v_anchor = (cam.camera_rotation_matrix().transpose()
+            * cam.projection(aspect).unproject_ndc(ndc.0, ndc.1))
+        .normalize();
+
+        cam.zoom_at(-2.0, ndc, aspect);
+
+        for step in 0..120 {
+            let prev_yaw = cam.yaw;
+            let prev_pitch = cam.pitch;
+            cam.update(1.0 / 60.0);
+            assert!(cam.yaw.is_finite() && cam.pitch.is_finite());
+
+            let dyaw = wrap_pi(cam.yaw - prev_yaw).abs();
+            let dpitch = (cam.pitch - prev_pitch).abs();
+            assert!(
+                dyaw < 0.15 && dpitch < 0.15,
+                "orientation jump at step={step}: dyaw={dyaw}, dpitch={dpitch}"
+            );
+        }
+
+        assert!(cam.zoom_anchor.is_none());
+
+        let v_cam_target = cam.projection(aspect).unproject_ndc(ndc.0, ndc.1);
+        let best_residual = (cam.camera_rotation_matrix() * v_anchor - v_cam_target).length_squared();
+        let eps = 1e-3;
+        for sy in [-eps, 0.0, eps] {
+            for sp in [-eps, 0.0, eps] {
+                if sy == 0.0 && sp == 0.0 {
+                    continue;
+                }
+                let ny = (cam.yaw + sy).rem_euclid(TAU);
+                let np = (cam.pitch + sp).clamp(-FRAC_PI_2, FRAC_PI_2);
+                let rot = PlanetariumCamera::rotation_matrix_for(cam.view_mode, ny, np);
+                let neighbor_res = (rot * v_anchor - v_cam_target).length_squared();
+                assert!(
+                    neighbor_res + 1e-9 >= best_residual,
+                    "neighbor ({sy}, {sp}) improved residual from {best_residual} to {neighbor_res}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_zoom_at_rapid_ticks_and_pan_clears_anchor() {
+        let aspect = 16.0_f32 / 9.0;
+        let ndc = (0.35_f64, -0.25_f64);
+        let mut cam = PlanetariumCamera {
+            view_mode: ViewMode::Horizontal,
+            yaw: 75.0_f64.to_radians(),
+            pitch: 40.0_f64.to_radians(),
+            fov_y: 80.0_f64.to_radians(),
+            target_yaw: 75.0_f64.to_radians(),
+            target_pitch: 40.0_f64.to_radians(),
+            target_fov_y: 80.0_f64.to_radians(),
+            ..Default::default()
+        };
+
+        let v_anchor = (cam.camera_rotation_matrix().transpose()
+            * cam.projection(aspect).unproject_ndc(ndc.0, ndc.1))
+        .normalize();
+
+        for _ in 0..5 {
+            cam.zoom_at(1.0, ndc, aspect);
+            cam.update(0.016);
+        }
+
+        for _ in 0..120 {
+            cam.update(1.0 / 60.0);
+        }
+
+        assert!(cam.zoom_anchor.is_none());
+        let projected = cam
+            .projection(aspect)
+            .project_cam_dir(cam.camera_rotation_matrix() * v_anchor)
+            .expect("rapid ticks anchor must remain projectable");
+        assert!((projected.0 - ndc.0).hypot(projected.1 - ndc.1) < 1e-6);
+
+        // Scrolling outward when already clamped at MAX_FOV_RAD must be a no-op
+        let mut max_cam = PlanetariumCamera::default();
+        let yaw_before = max_cam.yaw;
+        let pitch_before = max_cam.pitch;
+        max_cam.zoom_at(-1.0, ndc, aspect);
+        assert_eq!(max_cam.yaw, yaw_before);
+        assert_eq!(max_cam.pitch, pitch_before);
+        assert!(max_cam.zoom_anchor.is_none());
+
+        // Calling pan mid-zoom must clear zoom_anchor
+        cam.zoom_at(1.0, ndc, aspect);
+        assert!(cam.zoom_anchor.is_some());
+        cam.pan(12.0, -8.0, 900.0);
+        assert!(cam.zoom_anchor.is_none());
     }
 }

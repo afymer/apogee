@@ -14,7 +14,7 @@ pub use atmosphere::AtmosphereSettings;
 pub use grids::CoordinateGridSettings;
 pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
-pub use stars::StarSettings;
+pub use stars::{PickedStar, StarRenderParams, StarSettings, StarSpatialIndex};
 
 use std::{
     sync::{Arc, Condvar, Mutex, PoisonError},
@@ -65,6 +65,7 @@ pub struct BevyBridgeState {
     pub latest_texture: Option<Arc<wgpu::TextureView>>,
     pub last_size: Option<(u32, u32)>,
     pub view_info: PlanetariumViewInfo,
+    pub star_index: Option<Arc<StarSpatialIndex>>,
     pub pending_commands: Vec<ViewportCommand>,
 }
 
@@ -96,6 +97,7 @@ impl BevyBridge {
                     latest_texture: None,
                     last_size: None,
                     view_info: PlanetariumViewInfo::default(),
+                    star_index: None,
                     pending_commands: Vec::new(),
                 }),
                 cvar: Condvar::new(),
@@ -139,6 +141,15 @@ impl BevyBridge {
         guard.view_info
     }
 
+    pub fn star_index(&self) -> Option<Arc<StarSpatialIndex>> {
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.star_index.clone()
+    }
+
     pub fn send_command(&self, cmd: ViewportCommand) {
         {
             let mut guard = self
@@ -157,7 +168,17 @@ impl BevyBridge {
     }
 
     pub fn zoom(&self, delta: f64) {
-        self.send_command(ViewportCommand::Zoom { delta });
+        self.send_command(ViewportCommand::Zoom {
+            delta,
+            cursor_ndc: None,
+        });
+    }
+
+    pub fn zoom_at(&self, delta: f64, cursor_ndc: (f64, f64)) {
+        self.send_command(ViewportCommand::Zoom {
+            delta,
+            cursor_ndc: Some(cursor_ndc),
+        });
     }
 
     pub fn set_view_mode(&self, mode: ViewMode) {
@@ -400,6 +421,7 @@ fn camera_movement_and_interpolation_system(
         return;
     };
 
+    let aspect = dims.width.max(1) as f32 / dims.height.max(1) as f32;
     let mut moved = false;
     for cmd in pending_commands.0.drain(..) {
         match cmd {
@@ -407,8 +429,12 @@ fn camera_movement_and_interpolation_system(
                 camera.pan(delta_x, delta_y, dims.height as f64);
                 moved = true;
             }
-            ViewportCommand::Zoom { delta } => {
-                camera.zoom(delta);
+            ViewportCommand::Zoom { delta, cursor_ndc } => {
+                if let Some(ndc) = cursor_ndc {
+                    camera.zoom_at(delta, ndc, aspect);
+                } else {
+                    camera.zoom(delta);
+                }
                 moved = true;
             }
             ViewportCommand::SetViewMode(mode) => {
@@ -445,7 +471,12 @@ fn camera_movement_and_interpolation_system(
     let yaw_diff = (camera.yaw - prev_yaw).abs();
     let pitch_diff = (camera.pitch - prev_pitch).abs();
     let fov_diff = (camera.fov_y - prev_fov).abs();
-    let target_yaw_diff = (camera.target_yaw - camera.yaw).abs();
+    let mut target_yaw_diff = (camera.target_yaw - camera.yaw)
+        .abs()
+        .rem_euclid(std::f64::consts::TAU);
+    if target_yaw_diff > std::f64::consts::PI {
+        target_yaw_diff = std::f64::consts::TAU - target_yaw_diff;
+    }
     let target_pitch_diff = (camera.target_pitch - camera.pitch).abs();
     let target_fov_diff = (camera.target_fov_y - camera.fov_y).abs();
 
@@ -462,7 +493,6 @@ fn camera_movement_and_interpolation_system(
     }
 
     if moved || is_interpolating || is_first_run || epoch_changed {
-        let aspect = dims.width.max(1) as f32 / dims.height.max(1) as f32;
         let proj_params = camera.projection_params(aspect);
 
         let subdiv_count = 6;
@@ -592,11 +622,16 @@ fn camera_movement_and_interpolation_system(
 
         if let Some(star_entity) = handles.star_entity {
             if let Ok(mut mat) = star_materials.get_mut(star_entity) {
+                let render_params = stars::StarRenderParams::default();
                 mat.uniforms.transform =
                     glam::DMat4::from_mat3(camera.icrs_to_camera_matrix()).as_mat4();
                 mat.uniforms.projection = proj_params.into();
                 mat.uniforms.viewport_size = Vec2::new(dims.width as f32, dims.height as f32);
-                mat.uniforms.limiting_mag = 10.5;
+                mat.uniforms.limiting_mag = render_params.limiting_mag;
+                mat.uniforms.fade_range = render_params.fade_range;
+                mat.uniforms.base_radius = render_params.base_radius;
+                mat.uniforms.min_radius = render_params.min_radius;
+                mat.uniforms.max_radius = render_params.max_radius;
                 mat.uniforms.opacity = star_settings.opacity;
             }
         }
@@ -933,12 +968,26 @@ impl PlanetariumRenderer {
                     let _span = tracing::info_span!("load_star_catalog_step").entered();
                     stars::load_star_catalog()
                 };
-                let star_setup = if let Some((_header, star_records)) = star_catalog {
-                    let star_count = star_records.len();
+                let star_setup = if let Some(catalog) = star_catalog {
+                    let star_count = catalog.records.len();
+                    {
+                        let _span =
+                            tracing::info_span!("build_star_spatial_index", star_count).entered();
+                        let index = Arc::new(stars::StarSpatialIndex::build_with_metadata(
+                            &catalog.records,
+                            catalog.metadata,
+                        ));
+                        let mut guard = bridge
+                            .inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        guard.star_index = Some(index);
+                    }
                     let buffer_handle = {
                         let _span =
                             tracing::info_span!("create_star_shader_buffer", star_count).entered();
-                        let raw_bytes: &[u8] = bytemuck::cast_slice(&star_records);
+                        let raw_bytes: &[u8] = bytemuck::cast_slice(&catalog.records);
                         let storage_buffer =
                             ShaderBuffer::new(raw_bytes, RenderAssetUsages::RENDER_WORLD);
                         app.world_mut()
@@ -957,16 +1006,17 @@ impl PlanetariumRenderer {
 
                     let star_material = {
                         let _span = tracing::info_span!("create_star_material_step").entered();
+                        let render_params = stars::StarRenderParams::default();
                         stars::CelestialStarMaterial {
                             uniforms: stars::CelestialStarUniforms {
                                 transform: glam::DMat4::from_mat3(initial_eq_to_cam).as_mat4(),
                                 projection: initial_proj.into(),
                                 viewport_size: Vec2::new(width as f32, height as f32),
-                                limiting_mag: 10.5,
-                                fade_range: 0.6,
-                                base_radius: 2.2,
-                                min_radius: 0.8,
-                                max_radius: 24.0,
+                                limiting_mag: render_params.limiting_mag,
+                                fade_range: render_params.fade_range,
+                                base_radius: render_params.base_radius,
+                                min_radius: render_params.min_radius,
+                                max_radius: render_params.max_radius,
                                 opacity: 1.0,
                             },
                             stars: buffer_handle,

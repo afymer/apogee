@@ -1,19 +1,21 @@
 use std::{
     sync::{Arc, Mutex},
     thread::JoinHandle,
+    time::Duration,
 };
 
 use celestial::coords::geodetic::GeodeticPosition;
 use components::{Slider, SliderEvent};
 use futures::StreamExt;
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    ScrollDelta, ScrollWheelEvent, Window, div, prelude::*, px, rgb, svg,
+    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    Rgba, ScrollDelta, ScrollWheelEvent, Task, Window, div, prelude::*, px, rgb, svg,
 };
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
 use planetarium::{
-    BevyBridge, ObserverClockSpec, PlanetariumRenderer, PlanetariumViewInfo, ViewMode,
+    BevyBridge, ObserverClockSpec, PickedStar, PlanetariumRenderer, PlanetariumViewInfo,
+    StarRenderParams, StarSpatialIndex, ViewMode,
 };
 use settings::{GlobalSettings, SettingsModel};
 use status_bar::{
@@ -27,6 +29,11 @@ use workspace::{
     panel::{Panel, PanelEvent},
     workbench::Workbench,
 };
+
+use crate::star_details::{GlobalStarSelection, SelectedStar};
+
+const HOVER_PREVIEW_DELAY: Duration = Duration::from_millis(280);
+const CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
 
 const ICON_COORDS_HORIZONTAL: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
   <path d="M2.5 18H21.5" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
@@ -256,10 +263,18 @@ pub struct PlanetariumPanel {
     renderer_handle: Option<JoinHandle<()>>,
     focus_handle: FocusHandle,
     is_dragging: bool,
+    did_drag: bool,
+    drag_origin: Option<Point<Pixels>>,
     last_mouse_pos: Option<Point<Pixels>>,
     viewport_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     cursor_position: Option<Point<Pixels>>,
     latest_view_info: PlanetariumViewInfo,
+    star_index: Option<Arc<StarSpatialIndex>>,
+    hovered_star: Option<PickedStar>,
+    hover_preview_visible: bool,
+    hover_preview_star_index: Option<u32>,
+    hover_preview_task: Option<Task<()>>,
+    last_scale_factor: f64,
     active_opacity_layer: Option<QuickLayer>,
     opacity_slider: Entity<Slider>,
     last_synced_observer: Option<(GeodeticPosition, ObserverClockSpec)>,
@@ -459,6 +474,7 @@ impl PlanetariumPanel {
                             slider.set_value(stored, cx);
                         });
                     }
+                    this.update_hovered_star(cx);
                     cx.notify();
                 })
                 .detach();
@@ -481,6 +497,17 @@ impl PlanetariumPanel {
             .expect("Failed to spawn PlanetariumRenderer thread");
 
             let initial_view_info = bridge.view_info();
+            let initial_star_index = bridge.star_index();
+            let initial_scale_factor = f64::from(window.scale_factor());
+
+            if let Some(selection_entity) =
+                cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone())
+            {
+                cx.observe(&selection_entity, |_this: &mut Self, _model, cx| {
+                    cx.notify();
+                })
+                .detach();
+            }
 
             cx.spawn(async move |this, cx| {
                 while let Some(()) = rx.next().await {
@@ -502,10 +529,18 @@ impl PlanetariumPanel {
                 renderer_handle: Some(renderer_handle),
                 focus_handle: cx.focus_handle(),
                 is_dragging: false,
+                did_drag: false,
+                drag_origin: None,
                 last_mouse_pos: None,
                 viewport_bounds: Arc::new(Mutex::new(None)),
                 cursor_position: None,
                 latest_view_info: initial_view_info,
+                star_index: initial_star_index,
+                hovered_star: None,
+                hover_preview_visible: false,
+                hover_preview_star_index: None,
+                hover_preview_task: None,
+                last_scale_factor: initial_scale_factor,
                 active_opacity_layer: None,
                 opacity_slider,
                 last_synced_observer: initial_observer,
@@ -572,17 +607,125 @@ impl PlanetariumPanel {
         });
     }
 
+    fn star_layer_flags(&self, cx: &App) -> (bool, bool) {
+        cx.try_global::<GlobalSettings>()
+            .map(|g| {
+                let m = g.0.read(cx);
+                (
+                    m.effective_stars_opacity() > 1e-4,
+                    m.effective_ground_opacity() >= 0.95,
+                )
+            })
+            .unwrap_or((true, true))
+    }
+
+    fn pick_star_at_cursor(&mut self, cx: &App) -> Option<PickedStar> {
+        if self.star_index.is_none() {
+            self.star_index = self.bridge.star_index();
+        }
+        let (index, ndc, bounds) = (
+            self.star_index.as_ref()?,
+            self.cursor_ndc()?,
+            self.viewport_bounds.lock().ok().and_then(|g| *g)?,
+        );
+        let (stars_visible, occlude_below_horizon) = self.star_layer_flags(cx);
+        if !stars_visible {
+            return None;
+        }
+        let w = f64::from(f32::from(bounds.size.width));
+        let h = f64::from(f32::from(bounds.size.height));
+        index.pick(
+            &self.latest_view_info,
+            ndc,
+            (w, h),
+            self.last_scale_factor,
+            &StarRenderParams::default(),
+            occlude_below_horizon,
+        )
+    }
+
+    fn compute_hovered_star(&mut self, cx: &mut Context<Self>) -> bool {
+        let next = if self.is_dragging {
+            None
+        } else {
+            self.pick_star_at_cursor(cx)
+        };
+        let next_idx = next.as_ref().map(|s| s.catalog_index);
+        let was_visible = self.hover_preview_visible;
+
+        if next_idx != self.hover_preview_star_index {
+            self.hover_preview_task = None;
+            self.hover_preview_visible = false;
+            self.hover_preview_star_index = next_idx;
+            if let Some(target_idx) = next_idx {
+                self.hover_preview_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(HOVER_PREVIEW_DELAY).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if !this.is_dragging
+                            && this.hovered_star.as_ref().map(|s| s.catalog_index)
+                                == Some(target_idx)
+                        {
+                            this.hover_preview_visible = true;
+                            cx.notify();
+                        }
+                    });
+                }));
+            }
+        }
+
+        let moved_on_screen = match (self.hovered_star.as_ref(), next.as_ref()) {
+            (Some(prev), Some(curr)) if prev.catalog_index == curr.catalog_index => {
+                let bounds_size = self
+                    .viewport_bounds
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .map(|b| (f64::from(f32::from(b.size.width)), f64::from(f32::from(b.size.height))));
+                bounds_size.is_some_and(|(w, h)| {
+                    let dx = (curr.screen_ndc[0] - prev.screen_ndc[0]) * 0.5 * w;
+                    let dy = (curr.screen_ndc[1] - prev.screen_ndc[1]) * 0.5 * h;
+                    (dx * dx + dy * dy) > 0.25
+                })
+            }
+            _ => false,
+        };
+
+        self.hovered_star = next;
+        (was_visible != self.hover_preview_visible)
+            || (self.hover_preview_visible && moved_on_screen)
+    }
+
+    fn update_hovered_star(&mut self, cx: &mut Context<Self>) {
+        if self.compute_hovered_star(cx) {
+            cx.notify();
+        }
+    }
+
+    fn clear_hovered_star(&mut self, cx: &mut Context<Self>) {
+        let was_visible = self.hover_preview_visible;
+        self.hover_preview_task = None;
+        self.hover_preview_star_index = None;
+        self.hover_preview_visible = false;
+        self.hovered_star = None;
+        if was_visible {
+            cx.notify();
+        }
+    }
+
     fn on_bevy_frame(&mut self, cx: &mut Context<Self>) {
         self.latest_view_info = self.bridge.view_info();
         self.sync_status_bar(cx);
+        let _ = self.compute_hovered_star(cx);
         cx.notify();
     }
 
     fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         self.is_dragging = true;
+        self.did_drag = false;
+        self.drag_origin = Some(event.position);
         self.cursor_position = Some(event.position);
         self.last_mouse_pos = Some(event.position);
-        cx.notify();
+        self.clear_hovered_star(cx);
     }
 
     fn handle_mouse_move(
@@ -592,14 +735,28 @@ impl PlanetariumPanel {
         cx: &mut Context<Self>,
     ) {
         self.cursor_position = Some(event.position);
+        self.last_scale_factor = f64::from(window.scale_factor());
 
         if !self.is_dragging {
             self.sync_status_bar(cx);
+            self.update_hovered_star(cx);
             return;
         }
         if event.pressed_button != Some(MouseButton::Left) {
-            self.handle_mouse_up(cx);
+            self.handle_mouse_up(false, cx);
             return;
+        }
+
+        if !self.did_drag {
+            let moved_px = self.drag_origin.map_or(0.0, |origin| {
+                let dx = f32::from(event.position.x - origin.x);
+                let dy = f32::from(event.position.y - origin.y);
+                (dx * dx + dy * dy).sqrt()
+            });
+            if moved_px <= CLICK_DRAG_THRESHOLD_PX {
+                return;
+            }
+            self.did_drag = true;
         }
 
         let last_pos = self.last_mouse_pos.unwrap_or(event.position);
@@ -613,15 +770,33 @@ impl PlanetariumPanel {
         self.last_mouse_pos = Some(event.position);
     }
 
-    fn handle_mouse_up(&mut self, cx: &mut Context<Self>) {
+    fn handle_mouse_up(&mut self, from_outside: bool, cx: &mut Context<Self>) {
         if self.is_dragging {
+            let is_click = !from_outside && !self.did_drag;
             self.is_dragging = false;
+            self.did_drag = false;
+            self.drag_origin = None;
             self.last_mouse_pos = None;
+            if is_click {
+                if let Some(picked) = self.pick_star_at_cursor(cx) {
+                    self.clear_hovered_star(cx);
+                    if let Some(selection) =
+                        cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone())
+                    {
+                        selection.update(cx, |model, cx| {
+                            model.select(SelectedStar::from_picked(&picked), cx);
+                        });
+                    }
+                    cx.notify();
+                    return;
+                }
+            }
+            let _ = self.compute_hovered_star(cx);
             cx.notify();
         }
     }
 
-    fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, _cx: &mut Context<Self>) {
+    fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         self.cursor_position = Some(event.position);
         let delta_lines = match event.delta {
             ScrollDelta::Lines(pt) => pt.y as f64,
@@ -629,7 +804,12 @@ impl PlanetariumPanel {
         };
 
         if delta_lines.abs() > 1e-4 {
-            self.bridge.zoom(delta_lines);
+            if let Some(ndc) = self.cursor_ndc() {
+                self.bridge.zoom_at(delta_lines, ndc);
+            } else {
+                self.bridge.zoom(delta_lines);
+            }
+            self.clear_hovered_star(cx);
         }
     }
 
@@ -708,6 +888,7 @@ impl PlanetariumPanel {
                 if *hovered {
                     this.cursor_position = None;
                     this.sync_status_bar(cx);
+                    this.clear_hovered_star(cx);
                 }
             }))
             .children(states.into_iter().map(|(layer, is_visible, stored)| {
@@ -768,20 +949,17 @@ impl PlanetariumPanel {
 }
 
 impl Render for PlanetariumPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.bridge.snapshot();
         self.cached_texture = snapshot.texture_view;
         self.latest_view_info = snapshot.view_info;
+        self.last_scale_factor = f64::from(window.scale_factor());
         let bridge = self.bridge.clone();
         let last_size = snapshot.last_size;
         let view_mode = self.latest_view_info.view_mode;
         let viewport_bounds = self.viewport_bounds.clone();
-
-        let cursor = if self.is_dragging {
-            CursorStyle::ClosedHand
-        } else {
-            CursorStyle::OpenHand
-        };
+        let bounds_snapshot = viewport_bounds.lock().ok().and_then(|g| *g);
+        let scale_factor = self.last_scale_factor.max(0.25);
 
         let colors = cx.theme().colors();
         let pill_bg = colors.elevated_surface_background.opacity(0.65);
@@ -796,6 +974,95 @@ impl Render for PlanetariumPanel {
         let popover_border = colors.border;
         let text_color = colors.text;
         let muted_text = colors.text_muted;
+
+        let selected_star = cx
+            .try_global::<GlobalStarSelection>()
+            .and_then(|g| g.0.read(cx).selected().cloned());
+        let selected_star_id = selected_star.as_ref().map(|s| s.catalog_index);
+
+        let selected_overlay = selected_star.as_ref().and_then(|star| {
+            let bounds = bounds_snapshot?;
+            let bw = f64::from(f32::from(bounds.size.width));
+            let bh = f64::from(f32::from(bounds.size.height));
+            if bw <= 1.0 || bh <= 1.0 {
+                return None;
+            }
+            let (stars_visible, occlude_below_horizon) = self.star_layer_flags(cx);
+            if !stars_visible {
+                return None;
+            }
+            let dir = star.icrs_dir();
+            if occlude_below_horizon {
+                let (_, alt_deg) = self.latest_view_info.icrs_to_topocentric_deg(dir);
+                if alt_deg < 0.0 {
+                    return None;
+                }
+            }
+            let (nx, ny) = self.latest_view_info.project_icrs_to_ndc(dir)?;
+            if nx.abs() > 1.02 || ny.abs() > 1.02 {
+                return None;
+            }
+            let sx = (nx * 0.5 + 0.5) * bw;
+            let sy = (0.5 - ny * 0.5) * bh;
+            let fov_y_rad = self.latest_view_info.projection.fov_y.radians() as f32;
+            let rendered_px = StarRenderParams::default().rendered_radius_px(star.mag, fov_y_rad);
+            let inner_d =
+                ((f64::from(rendered_px) / scale_factor) * 2.0 + 10.0).clamp(16.0, 44.0);
+            let outer_d = inner_d + 6.0;
+            Some((star.srgb, sx, sy, inner_d, outer_d))
+        });
+
+        let hovered_overlay = self
+            .hovered_star
+            .as_ref()
+            .filter(|_| self.hover_preview_visible)
+            .and_then(|star| {
+                let bounds = bounds_snapshot?;
+                let bw = f64::from(f32::from(bounds.size.width));
+                let bh = f64::from(f32::from(bounds.size.height));
+                if bw <= 1.0 || bh <= 1.0 {
+                    return None;
+                }
+                let sx = (star.screen_ndc[0] * 0.5 + 0.5) * bw;
+                let sy = (0.5 - star.screen_ndc[1] * 0.5) * bh;
+                let reticle_d = ((f64::from(star.rendered_radius_px) / scale_factor) * 2.0
+                    + 10.0)
+                    .clamp(16.0, 44.0);
+                let reticle_x = sx - reticle_d * 0.5;
+                let reticle_y = sy - reticle_d * 0.5;
+
+                let title = star.display_title_and_subtitle().0;
+                let est_w = 200.0_f64;
+                let pill_h = 28.0_f64;
+                let margin = 12.0_f64;
+                let gap = reticle_d * 0.5 + 8.0;
+
+                let anchor_right = sx + gap + est_w + margin > bw;
+                let anchor_x = if anchor_right {
+                    (bw - (sx - gap)).clamp(margin, (bw - margin).max(margin))
+                } else {
+                    (sx + gap).clamp(margin, (bw - margin).max(margin))
+                };
+
+                let mut pill_y = sy - pill_h * 0.5;
+                if sx + gap > bw - 310.0 && pill_y < 52.0 {
+                    pill_y = 52.0;
+                }
+                let pill_y = pill_y.clamp(margin, (bh - pill_h - margin).max(margin));
+
+                Some((
+                    star.catalog_index,
+                    star.srgb,
+                    star.mag,
+                    title,
+                    reticle_x,
+                    reticle_y,
+                    reticle_d,
+                    anchor_right,
+                    anchor_x,
+                    pill_y,
+                ))
+            });
 
         let pill_style = LayerPillStyle {
             pill_bg,
@@ -845,11 +1112,12 @@ impl Render for PlanetariumPanel {
             .size_full()
             .bg(rgb(0x000000))
             .relative()
-            .cursor(cursor)
+            .cursor(CursorStyle::Arrow)
             .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 if !hovered {
                     this.cursor_position = None;
                     this.sync_status_bar(cx);
+                    this.clear_hovered_star(cx);
                 }
             }))
             .on_mouse_down(
@@ -864,13 +1132,13 @@ impl Render for PlanetariumPanel {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    this.handle_mouse_up(cx);
+                    this.handle_mouse_up(false, cx);
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    this.handle_mouse_up(cx);
+                    this.handle_mouse_up(true, cx);
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
@@ -900,6 +1168,130 @@ impl Render for PlanetariumPanel {
                 self.cached_texture
                     .as_ref()
                     .map(|view| gpui::surface(view.clone()).size_full()),
+            )
+            .when_some(
+                selected_overlay,
+                |el, (srgb, sx, sy, inner_d, outer_d)| {
+                    let star_color: Hsla = Rgba {
+                        r: srgb[0],
+                        g: srgb[1],
+                        b: srgb[2],
+                        a: 1.0,
+                    }
+                    .into();
+                    el.child(
+                        div()
+                            .absolute()
+                            .left(px((sx - outer_d * 0.5) as f32))
+                            .top(px((sy - outer_d * 0.5) as f32))
+                            .w(px(outer_d as f32))
+                            .h(px(outer_d as f32))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(star_color.opacity(0.92)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px((sx - inner_d * 0.5) as f32))
+                            .top(px((sy - inner_d * 0.5) as f32))
+                            .w(px(inner_d as f32))
+                            .h(px(inner_d as f32))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(star_color.opacity(0.45)),
+                    )
+                },
+            )
+            .when_some(
+                hovered_overlay,
+                |el,
+                 (
+                     star_id,
+                     srgb,
+                     mag,
+                     title,
+                     reticle_x,
+                     reticle_y,
+                     reticle_d,
+                     anchor_right,
+                     anchor_x,
+                     pill_y,
+                 )| {
+                    let star_color: Hsla = Rgba {
+                        r: srgb[0],
+                        g: srgb[1],
+                        b: srgb[2],
+                        a: 1.0,
+                    }
+                    .into();
+                    let mag_label = format!("G {mag:.2}");
+                    let show_hover_reticle = selected_star_id != Some(star_id);
+
+                    let preview = h_flex()
+                        .absolute()
+                        .top(px(pill_y as f32))
+                        .when(anchor_right, |el| el.right(px(anchor_x as f32)))
+                        .when(!anchor_right, |el| el.left(px(anchor_x as f32)))
+                        .max_w(px(220.0))
+                        .items_center()
+                        .gap_1p5()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(popover_bg)
+                        .border_1()
+                        .border_color(popover_border)
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .size(px(7.0))
+                                .rounded_full()
+                                .flex_none()
+                                .bg(star_color),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text_color)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(muted_text)
+                                .child("·"),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_buffer(cx)
+                                .text_size(px(11.0))
+                                .text_color(star_color)
+                                .child(mag_label),
+                        );
+
+                    el.when(show_hover_reticle, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .left(px(reticle_x as f32))
+                                .top(px(reticle_y as f32))
+                                .w(px(reticle_d as f32))
+                                .h(px(reticle_d as f32))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(star_color.opacity(0.85)),
+                        )
+                    })
+                    .child(preview)
+                },
             )
             .child(
                 v_flex()
@@ -946,6 +1338,7 @@ impl Render for PlanetariumPanel {
                                         if *hovered {
                                             this.cursor_position = None;
                                             this.sync_status_bar(cx);
+                                            this.clear_hovered_star(cx);
                                         }
                                     }))
                                     .children(coord_options.into_iter().map(
@@ -1016,6 +1409,7 @@ impl Render for PlanetariumPanel {
                                     if *hovered {
                                         this.cursor_position = None;
                                         this.sync_status_bar(cx);
+                                        this.clear_hovered_star(cx);
                                     }
                                 }))
                                 .child(
