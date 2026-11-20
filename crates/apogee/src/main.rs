@@ -56,6 +56,11 @@ fn main() {
         }
 
         {
+            let _span = ::tracing::info_span!("settings_init").entered();
+            settings::init(cx);
+        }
+
+        {
             let _span = ::tracing::info_span!("observer_init").entered();
             observer::init(cx);
         }

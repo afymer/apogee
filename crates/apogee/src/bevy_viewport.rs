@@ -42,6 +42,7 @@ pub struct PlanetariumPanel {
     is_dragging: bool,
     last_mouse_pos: Option<Point<Pixels>>,
     last_synced_observer: Option<(GeodeticPosition, ObserverClockSpec)>,
+    last_synced_hips_grid: Option<bool>,
 }
 
 fn observer_spec(model: &ObserverModel) -> (GeodeticPosition, ObserverClockSpec) {
@@ -93,6 +94,26 @@ impl PlanetariumPanel {
                 .detach();
             }
 
+            let settings_entity = cx
+                .try_global::<settings::GlobalSettings>()
+                .map(|g| g.0.clone());
+            let initial_hips_grid = settings_entity.as_ref().map(|entity| {
+                let show = entity.read(cx).show_hips_grid();
+                bridge.set_hips_grid_visible(show);
+                show
+            });
+
+            if let Some(entity) = settings_entity {
+                cx.observe(&entity, |this: &mut Self, model, cx| {
+                    let next = model.read(cx).show_hips_grid();
+                    if this.last_synced_hips_grid != Some(next) {
+                        this.last_synced_hips_grid = Some(next);
+                        this.bridge.set_hips_grid_visible(next);
+                    }
+                })
+                .detach();
+            }
+
             let device = (*window.wgpu_device().expect("wgpu device not available")).clone();
             let queue = (*window.wgpu_queue().expect("wgpu queue not available")).clone();
             let adapter = (*window.wgpu_adapter().expect("wgpu adapter not available")).clone();
@@ -126,6 +147,7 @@ impl PlanetariumPanel {
                 is_dragging: false,
                 last_mouse_pos: None,
                 last_synced_observer: initial_observer,
+                last_synced_hips_grid: initial_hips_grid,
             }
         })
     }

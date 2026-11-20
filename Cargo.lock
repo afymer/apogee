@@ -288,6 +288,7 @@ dependencies = [
  "refineable",
  "serde",
  "serde_json",
+ "settings",
  "theme",
  "title_bar",
  "tokio",
@@ -7324,6 +7325,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "settings"
+version = "0.1.0"
+dependencies = [
+ "components",
+ "gpui",
+ "persistence",
+ "theme",
+ "tracing",
+ "ui",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8069,6 +8082,7 @@ dependencies = [
  "gpui",
  "observer",
  "protocol",
+ "settings",
  "theme",
  "tracing",
  "ui",

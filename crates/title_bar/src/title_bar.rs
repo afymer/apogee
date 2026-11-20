@@ -54,7 +54,11 @@ impl TitleBar {
             )
             .menu(|window, cx| {
                 Some(ContextMenu::build(window, cx, |menu, _window, _cx| {
-                    menu.entry("Exit", None, |_window, cx| cx.quit())
+                    menu.entry("Settings", None, |_window, cx| {
+                        settings::open_settings_window(cx);
+                    })
+                    .separator()
+                    .entry("Exit", None, |_window, cx| cx.quit())
                 }))
             })
     }

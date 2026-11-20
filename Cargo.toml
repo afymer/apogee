@@ -18,6 +18,7 @@ members = [
     "crates/hips",
     "crates/persistence",
     "crates/observer",
+    "crates/settings",
 ]
 default-members = ["crates/apogee"]
 # exclude = ["vendor/zed"]
@@ -79,6 +80,7 @@ title_bar.path = "crates/title_bar"
 raw_viewer.path = "crates/raw_viewer"
 persistence.path = "crates/persistence"
 observer.path = "crates/observer"
+settings.path = "crates/settings"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

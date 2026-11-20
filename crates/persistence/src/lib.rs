@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod error;
 pub mod observer;
+pub mod settings;
 pub mod store;
 pub mod tz_offset;
 
@@ -12,6 +13,7 @@ pub use observer::{
     estimate_longitude_from_utc_offset_minutes, estimate_utc_offset_minutes_from_longitude,
     parse_coordinate, parse_elevation_m, parse_utc_offset_minutes,
 };
+pub use settings::{AppSettings, DebugSettings, SETTINGS_SCHEMA_VERSION};
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
 
@@ -328,5 +330,45 @@ mod tests {
                 "lat={lat}, lon={lon}"
             );
         }
+    }
+
+    #[test]
+    fn app_settings_default_and_round_trip() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
+        assert!(!defaults.debug.show_hips_grid);
+
+        let dir = temp_test_dir();
+        let store = DocumentStore::open_dir(dir.clone());
+
+        assert_eq!(store.load_or_default::<AppSettings>(), defaults);
+
+        let updated = AppSettings {
+            schema_version: SETTINGS_SCHEMA_VERSION,
+            debug: DebugSettings {
+                show_hips_grid: true,
+            },
+        };
+        store.save(&updated).expect("save succeeds");
+        let loaded: AppSettings = store.load().expect("load succeeds");
+        assert_eq!(loaded, updated);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn app_settings_rejects_future_schema_version() {
+        let store = DocumentStore::in_memory();
+        let future = AppSettings {
+            schema_version: SETTINGS_SCHEMA_VERSION + 5,
+            ..AppSettings::default()
+        };
+        store.save(&future).expect("save succeeds");
+
+        let err = store.load::<AppSettings>().unwrap_err();
+        assert!(matches!(
+            err,
+            PersistenceError::UnsupportedSchemaVersion { .. }
+        ));
     }
 }

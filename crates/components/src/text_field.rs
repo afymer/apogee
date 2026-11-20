@@ -343,6 +343,7 @@ pub struct TextField {
     suffix: Option<SharedString>,
     monospace: bool,
     select_all_on_focus: bool,
+    frameless: bool,
     is_invalid: bool,
     focus_handle: FocusHandle,
     _blur_subscription: Subscription,
@@ -376,6 +377,7 @@ impl TextField {
             suffix: None,
             monospace: false,
             select_all_on_focus: true,
+            frameless: false,
             is_invalid: false,
             focus_handle,
             _blur_subscription: blur_subscription,
@@ -403,6 +405,12 @@ impl TextField {
     #[must_use]
     pub fn select_all_on_focus(mut self, select_all_on_focus: bool) -> Self {
         self.select_all_on_focus = select_all_on_focus;
+        self
+    }
+
+    #[must_use]
+    pub fn frameless(mut self, frameless: bool) -> Self {
+        self.frameless = frameless;
         self
     }
 
@@ -698,15 +706,17 @@ impl Render for TextField {
             .id(format!("text_field_{:?}", cx.entity_id()))
             .track_focus(&self.focus_handle)
             .w_full()
-            .h(px(26.0))
-            .px(px(6.0))
             .gap_1()
             .items_center()
             .justify_between()
-            .rounded_md()
-            .bg(bg_color)
-            .border_1()
-            .border_color(border_color)
+            .when(!self.frameless, |el| {
+                el.h(px(26.0))
+                    .px(px(6.0))
+                    .rounded_md()
+                    .bg(bg_color)
+                    .border_1()
+                    .border_color(border_color)
+            })
             .cursor(CursorStyle::IBeam)
             .text_size(px(12.0))
             .text_color(colors.text)

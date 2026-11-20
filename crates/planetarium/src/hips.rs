@@ -78,7 +78,7 @@ pub struct HipsGridSettings {
 impl Default for HipsGridSettings {
     fn default() -> Self {
         Self {
-            visible: true,
+            visible: false,
             color: Vec4::new(0.2, 0.9, 0.4, 0.5),
             config: HipsGridConfig::default(),
         }
