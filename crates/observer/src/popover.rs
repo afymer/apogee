@@ -13,8 +13,8 @@ use persistence::{
 };
 use ui::{
     ActiveTheme, Button, ButtonCommon, ButtonStyle, Clickable, Color, Divider, IconButton,
-    IconButtonShape, IconName, IconSize, Label, LabelCommon, LabelSize, StyledTypography, Switch,
-    SwitchColor, ToggleState, h_flex, v_flex,
+    IconButtonShape, IconName, IconSize, Label, LabelCommon, LabelSize, StyledTypography, h_flex,
+    v_flex,
 };
 
 use crate::icons::{
@@ -821,17 +821,19 @@ impl ObserverPopover {
             .as_ref()
             .is_some_and(|ed| ed.editing_id.as_deref() == Some(active.id.as_str()));
 
-        h_flex()
+        v_flex()
             .w_full()
-            .gap_2()
-            .items_start()
+            .gap_1p5()
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_center()
+                    .gap_2()
                     .child(
                         h_flex()
+                            .flex_1()
+                            .min_w_0()
                             .gap_1p5()
                             .items_center()
                             .child(
@@ -874,33 +876,46 @@ impl ObserverPopover {
                             ),
                     )
                     .child(
-                        div()
-                            .font_buffer(cx)
-                            .text_size(px(11.0))
-                            .text_color(colors.text_muted)
-                            .truncate()
-                            .child(active.location.format_summary_dms()),
-                    )
-                    .child(
-                        div()
-                            .font_buffer(cx)
-                            .text_size(px(10.5))
-                            .text_color(colors.text_muted.opacity(0.85))
-                            .child(format!("LST {lst_text} · Sun {solar_alt_deg:+.1}°")),
+                        IconButton::new("edit_active_site_btn", IconName::Pencil)
+                            .shape(IconButtonShape::Square)
+                            .icon_size(IconSize::Small)
+                            .style(if is_editing_active {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Subtle
+                            })
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.toggle_edit_active_profile(window, cx);
+                            })),
                     ),
             )
             .child(
-                IconButton::new("edit_active_site_btn", IconName::Pencil)
-                    .shape(IconButtonShape::Square)
-                    .icon_size(IconSize::Small)
-                    .style(if is_editing_active {
-                        ButtonStyle::Filled
-                    } else {
-                        ButtonStyle::Subtle
-                    })
-                    .on_click(cx.listener(|this, _event, window, cx| {
-                        this.toggle_edit_active_profile(window, cx);
-                    })),
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .items_start()
+                            .gap_0p5()
+                            .font_buffer(cx)
+                            .text_size(px(11.0))
+                            .text_color(colors.text_muted)
+                            .child(active.location.format_latitude_dms())
+                            .child(active.location.format_longitude_dms())
+                            .child(format!("{:.0} m", active.location.elevation_m.round())),
+                    )
+                    .child(
+                        v_flex()
+                            .items_end()
+                            .gap_0p5()
+                            .font_buffer(cx)
+                            .text_size(px(11.0))
+                            .text_color(colors.text_muted)
+                            .child(format!("LST {lst_text}"))
+                            .child(format!("Sun {solar_alt_deg:+.1}°")),
+                    ),
             )
     }
 
@@ -1397,50 +1412,44 @@ impl ObserverPopover {
                     .child(section_eyebrow("OBSERVATION TIME", cx))
                     .child(
                         h_flex()
-                            .gap_2()
+                            .id("observer_now_btn")
+                            .h(px(22.0))
                             .items_center()
+                            .px_2()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if is_live {
+                                status.success.opacity(0.55)
+                            } else {
+                                colors.border_variant
+                            })
+                            .bg(if is_live {
+                                status.success.opacity(0.12)
+                            } else {
+                                colors.element_background.opacity(0.45)
+                            })
+                            .when(!is_live, |s| {
+                                s.cursor_pointer().hover(|s| {
+                                    s.bg(colors.element_hover)
+                                        .border_color(colors.border_focused)
+                                })
+                            })
+                            .on_click(|_, _window, cx| {
+                                let observer = cx.global::<GlobalObserver>().0.clone();
+                                observer.update(cx, |model, cx| {
+                                    model.set_live(cx);
+                                });
+                            })
                             .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        div().size(px(6.0)).rounded_full().bg(if is_live {
-                                            status.success
-                                        } else {
-                                            status.warning
-                                        }),
-                                    )
-                                    .child(
-                                        Label::new(if is_live { "Now" } else { "Custom" })
-                                            .size(LabelSize::XSmall)
-                                            .color(if is_live {
-                                                Color::Default
-                                            } else {
-                                                Color::Warning
-                                            }),
-                                    ),
-                            )
-                            .child(
-                                Switch::new(
-                                    "observer_auto_sync_switch",
-                                    if is_live {
-                                        ToggleState::Selected
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(if is_live {
+                                        status.success
                                     } else {
-                                        ToggleState::Unselected
-                                    },
-                                )
-                                .color(SwitchColor::Accent)
-                                .on_click(|state, _window, cx| {
-                                    let observer = cx.global::<GlobalObserver>().0.clone();
-                                    observer.update(cx, |model, cx| {
-                                        if *state == ToggleState::Selected {
-                                            model.set_live(cx);
-                                        } else {
-                                            let now_secs = model.effective_unix_seconds();
-                                            model.set_manual_unix_seconds(now_secs, cx);
-                                        }
-                                    });
-                                }),
+                                        colors.text_muted
+                                    })
+                                    .child("Now"),
                             ),
                     ),
             )

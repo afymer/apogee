@@ -12,7 +12,6 @@ use crate::state::GlobalObserver;
 /// Expressive title-bar trigger pill and popover menu for the active observatory and time.
 pub fn observer_menu(cx: &App) -> impl IntoElement {
     let status = cx.theme().status();
-    let colors = cx.theme().colors();
 
     let (site_name, site_icon, is_live, time_text) =
         if let Some(global) = cx.try_global::<GlobalObserver>() {
@@ -53,30 +52,14 @@ pub fn observer_menu(cx: &App) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .size(px(3.0))
-                        .rounded_full()
-                        .bg(colors.text_muted.opacity(0.45)),
-                )
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .child(div().size(px(5.5)).rounded_full().bg(if is_live {
+                        .font_buffer(cx)
+                        .text_size(px(11.5))
+                        .text_color(if is_live {
                             status.success
                         } else {
                             status.warning
-                        }))
-                        .child(
-                            div()
-                                .font_buffer(cx)
-                                .text_size(px(11.5))
-                                .text_color(if is_live {
-                                    colors.text_muted
-                                } else {
-                                    status.warning
-                                })
-                                .child(time_text),
-                        ),
+                        })
+                        .child(time_text),
                 )
                 .child(
                     Icon::new(IconName::ChevronDown)
