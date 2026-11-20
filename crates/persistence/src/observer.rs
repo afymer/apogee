@@ -127,6 +127,11 @@ impl GeoLocation {
         let hemi = if self.longitude_deg < 0.0 { 'W' } else { 'E' };
         format!("{:.4}° {}", self.longitude_deg.abs(), hemi)
     }
+
+    /// Returns the standard (non-DST) civil UTC offset in minutes for this site's coordinates.
+    pub fn standard_utc_offset_minutes(&self) -> i32 {
+        crate::tz_offset::lookup_standard_utc_offset_minutes(self.latitude_deg, self.longitude_deg)
+    }
 }
 
 impl Default for GeoLocation {
@@ -367,7 +372,7 @@ impl ProfileSource {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimezoneMode {
-    /// Derives the standard timezone offset from the observation site's longitude.
+    /// Derives the standard timezone offset from the observation site's coordinates.
     #[default]
     SiteLocal,
     /// Uses an explicit UTC offset or falls back to the host computer's standard UTC offset.

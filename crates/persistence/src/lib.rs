@@ -2,6 +2,7 @@ pub mod backend;
 pub mod error;
 pub mod observer;
 pub mod store;
+pub mod tz_offset;
 
 pub use backend::{DocumentBackend, JsonFileBackend, MemoryBackend, default_config_dir, validate_key};
 pub use error::PersistenceError;
@@ -12,6 +13,7 @@ pub use observer::{
     parse_coordinate, parse_elevation_m, parse_utc_offset_minutes,
 };
 pub use store::{DocumentStore, Persistable};
+pub use tz_offset::lookup_standard_utc_offset_minutes;
 
 #[cfg(test)]
 mod tests {
@@ -273,5 +275,58 @@ mod tests {
         let existing_loaded: ObserverCatalog =
             store.load_or_else(|| ObserverCatalog::default_for_utc_offset_minutes(540));
         assert_eq!(existing_loaded, seeded);
+    }
+
+    #[test]
+    fn coordinate_standard_utc_offset_lookup() {
+        let southern_france_lat = parse_coordinate("43°28'54\" N", CoordinateAxis::Latitude).unwrap();
+        let southern_france_lon = parse_coordinate("1°21'07\" E", CoordinateAxis::Longitude).unwrap();
+        assert_eq!(
+            lookup_standard_utc_offset_minutes(southern_france_lat, southern_france_lon),
+            60
+        );
+        assert_eq!(
+            GeoLocation::new(southern_france_lat, southern_france_lon, 150.0)
+                .standard_utc_offset_minutes(),
+            60
+        );
+
+        let cases = [
+            // France & Spain (UTC+1 despite near-0° or negative longitudes)
+            (48.8364, 2.3364, 60),    // Paris
+            (42.9369, 0.1411, 60),    // Pic du Midi
+            (48.3904, -4.4861, 60),   // Brest
+            (40.4168, -3.7038, 60),   // Madrid
+            (42.2406, -8.7207, 60),   // Vigo
+            // UK & Portugal (UTC+0)
+            (51.5074, -0.1278, 0),    // London
+            (51.1279, 1.3134, 0),     // Dover
+            (38.7223, -9.1393, 0),    // Lisbon
+            // Non-15°-aligned and fractional-hour zones
+            (43.8256, 87.6168, 480),  // Urumqi (UTC+8)
+            (28.6139, 77.2090, 330),  // New Delhi (UTC+5:30)
+            (27.7172, 85.3240, 345),  // Kathmandu (UTC+5:45)
+            (35.6892, 51.3890, 210),  // Tehran (UTC+3:30)
+            (-31.6767, 128.8886, 525), // Eucla (UTC+8:45)
+            (-34.9285, 138.6007, 570), // Adelaide (UTC+9:30)
+            (-33.8688, 151.2093, 600), // Sydney (UTC+10)
+            (47.5615, -52.7126, -210), // St. John's (UTC-3:30)
+            (40.7128, -74.0060, -300), // New York (UTC-5)
+            (-32.8895, -68.8458, -180), // Mendoza (UTC-3)
+            (35.6762, 139.6503, 540),  // Tokyo (UTC+9)
+            // Boundaries & non-finite fallback
+            (0.0, -180.0, -720),
+            (0.0, 180.0, 720),
+            (f64::NAN, 15.0, 60),
+            (43.5, f64::NAN, 0),
+        ];
+
+        for (lat, lon, expected) in cases {
+            assert_eq!(
+                lookup_standard_utc_offset_minutes(lat, lon),
+                expected,
+                "lat={lat}, lon={lon}"
+            );
+        }
     }
 }

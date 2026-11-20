@@ -10,7 +10,7 @@ use chrono::{
 use gpui::{App, AppContext, Context, Entity, Global};
 use persistence::{
     DocumentStore, GeoLocation, MergeOutcome, ObservatoryIcon, ObservatoryProfile,
-    ObserverCatalog, TimezoneConfig, TimezoneMode, estimate_utc_offset_minutes_from_longitude,
+    ObserverCatalog, TimezoneConfig, TimezoneMode,
 };
 
 /// Observation time synchronization mode.
@@ -145,7 +145,7 @@ impl ObserverModel {
             TimezoneMode::Utc if tz.utc_offset_minutes.is_some() => 0,
             TimezoneMode::Utc => host_standard_offset_and_dst(self.effective_unix_seconds()).0,
         };
-        resolve_standard_utc_offset_minutes(tz, self.active_location().longitude_deg, host_std_mins)
+        resolve_standard_utc_offset_minutes(tz, self.active_location(), host_std_mins)
     }
 
     /// Returns whether Daylight Saving Time (+1h) is currently active for the site/date.
@@ -155,11 +155,8 @@ impl ObserverModel {
             return dst;
         }
         let (host_std_mins, host_dst) = host_standard_offset_and_dst(self.effective_unix_seconds());
-        let effective_std_mins = resolve_standard_utc_offset_minutes(
-            tz,
-            self.active_location().longitude_deg,
-            host_std_mins,
-        );
+        let effective_std_mins =
+            resolve_standard_utc_offset_minutes(tz, self.active_location(), host_std_mins);
         resolve_dst_enabled(tz, effective_std_mins, host_std_mins, host_dst)
     }
 
@@ -544,11 +541,11 @@ impl ObserverModel {
 
 fn resolve_standard_utc_offset_minutes(
     tz: TimezoneConfig,
-    longitude_deg: f64,
+    location: GeoLocation,
     host_std_mins: i32,
 ) -> i32 {
     match tz.mode {
-        TimezoneMode::SiteLocal => estimate_utc_offset_minutes_from_longitude(longitude_deg),
+        TimezoneMode::SiteLocal => location.standard_utc_offset_minutes(),
         TimezoneMode::Utc => tz.utc_offset_minutes.unwrap_or(host_std_mins),
     }
 }
@@ -615,51 +612,62 @@ mod tests {
 
     fn compute_effective_offset_secs(
         tz: TimezoneConfig,
-        longitude_deg: f64,
+        location: GeoLocation,
         host_std_mins: i32,
         host_dst: bool,
     ) -> i32 {
-        let base_mins = resolve_standard_utc_offset_minutes(tz, longitude_deg, host_std_mins);
+        let base_mins = resolve_standard_utc_offset_minutes(tz, location, host_std_mins);
         let dst = resolve_dst_enabled(tz, base_mins, host_std_mins, host_dst);
         base_mins * 60 + if dst { 3600 } else { 0 }
     }
 
     #[test]
     fn timezone_effective_offset_combines_standard_and_dst() {
+        let loc = GeoLocation::default();
         let tz = TimezoneConfig {
             mode: TimezoneMode::Utc,
             utc_offset_minutes: Some(60),
             dst_enabled: Some(false),
         };
-        assert_eq!(compute_effective_offset_secs(tz, 0.0, 0, true), 3600);
+        assert_eq!(compute_effective_offset_secs(tz, loc, 0, true), 3600);
 
         let tz_dst = TimezoneConfig {
             mode: TimezoneMode::Utc,
             utc_offset_minutes: Some(60),
             dst_enabled: Some(true),
         };
-        assert_eq!(compute_effective_offset_secs(tz_dst, 0.0, 0, false), 7200);
+        assert_eq!(compute_effective_offset_secs(tz_dst, loc, 0, false), 7200);
 
         let tz_neg = TimezoneConfig {
             mode: TimezoneMode::Utc,
             utc_offset_minutes: Some(-300),
             dst_enabled: Some(true),
         };
-        assert_eq!(compute_effective_offset_secs(tz_neg, 0.0, 0, false), -14400);
+        assert_eq!(compute_effective_offset_secs(tz_neg, loc, 0, false), -14400);
     }
 
     #[test]
-    fn site_local_derives_offset_from_longitude_and_gates_auto_dst() {
+    fn site_local_derives_offset_from_coordinates_and_gates_auto_dst() {
+        use persistence::{CoordinateAxis, parse_coordinate};
+
         let site_tz = TimezoneConfig::default();
         assert_eq!(site_tz.mode, TimezoneMode::SiteLocal);
 
-        // Tokyo (~139.7°E => +9h = +540m) does NOT inherit host DST when host is UTC+1.
-        assert_eq!(compute_effective_offset_secs(site_tz, 139.7, 60, true), 9 * 3600);
+        // Southern France (43°28'54" N; 1°21'07" E) resolves to UTC+1 despite near-0° longitude.
+        let southern_france = GeoLocation::new(
+            parse_coordinate("43°28'54\" N", CoordinateAxis::Latitude).unwrap(),
+            parse_coordinate("1°21'07\" E", CoordinateAxis::Longitude).unwrap(),
+            150.0,
+        );
+        assert_eq!(compute_effective_offset_secs(site_tz, southern_france, 60, false), 3600);
+        assert_eq!(compute_effective_offset_secs(site_tz, southern_france, 60, true), 7200);
 
-        // Site near host band (+15°E => +1h = +60m) inherits host DST when host std == +60m.
-        assert_eq!(compute_effective_offset_secs(site_tz, 15.0, 60, true), 2 * 3600);
+        // Tokyo (35.6762° N, 139.6503° E => +9h = +540m) does NOT inherit host DST when host is UTC+1.
+        let tokyo = GeoLocation::new(35.6762, 139.6503, 40.0);
+        assert_eq!(compute_effective_offset_secs(site_tz, tokyo, 60, true), 9 * 3600);
 
-        // Site near host band when host DST is inactive remains at standard offset.
-        assert_eq!(compute_effective_offset_secs(site_tz, 15.0, 60, false), 3600);
+        // London (51.5074° N, 0.1278° W => UTC+0) does NOT inherit host DST when host is UTC+1.
+        let london = GeoLocation::new(51.5074, -0.1278, 11.0);
+        assert_eq!(compute_effective_offset_secs(site_tz, london, 60, true), 0);
     }
 }
