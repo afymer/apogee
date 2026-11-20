@@ -1,7 +1,10 @@
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_3, PI, TAU};
 
 use celestial::ObservationContext;
-use celestial::coords::{Angle, AngleInterval, SphericalRect};
+use celestial::coords::{
+    Angle, AngleInterval, SphericalRect, cartesian_to_canonical_spherical,
+    topocentric_enu_to_spherical,
+};
 use celestial::projection::{CameraProjection, ProjectionKind};
 use glam::{DMat3, DMat4, DVec3, Mat4};
 
@@ -30,6 +33,14 @@ pub struct ProjectionParams {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkyCoordinates {
+    pub az_deg: f64,
+    pub alt_deg: f64,
+    pub ra_deg: f64,
+    pub dec_deg: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanetariumViewInfo {
     pub center_ra_deg: f64,
     pub center_dec_deg: f64,
@@ -37,6 +48,9 @@ pub struct PlanetariumViewInfo {
     pub center_alt_deg: f64,
     pub fov_deg: f64,
     pub view_mode: ViewMode,
+    pub projection: CameraProjection,
+    pub camera_to_topo: DMat3,
+    pub camera_to_icrs: DMat3,
 }
 
 impl Default for PlanetariumViewInfo {
@@ -48,6 +62,28 @@ impl Default for PlanetariumViewInfo {
             center_alt_deg: 90.0,
             fov_deg: 180.0,
             view_mode: ViewMode::Horizontal,
+            projection: CameraProjection::default(),
+            camera_to_topo: DMat3::IDENTITY,
+            camera_to_icrs: DMat3::IDENTITY,
+        }
+    }
+}
+
+impl PlanetariumViewInfo {
+    /// Computes topocentric (Az/Alt) and equatorial (RA/Dec) sky coordinates at screen NDC (`[-1, 1]^2`).
+    pub fn coords_at_ndc(&self, ndc_x: f64, ndc_y: f64) -> SkyCoordinates {
+        let v_cam = self.projection.unproject_ndc(ndc_x, ndc_y);
+        let v_topo = self.camera_to_topo * v_cam;
+        let v_icrs = self.camera_to_icrs * v_cam;
+
+        let (az, alt) = topocentric_enu_to_spherical(v_topo);
+        let (ra, dec) = cartesian_to_canonical_spherical(v_icrs);
+
+        SkyCoordinates {
+            az_deg: az.degrees(),
+            alt_deg: alt.degrees(),
+            ra_deg: ra.degrees(),
+            dec_deg: dec.degrees(),
         }
     }
 }
@@ -355,7 +391,7 @@ impl PlanetariumCamera {
         std::time::Duration::from_secs_f64(secs.clamp(MIN_INTERVAL_SECS, MAX_INTERVAL_SECS))
     }
 
-    pub fn view_info(&self) -> PlanetariumViewInfo {
+    pub fn view_info(&self, aspect_ratio: f32) -> PlanetariumViewInfo {
         let (az, alt, ra, dec) = match self.view_mode {
             ViewMode::Horizontal => {
                 let az = self.yaw.to_degrees();
@@ -384,6 +420,9 @@ impl PlanetariumCamera {
             center_alt_deg: alt,
             fov_deg: self.fov_y.to_degrees(),
             view_mode: self.view_mode,
+            projection: self.projection(aspect_ratio),
+            camera_to_topo: self.topocentric_to_camera_matrix().transpose(),
+            camera_to_icrs: self.icrs_to_camera_matrix().transpose(),
         }
     }
 }
@@ -437,5 +476,45 @@ mod tests {
         assert_eq!(camera.view_mode, ViewMode::Horizontal);
         assert!(camera.forward_direction_eq().distance(eq_before) < 1e-12);
         assert!(camera.forward_direction_topo().distance(topo_before) < 1e-12);
+    }
+
+    #[test]
+    fn test_coords_at_ndc_center_and_cardinal_offsets() {
+        for mode in [ViewMode::Horizontal, ViewMode::Equatorial] {
+            let yaw_rad = 90.0_f64.to_radians();
+            let pitch_rad = 20.0_f64.to_radians();
+            let camera = PlanetariumCamera {
+                view_mode: mode,
+                yaw: yaw_rad,
+                pitch: pitch_rad,
+                fov_y: 60.0_f64.to_radians(),
+                target_yaw: yaw_rad,
+                target_pitch: pitch_rad,
+                target_fov_y: 60.0_f64.to_radians(),
+                ..Default::default()
+            };
+
+            let info = camera.view_info(16.0 / 9.0);
+            let center = info.coords_at_ndc(0.0, 0.0);
+
+            assert!((center.az_deg - info.center_az_deg).abs() < 1e-9);
+            assert!((center.alt_deg - info.center_alt_deg).abs() < 1e-9);
+            assert!((center.ra_deg - info.center_ra_deg).abs() < 1e-9);
+            assert!((center.dec_deg - info.center_dec_deg).abs() < 1e-9);
+
+            let up = info.coords_at_ndc(0.0, 0.25);
+            let right = info.coords_at_ndc(0.25, 0.0);
+            match mode {
+                ViewMode::Horizontal => {
+                    assert!(up.alt_deg > center.alt_deg);
+                    assert!(right.az_deg > center.az_deg);
+                }
+                ViewMode::Equatorial => {
+                    assert!(up.dec_deg > center.dec_deg);
+                    // Looking outward at the celestial sphere (+RA increases East/left in Eq view)
+                    assert!(right.ra_deg < center.ra_deg);
+                }
+            }
+        }
     }
 }

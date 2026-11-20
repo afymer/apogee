@@ -16,6 +16,7 @@ observer.workspace = true
 settings.workspace = true
 workspace.workspace = true
 title_bar.workspace = true
+status_bar.workspace = true
 raw_viewer.workspace = true
 client.workspace = true
 futures.workspace = true

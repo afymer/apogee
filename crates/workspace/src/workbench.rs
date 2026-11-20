@@ -26,11 +26,15 @@ impl Workbench {
             workspaces.insert(*kind, ws);
         }
 
+        let active_workspace_kind = WorkspaceKind::default();
         let status_bar = cx.new(StatusBar::new);
+        status_bar.update(cx, |bar, cx| {
+            bar.set_show_planetarium_telemetry(active_workspace_kind == WorkspaceKind::Explore, cx);
+        });
 
         Self {
             workspaces,
-            active_workspace_kind: WorkspaceKind::default(),
+            active_workspace_kind,
             title_bar: None,
             registered_panels: Vec::new(),
             status_bar,
@@ -49,6 +53,9 @@ impl Workbench {
     pub fn switch_workspace(&mut self, kind: WorkspaceKind, cx: &mut Context<Self>) {
         if self.active_workspace_kind != kind {
             self.active_workspace_kind = kind;
+            self.status_bar.update(cx, |bar, cx| {
+                bar.set_show_planetarium_telemetry(kind == WorkspaceKind::Explore, cx);
+            });
             cx.notify();
         }
     }

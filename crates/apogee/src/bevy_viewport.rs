@@ -1,24 +1,45 @@
-use std::{sync::Arc, thread::JoinHandle};
+use std::{
+    sync::{Arc, Mutex},
+    thread::JoinHandle,
+};
 
 use celestial::coords::geodetic::GeodeticPosition;
 use futures::StreamExt;
 use gpui::{
-    App, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, Window, div, prelude::*, rgb,
+    ScrollWheelEvent, Window, div, prelude::*, px, rgb, svg,
 };
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
-use planetarium::{BevyBridge, ObserverClockSpec, PlanetariumRenderer, ViewMode};
-use theme::ActiveTheme;
-use ui::{
-    Button, ButtonCommon, ButtonStyle, Clickable, Color, Label, LabelCommon, LabelSize, h_flex,
+use planetarium::{
+    BevyBridge, ObserverClockSpec, PlanetariumRenderer, PlanetariumViewInfo, ViewMode,
 };
+use status_bar::{
+    CursorSkyCoords, GlobalPlanetariumStatus, PlanetariumTelemetry, TelemetryCoordMode,
+};
+use theme::ActiveTheme;
+use ui::{Tooltip, h_flex};
 use workspace::{
     WorkspaceKind,
     dock::DockPosition,
     panel::{Panel, PanelEvent},
     workbench::Workbench,
 };
+
+const ICON_COORDS_HORIZONTAL: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M2.5 18H21.5" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M4 18A8 8 0 0 1 20 18" stroke="black" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M5.2 13.8H18.8" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
+  <path d="M12 10V18" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
+  <circle cx="12" cy="6.2" r="1.2" fill="black"/>
+</svg>"##;
+
+const ICON_COORDS_EQUATORIAL: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="12" cy="12" r="7.5" stroke="black" stroke-width="1.5"/>
+  <path d="M16.75 3.8L7.25 20.2" stroke="black" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M5.5 8.25Q9.6 16.15 18.5 15.75" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
+  <path d="M15.75 5.5Q17.55 15.2 8.25 18.5" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
+</svg>"##;
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workbench: &mut Workbench, window, cx| {
@@ -41,6 +62,9 @@ pub struct PlanetariumPanel {
     focus_handle: FocusHandle,
     is_dragging: bool,
     last_mouse_pos: Option<Point<Pixels>>,
+    viewport_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    cursor_position: Option<Point<Pixels>>,
+    latest_view_info: PlanetariumViewInfo,
     last_synced_observer: Option<(GeodeticPosition, ObserverClockSpec)>,
     last_synced_hips_grid: Option<bool>,
     last_synced_atmosphere_strength: Option<f32>,
@@ -157,32 +181,100 @@ impl PlanetariumPanel {
             )
             .expect("Failed to spawn PlanetariumRenderer thread");
 
+            let initial_view_info = bridge.view_info();
+
             cx.spawn(async move |this, cx| {
                 while let Some(()) = rx.next().await {
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    if this
+                        .update(cx, |this, cx| {
+                            this.on_bevy_frame(cx);
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
             })
             .detach();
 
-            Self {
+            let panel = Self {
                 bridge,
                 cached_texture: None,
                 renderer_handle: Some(renderer_handle),
                 focus_handle: cx.focus_handle(),
                 is_dragging: false,
                 last_mouse_pos: None,
+                viewport_bounds: Arc::new(Mutex::new(None)),
+                cursor_position: None,
+                latest_view_info: initial_view_info,
                 last_synced_observer: initial_observer,
                 last_synced_hips_grid: initial_hips_grid,
                 last_synced_atmosphere_strength: initial_atmosphere_strength,
                 last_synced_ground_opacity: initial_ground_opacity,
-            }
+            };
+            panel.sync_status_bar(cx);
+            panel
         })
+    }
+
+    fn cursor_ndc(&self) -> Option<(f64, f64)> {
+        let pos = self.cursor_position?;
+        let bounds = self.viewport_bounds.lock().ok().and_then(|g| *g)?;
+        let w = f64::from(f32::from(bounds.size.width));
+        let h = f64::from(f32::from(bounds.size.height));
+        if w <= 1.0 || h <= 1.0 {
+            return None;
+        }
+        let u = f64::from(f32::from(pos.x - bounds.origin.x)) / w;
+        let v = f64::from(f32::from(pos.y - bounds.origin.y)) / h;
+        if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+            return None;
+        }
+        Some((2.0 * u - 1.0, 1.0 - 2.0 * v))
+    }
+
+    fn sync_status_bar(&self, cx: &mut Context<Self>) {
+        let Some(status_entity) = cx
+            .try_global::<GlobalPlanetariumStatus>()
+            .map(|g| g.0.clone())
+        else {
+            return;
+        };
+
+        let info = self.latest_view_info;
+        let mode = match info.view_mode {
+            ViewMode::Horizontal => TelemetryCoordMode::Horizontal,
+            ViewMode::Equatorial => TelemetryCoordMode::Equatorial,
+        };
+        let cursor = self.cursor_ndc().map(|(nx, ny)| {
+            let c = info.coords_at_ndc(nx, ny);
+            CursorSkyCoords {
+                az_deg: c.az_deg,
+                alt_deg: c.alt_deg,
+                ra_deg: c.ra_deg,
+                dec_deg: c.dec_deg,
+            }
+        });
+
+        let telemetry = PlanetariumTelemetry {
+            mode,
+            fov_deg: info.fov_deg,
+            cursor,
+        };
+        status_entity.update(cx, |model, cx| {
+            model.update_telemetry(telemetry, cx);
+        });
+    }
+
+    fn on_bevy_frame(&mut self, cx: &mut Context<Self>) {
+        self.latest_view_info = self.bridge.view_info();
+        self.sync_status_bar(cx);
+        cx.notify();
     }
 
     fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         self.is_dragging = true;
+        self.cursor_position = Some(event.position);
         self.last_mouse_pos = Some(event.position);
         cx.notify();
     }
@@ -193,7 +285,10 @@ impl PlanetariumPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cursor_position = Some(event.position);
+
         if !self.is_dragging {
+            self.sync_status_bar(cx);
             return;
         }
         if event.pressed_button != Some(MouseButton::Left) {
@@ -221,6 +316,7 @@ impl PlanetariumPanel {
     }
 
     fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, _cx: &mut Context<Self>) {
+        self.cursor_position = Some(event.position);
         let delta_lines = match event.delta {
             ScrollDelta::Lines(pt) => pt.y as f64,
             ScrollDelta::Pixels(pt) => (f32::from(pt.y) / 20.0) as f64,
@@ -231,14 +327,13 @@ impl PlanetariumPanel {
         }
     }
 
-    fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
-        let current = self.bridge.view_info().view_mode;
-        let next = match current {
-            ViewMode::Horizontal => ViewMode::Equatorial,
-            ViewMode::Equatorial => ViewMode::Horizontal,
-        };
-        self.bridge.set_view_mode(next);
-        cx.notify();
+    fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
+        if self.latest_view_info.view_mode != mode {
+            self.bridge.set_view_mode(mode);
+            self.latest_view_info.view_mode = mode;
+            self.sync_status_bar(cx);
+            cx.notify();
+        }
     }
 }
 
@@ -246,9 +341,11 @@ impl Render for PlanetariumPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.bridge.snapshot();
         self.cached_texture = snapshot.texture_view;
+        self.latest_view_info = snapshot.view_info;
         let bridge = self.bridge.clone();
         let last_size = snapshot.last_size;
-        let view_info = snapshot.view_info;
+        let view_mode = self.latest_view_info.view_mode;
+        let viewport_bounds = self.viewport_bounds.clone();
 
         let cursor = if self.is_dragging {
             CursorStyle::ClosedHand
@@ -256,39 +353,41 @@ impl Render for PlanetariumPanel {
             CursorStyle::OpenHand
         };
 
-        let fov_text = if view_info.fov_deg >= 1.0 {
-            format!("FOV: {:.1}°", view_info.fov_deg)
-        } else if view_info.fov_deg * 60.0 >= 1.0 {
-            format!("FOV: {:.1}'", view_info.fov_deg * 60.0)
-        } else {
-            format!("FOV: {:.1}\"", view_info.fov_deg * 3600.0)
-        };
+        let colors = cx.theme().colors();
+        let pill_bg = colors.elevated_surface_background.opacity(0.65);
+        let pill_border = colors.border_variant.opacity(0.75);
+        let active_bg = colors.element_selected.opacity(0.9);
+        let hover_bg = colors.ghost_element_hover.opacity(0.6);
+        let active_icon = colors.text;
+        let muted_icon = colors.text_muted.opacity(0.75);
 
-        let altaz_text = format!(
-            "Az: {:.1}°  Alt: {:+.1}°",
-            view_info.center_az_deg, view_info.center_alt_deg
-        );
-
-        let ra_hours = view_info.center_ra_deg / 15.0;
-        let h = ra_hours.floor() as u32;
-        let m = ((ra_hours - f64::from(h)) * 60.0).floor() as u32;
-        let dec = view_info.center_dec_deg;
-        let sign = if dec >= 0.0 { '+' } else { '-' };
-        let abs_dec = dec.abs();
-        let d = abs_dec.floor() as u32;
-        let dm = ((abs_dec - f64::from(d)) * 60.0).floor() as u32;
-        let eq_text = format!("RA: {:02}h {:02}m  Dec: {}{:02}° {:02}'", h, m, sign, d, dm);
-
-        let mode_label = match view_info.view_mode {
-            ViewMode::Horizontal => "Alt/Az",
-            ViewMode::Equatorial => "RA/Dec",
-        };
+        let coord_options = [
+            (
+                ViewMode::Horizontal,
+                "coord_mode_horizontal",
+                ICON_COORDS_HORIZONTAL,
+                "Horizontal (Alt/Az)",
+            ),
+            (
+                ViewMode::Equatorial,
+                "coord_mode_equatorial",
+                ICON_COORDS_EQUATORIAL,
+                "Equatorial (RA/Dec)",
+            ),
+        ];
 
         div()
+            .id("planetarium_viewport")
             .size_full()
             .bg(rgb(0x000000))
             .relative()
             .cursor(cursor)
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if !hovered {
+                    this.cursor_position = None;
+                    this.sync_status_bar(cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
@@ -316,6 +415,9 @@ impl Render for PlanetariumPanel {
             .child(
                 gpui::canvas(
                     move |bounds, window, _cx| {
+                        if let Ok(mut guard) = viewport_bounds.lock() {
+                            *guard = Some(bounds);
+                        }
                         let scale = window.scale_factor();
                         let width = (f32::from(bounds.size.width) * scale).round() as u32;
                         let height = (f32::from(bounds.size.height) * scale).round() as u32;
@@ -335,74 +437,54 @@ impl Render for PlanetariumPanel {
                     .as_ref()
                     .map(|view| gpui::surface(view.clone()).size_full()),
             )
-            // Temporary HUD. TODO: move it to the toolbar
             .child(
                 h_flex()
+                    .id("coord_mode_switch")
                     .absolute()
                     .top_3()
                     .right_3()
-                    .gap_2()
                     .items_center()
-                    .p_1p5()
-                    .rounded_md()
-                    .bg(cx
-                        .theme()
-                        .colors()
-                        .elevated_surface_background
-                        .opacity(0.85))
+                    .gap_0p5()
+                    .p_0p5()
+                    .rounded_full()
+                    .bg(pill_bg)
                     .border_1()
-                    .border_color(cx.theme().colors().border_variant)
-                    .shadow_md()
+                    .border_color(pill_border)
+                    .shadow_sm()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                    .child(
+                    .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                    .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                        if *hovered {
+                            this.cursor_position = None;
+                            this.sync_status_bar(cx);
+                        }
+                    }))
+                    .children(coord_options.into_iter().map(|(mode, id, icon, tip)| {
+                        let is_active = view_mode == mode;
                         div()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().colors().element_background)
+                            .id(id)
+                            .w(px(26.0))
+                            .h(px(22.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .when(is_active, |el| el.bg(active_bg))
+                            .when(!is_active, |el| el.hover(|s| s.bg(hover_bg)))
+                            .tooltip(Tooltip::text(tip))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.set_view_mode(mode, cx);
+                            }))
                             .child(
-                                Label::new(fov_text)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Default),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().colors().element_background)
-                            .child(Label::new(altaz_text).size(LabelSize::Small).color(
-                                if view_info.view_mode == ViewMode::Horizontal {
-                                    Color::Default
-                                } else {
-                                    Color::Muted
-                                },
-                            )),
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().colors().element_background)
-                            .child(Label::new(eq_text).size(LabelSize::Small).color(
-                                if view_info.view_mode == ViewMode::Equatorial {
-                                    Color::Default
-                                } else {
-                                    Color::Muted
-                                },
-                            )),
-                    )
-                    .child(
-                        Button::new("view_mode_toggle_btn", mode_label)
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.toggle_view_mode(cx);
-                            })),
-                    ),
+                                svg()
+                                    .data(icon)
+                                    .size(px(14.0))
+                                    .flex_none()
+                                    .text_color(if is_active { active_icon } else { muted_icon }),
+                            )
+                    })),
             )
     }
 }

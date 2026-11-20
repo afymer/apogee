@@ -37,7 +37,7 @@ use bevy::{
     },
 };
 
-pub use camera::{PlanetariumCamera, PlanetariumViewInfo, ViewMode};
+pub use camera::{PlanetariumCamera, PlanetariumViewInfo, SkyCoordinates, ViewMode};
 use grids::{create_altaz_grid_mesh, create_equatorial_grid_mesh, create_horizon_mesh};
 pub use material::{CelestialLineMaterial, CelestialLineUniforms, init_celestial_materials};
 
@@ -422,7 +422,7 @@ fn camera_movement_and_interpolation_system(
     }
 
     if moved || is_interpolating || is_first_run || epoch_changed {
-        let aspect = dims.width as f32 / dims.height as f32;
+        let aspect = dims.width.max(1) as f32 / dims.height.max(1) as f32;
         let proj_params = camera.projection_params(aspect);
 
         let subdiv_count = 6;
@@ -451,7 +451,7 @@ fn camera_movement_and_interpolation_system(
             || moved_significantly;
 
         if needs_rebuild {
-            let view_info = camera.view_info();
+            let view_info = camera.view_info(aspect);
             let (bounds_altaz, bounds_eq) = if is_zoomed_in {
                 let aspect_ratio = aspect as f64;
                 let b_altaz = camera::compute_spherical_bounds(
@@ -558,7 +558,7 @@ fn camera_movement_and_interpolation_system(
         }
 
         grid_state.last_uniform_epoch_secs = epoch_secs;
-        camera_sync.view_info = camera.view_info();
+        camera_sync.view_info = camera.view_info(aspect);
         camera_sync.is_interpolating = is_interpolating;
         camera_sync.idle_update_interval = match observer_clock.0 {
             ObserverClockSpec::Live => camera.sky_rotation_update_interval(dims.height),

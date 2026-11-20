@@ -71,6 +71,10 @@ fn main() {
         }
 
         {
+            let _span = ::tracing::info_span!("status_bar_init").entered();
+            status_bar::init(cx);
+        }
+        {
             let _span = ::tracing::info_span!("title_bar_init").entered();
             title_bar::init(cx);
         }
