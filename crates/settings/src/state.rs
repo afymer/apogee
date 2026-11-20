@@ -1,7 +1,8 @@
 use gpui::{App, AppContext, Context, Entity, Global};
 use persistence::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY,
-    DebugSettings, DocumentStore, GroundSettings, PlanetariumSettings,
+    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings, DocumentStore,
+    GroundSettings, PlanetariumSettings, StarsSettings, SurveySettings,
 };
 
 /// Global GPUI entity wrapper for [`SettingsModel`].
@@ -122,6 +123,93 @@ impl SettingsModel {
     pub fn commit_ground_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
         let clamped = sanitize_unit(opacity, DEFAULT_GROUND_OPACITY);
         self.settings.planetarium.ground.opacity = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns the HiPS background survey settings.
+    pub fn hips_survey(&self) -> SurveySettings {
+        self.settings.planetarium.hips_survey
+    }
+
+    /// Returns whether the HiPS background survey layer is enabled.
+    pub fn hips_survey_enabled(&self) -> bool {
+        self.settings.planetarium.hips_survey.enabled
+    }
+
+    /// Returns the configured HiPS survey opacity in `[0.0, 1.0]`.
+    pub fn hips_survey_opacity(&self) -> f32 {
+        self.settings.planetarium.hips_survey.opacity
+    }
+
+    /// Returns the effective HiPS survey opacity (`0.0` when disabled).
+    pub fn effective_hips_survey_opacity(&self) -> f32 {
+        self.settings.planetarium.hips_survey.effective_opacity()
+    }
+
+    /// Sets whether the HiPS background survey layer is enabled and persists the change.
+    pub fn set_hips_survey_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.hips_survey.enabled = enabled,
+            cx,
+        );
+    }
+
+    /// Updates HiPS survey opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_hips_survey_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_HIPS_SURVEY_OPACITY);
+        if (self.settings.planetarium.hips_survey.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.hips_survey.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets HiPS survey opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_hips_survey_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_HIPS_SURVEY_OPACITY);
+        self.settings.planetarium.hips_survey.opacity = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns the catalog stars layer settings.
+    pub fn stars(&self) -> StarsSettings {
+        self.settings.planetarium.stars
+    }
+
+    /// Returns whether catalog star points are enabled.
+    pub fn stars_enabled(&self) -> bool {
+        self.settings.planetarium.stars.enabled
+    }
+
+    /// Returns the configured stars layer opacity in `[0.0, 1.0]`.
+    pub fn stars_opacity(&self) -> f32 {
+        self.settings.planetarium.stars.opacity
+    }
+
+    /// Returns the effective stars layer opacity (`0.0` when disabled).
+    pub fn effective_stars_opacity(&self) -> f32 {
+        self.settings.planetarium.stars.effective_opacity()
+    }
+
+    /// Sets whether catalog star points are enabled and persists the change.
+    pub fn set_stars_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(|settings| settings.planetarium.stars.enabled = enabled, cx);
+    }
+
+    /// Updates stars layer opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_stars_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_STARS_OPACITY);
+        if (self.settings.planetarium.stars.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.stars.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets stars layer opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_stars_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_STARS_OPACITY);
+        self.settings.planetarium.stars.opacity = clamped;
         self.persist();
         cx.notify();
     }
@@ -313,5 +401,68 @@ mod tests {
         let persisted_disabled: AppSettings = store.load().expect("disabled ground load");
         assert!(!persisted_disabled.planetarium.ground.enabled);
         assert!((persisted_disabled.planetarium.ground.opacity - 0.65).abs() < 1e-6);
+    }
+
+    #[gpui::test]
+    fn settings_model_hips_survey_and_stars_preview_commit_and_toggle(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let store_for_init = store.clone();
+
+        cx.update(|cx| {
+            init_with_store(store_for_init, cx);
+        });
+
+        let model = cx.read(|cx| cx.global::<GlobalSettings>().0.clone());
+        model.read_with(cx, |m, _| {
+            assert!(m.hips_survey_enabled());
+            assert_eq!(m.hips_survey_opacity(), 1.0);
+            assert_eq!(m.effective_hips_survey_opacity(), 1.0);
+            assert!(m.stars_enabled());
+            assert_eq!(m.stars_opacity(), 1.0);
+            assert_eq!(m.effective_stars_opacity(), 1.0);
+        });
+
+        model.update(cx, |m, cx| {
+            m.preview_hips_survey_opacity(0.35, cx);
+            m.preview_stars_opacity(0.55, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!((m.hips_survey_opacity() - 0.35).abs() < 1e-6);
+            assert!((m.effective_hips_survey_opacity() - 0.35).abs() < 1e-6);
+            assert!((m.stars_opacity() - 0.55).abs() < 1e-6);
+            assert!((m.effective_stars_opacity() - 0.55).abs() < 1e-6);
+        });
+        assert!(
+            store
+                .load_optional::<AppSettings>()
+                .expect("load_optional succeeds")
+                .is_none()
+        );
+
+        model.update(cx, |m, cx| {
+            m.commit_hips_survey_opacity(0.35, cx);
+            m.commit_stars_opacity(0.55, cx);
+        });
+        let persisted: AppSettings = store.load().expect("committed survey & stars load");
+        assert!((persisted.planetarium.hips_survey.opacity - 0.35).abs() < 1e-6);
+        assert!((persisted.planetarium.stars.opacity - 0.55).abs() < 1e-6);
+
+        model.update(cx, |m, cx| {
+            m.set_hips_survey_enabled(false, cx);
+            m.set_stars_enabled(false, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(!m.hips_survey_enabled());
+            assert!((m.hips_survey_opacity() - 0.35).abs() < 1e-6);
+            assert_eq!(m.effective_hips_survey_opacity(), 0.0);
+            assert!(!m.stars_enabled());
+            assert!((m.stars_opacity() - 0.55).abs() < 1e-6);
+            assert_eq!(m.effective_stars_opacity(), 0.0);
+        });
+        let persisted_disabled: AppSettings = store.load().expect("disabled survey & stars load");
+        assert!(!persisted_disabled.planetarium.hips_survey.enabled);
+        assert!((persisted_disabled.planetarium.hips_survey.opacity - 0.35).abs() < 1e-6);
+        assert!(!persisted_disabled.planetarium.stars.enabled);
+        assert!((persisted_disabled.planetarium.stars.opacity - 0.55).abs() < 1e-6);
     }
 }

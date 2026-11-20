@@ -11,6 +11,12 @@ pub const DEFAULT_ATMOSPHERE_STRENGTH: f32 = 1.0;
 /// Default normalized opacity for the below-horizon ground hemisphere mask.
 pub const DEFAULT_GROUND_OPACITY: f32 = 1.0;
 
+/// Default normalized opacity for the HiPS sky survey layer.
+pub const DEFAULT_HIPS_SURVEY_OPACITY: f32 = 1.0;
+
+/// Default normalized opacity for the catalog stars layer.
+pub const DEFAULT_STARS_OPACITY: f32 = 1.0;
+
 fn default_schema_version() -> u32 {
     SETTINGS_SCHEMA_VERSION
 }
@@ -25,6 +31,14 @@ fn default_atmosphere_strength() -> f32 {
 
 fn default_ground_opacity() -> f32 {
     DEFAULT_GROUND_OPACITY
+}
+
+fn default_hips_survey_opacity() -> f32 {
+    DEFAULT_HIPS_SURVEY_OPACITY
+}
+
+fn default_stars_opacity() -> f32 {
+    DEFAULT_STARS_OPACITY
 }
 
 fn sanitize_unit_interval(value: &mut f32, default: f32) {
@@ -109,6 +123,70 @@ impl GroundSettings {
     }
 }
 
+/// HiPS background survey imagery settings in the planetarium.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SurveySettings {
+    /// Whether HiPS survey tile fetching and rendering is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Normalized HiPS survey layer opacity in `[0.0, 1.0]`.
+    #[serde(default = "default_hips_survey_opacity")]
+    pub opacity: f32,
+}
+
+impl Default for SurveySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            opacity: DEFAULT_HIPS_SURVEY_OPACITY,
+        }
+    }
+}
+
+impl SurveySettings {
+    /// Clamps finite opacity into `[0.0, 1.0]` and resets non-finite values to the default.
+    pub fn sanitize(&mut self) {
+        sanitize_unit_interval(&mut self.opacity, DEFAULT_HIPS_SURVEY_OPACITY);
+    }
+
+    /// Returns the effective opacity in `[0.0, 1.0]`, or `0.0` when disabled.
+    pub fn effective_opacity(&self) -> f32 {
+        effective_unit_interval(self.enabled, self.opacity, DEFAULT_HIPS_SURVEY_OPACITY)
+    }
+}
+
+/// Catalog point-star rendering settings in the planetarium.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StarsSettings {
+    /// Whether catalog star points are displayed.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Normalized star layer opacity in `[0.0, 1.0]`.
+    #[serde(default = "default_stars_opacity")]
+    pub opacity: f32,
+}
+
+impl Default for StarsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            opacity: DEFAULT_STARS_OPACITY,
+        }
+    }
+}
+
+impl StarsSettings {
+    /// Clamps finite opacity into `[0.0, 1.0]` and resets non-finite values to the default.
+    pub fn sanitize(&mut self) {
+        sanitize_unit_interval(&mut self.opacity, DEFAULT_STARS_OPACITY);
+    }
+
+    /// Returns the effective opacity in `[0.0, 1.0]`, or `0.0` when disabled.
+    pub fn effective_opacity(&self) -> f32 {
+        effective_unit_interval(self.enabled, self.opacity, DEFAULT_STARS_OPACITY)
+    }
+}
+
 /// Planetarium viewport visual and rendering settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanetariumSettings {
@@ -118,6 +196,12 @@ pub struct PlanetariumSettings {
     /// Below-horizon ground semi-sphere mask settings.
     #[serde(default)]
     pub ground: GroundSettings,
+    /// HiPS background survey imagery settings.
+    #[serde(default)]
+    pub hips_survey: SurveySettings,
+    /// Catalog point-star rendering settings.
+    #[serde(default)]
+    pub stars: StarsSettings,
 }
 
 /// Debugging and viewport diagnostic settings.
@@ -161,5 +245,7 @@ impl Persistable for AppSettings {
         self.schema_version = SETTINGS_SCHEMA_VERSION;
         self.planetarium.atmosphere.sanitize();
         self.planetarium.ground.sanitize();
+        self.planetarium.hips_survey.sanitize();
+        self.planetarium.stars.sanitize();
     }
 }

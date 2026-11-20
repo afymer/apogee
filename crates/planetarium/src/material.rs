@@ -144,6 +144,9 @@ impl ExtractComponent for CelestialTileMaterial {
     fn extract_component(
         (material, mesh): QueryItem<'_, '_, Self::QueryData>,
     ) -> Option<Self::Out> {
+        if material.uniforms.alpha <= 1e-4 {
+            return None;
+        }
         Some((
             material.uniforms,
             CelestialTileDraw {

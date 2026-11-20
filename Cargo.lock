@@ -279,6 +279,7 @@ dependencies = [
  "assets",
  "celestial",
  "client",
+ "components",
  "futures",
  "gpui",
  "gpui_platform",

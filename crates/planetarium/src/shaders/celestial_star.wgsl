@@ -9,7 +9,7 @@ struct CelestialStarUniforms {
     base_radius: f32,
     min_radius: f32,
     max_radius: f32,
-    padding: f32,
+    opacity: f32,
 }
 
 struct StarRecord {
@@ -97,7 +97,7 @@ fn vertex(input: VertexInput) -> VertexOutput {
         }
         mag_cutoff_alpha = 1.0 - (mag_diff / uniforms.fade_range);
     }
-    let total_alpha = star_alpha * mag_cutoff_alpha;
+    let total_alpha = star_alpha * mag_cutoff_alpha * clamp(uniforms.opacity, 0.0, 1.0);
 
     let v_cam = (uniforms.transform * vec4<f32>(star.pos, 0.0)).xyz;
     let v_len = length(v_cam);

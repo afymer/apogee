@@ -24,6 +24,18 @@ use crate::material::{
     CelestialPipelineId, CelestialPipelineKey, CelestialProjectionUniforms, pipeline_descriptor,
 };
 
+/// Renderer-side catalog stars layer configuration controlled via [`crate::ViewportCommand`].
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct StarSettings {
+    pub opacity: f32,
+}
+
+impl Default for StarSettings {
+    fn default() -> Self {
+        Self { opacity: 1.0 }
+    }
+}
+
 #[derive(Clone, Copy, ShaderType, Debug, Component)]
 pub struct CelestialStarUniforms {
     pub transform: Mat4,
@@ -34,7 +46,7 @@ pub struct CelestialStarUniforms {
     pub base_radius: f32,
     pub min_radius: f32,
     pub max_radius: f32,
-    pub padding: f32,
+    pub opacity: f32,
 }
 
 #[derive(Component, Debug, Clone)]
@@ -67,6 +79,9 @@ impl ExtractComponent for CelestialStarMaterial {
     fn extract_component(
         (material, mesh): QueryItem<'_, '_, Self::QueryData>,
     ) -> Option<Self::Out> {
+        if material.uniforms.opacity <= 1e-4 {
+            return None;
+        }
         Some((
             material.uniforms,
             CelestialStarDraw {
@@ -199,4 +214,41 @@ pub fn load_star_catalog() -> Option<(StarCatalogHeader, Vec<StarRecord>)> {
         candidates
     );
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_skips_stars_when_opacity_is_zero() {
+        let mut mat = CelestialStarMaterial {
+            uniforms: CelestialStarUniforms {
+                transform: Mat4::IDENTITY,
+                projection: CelestialProjectionUniforms {
+                    fov_y: 1.0,
+                    aspect_ratio: 1.0,
+                    blend_factor: 0.0,
+                    scale_factor: 1.0,
+                },
+                viewport_size: Vec2::new(800.0, 600.0),
+                limiting_mag: 10.5,
+                fade_range: 0.6,
+                base_radius: 2.2,
+                min_radius: 0.8,
+                max_radius: 24.0,
+                opacity: 0.0,
+            },
+            stars: Handle::default(),
+            star_count: 10,
+        };
+        let mesh = Mesh3d(Handle::default());
+        assert!(CelestialStarMaterial::extract_component((&mat, &mesh)).is_none());
+
+        mat.uniforms.opacity = 1e-4;
+        assert!(CelestialStarMaterial::extract_component((&mat, &mesh)).is_none());
+
+        mat.uniforms.opacity = 0.25;
+        assert!(CelestialStarMaterial::extract_component((&mat, &mesh)).is_some());
+    }
 }

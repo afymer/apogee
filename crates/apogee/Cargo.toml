@@ -15,6 +15,7 @@ celestial.workspace = true
 observer.workspace = true
 settings.workspace = true
 workspace.workspace = true
+components.workspace = true
 title_bar.workspace = true
 status_bar.workspace = true
 raw_viewer.workspace = true

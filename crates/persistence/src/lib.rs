@@ -15,7 +15,8 @@ pub use observer::{
 };
 pub use settings::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY,
-    DebugSettings, GroundSettings, PlanetariumSettings, SETTINGS_SCHEMA_VERSION,
+    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings, GroundSettings,
+    PlanetariumSettings, SETTINGS_SCHEMA_VERSION, StarsSettings, SurveySettings,
 };
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
@@ -357,6 +358,14 @@ mod tests {
                     enabled: false,
                     opacity: 0.65,
                 },
+                hips_survey: SurveySettings {
+                    enabled: false,
+                    opacity: 0.35,
+                },
+                stars: StarsSettings {
+                    enabled: false,
+                    opacity: 0.75,
+                },
             },
             debug: DebugSettings {
                 show_hips_grid: true,
@@ -391,27 +400,38 @@ mod tests {
         );
         assert!(legacy.planetarium.ground.enabled);
         assert_eq!(legacy.planetarium.ground.opacity, DEFAULT_GROUND_OPACITY);
+        assert!(legacy.planetarium.hips_survey.enabled);
+        assert_eq!(
+            legacy.planetarium.hips_survey.opacity,
+            DEFAULT_HIPS_SURVEY_OPACITY
+        );
+        assert!(legacy.planetarium.stars.enabled);
+        assert_eq!(legacy.planetarium.stars.opacity, DEFAULT_STARS_OPACITY);
 
         // Out-of-bounds strengths and opacities are clamped on load.
         backend
             .write_raw(
                 AppSettings::DOCUMENT_KEY,
-                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":2.5},"ground":{"enabled":true,"opacity":1.8}}}"#,
+                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":2.5},"ground":{"enabled":true,"opacity":1.8},"hips_survey":{"enabled":true,"opacity":3.0},"stars":{"enabled":true,"opacity":1.4}}}"#,
             )
             .expect("raw write succeeds");
         let clamped_hi: AppSettings = store.load().expect("high values load");
         assert_eq!(clamped_hi.planetarium.atmosphere.strength, 1.0);
         assert_eq!(clamped_hi.planetarium.ground.opacity, 1.0);
+        assert_eq!(clamped_hi.planetarium.hips_survey.opacity, 1.0);
+        assert_eq!(clamped_hi.planetarium.stars.opacity, 1.0);
 
         backend
             .write_raw(
                 AppSettings::DOCUMENT_KEY,
-                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":-0.4},"ground":{"enabled":true,"opacity":-0.2}}}"#,
+                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":-0.4},"ground":{"enabled":true,"opacity":-0.2},"hips_survey":{"enabled":true,"opacity":-0.5},"stars":{"enabled":true,"opacity":-1.0}}}"#,
             )
             .expect("raw write succeeds");
         let clamped_lo: AppSettings = store.load().expect("negative values load");
         assert_eq!(clamped_lo.planetarium.atmosphere.strength, 0.0);
         assert_eq!(clamped_lo.planetarium.ground.opacity, 0.0);
+        assert_eq!(clamped_lo.planetarium.hips_survey.opacity, 0.0);
+        assert_eq!(clamped_lo.planetarium.stars.opacity, 0.0);
 
         let mut non_finite = AtmosphereSettings {
             enabled: true,
@@ -438,6 +458,32 @@ mod tests {
             opacity: 0.6,
         };
         assert_eq!(disabled_ground.effective_opacity(), 0.0);
+
+        let mut non_finite_hips = SurveySettings {
+            enabled: true,
+            opacity: f32::NEG_INFINITY,
+        };
+        non_finite_hips.sanitize();
+        assert_eq!(non_finite_hips.opacity, DEFAULT_HIPS_SURVEY_OPACITY);
+
+        let disabled_hips = SurveySettings {
+            enabled: false,
+            opacity: 0.5,
+        };
+        assert_eq!(disabled_hips.effective_opacity(), 0.0);
+
+        let mut non_finite_stars = StarsSettings {
+            enabled: true,
+            opacity: f32::NAN,
+        };
+        non_finite_stars.sanitize();
+        assert_eq!(non_finite_stars.opacity, DEFAULT_STARS_OPACITY);
+
+        let disabled_stars = StarsSettings {
+            enabled: false,
+            opacity: 0.4,
+        };
+        assert_eq!(disabled_stars.effective_opacity(), 0.0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

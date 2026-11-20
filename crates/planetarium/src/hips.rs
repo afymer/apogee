@@ -512,6 +512,18 @@ pub(crate) fn hips_survey_system(
         }
     }
 
+    if !settings.enabled {
+        loader.clear_pending();
+        if !active_survey_tiles.tiles.is_empty() {
+            for entity in active_survey_tiles.tiles.values() {
+                commands.entity(*entity).despawn();
+            }
+            active_survey_tiles.tiles.clear();
+            active_survey_tiles.current_depth = None;
+        }
+        return;
+    }
+
     let survey_name = &settings.survey.name;
     if active_survey_tiles.current_survey_name.as_deref() != Some(survey_name) {
         for entity in active_survey_tiles.tiles.values() {
@@ -530,18 +542,6 @@ pub(crate) fn hips_survey_system(
         let survey_arc = Arc::new(settings.survey.clone());
         let base_keys: Vec<(u8, u64)> = (0..12).map(|h| (0, h)).collect();
         loader.enqueue(&survey_arc, &base_keys);
-    }
-
-    if !settings.enabled {
-        loader.clear_pending();
-        if !active_survey_tiles.tiles.is_empty() {
-            for entity in active_survey_tiles.tiles.values() {
-                commands.entity(*entity).despawn();
-            }
-            active_survey_tiles.tiles.clear();
-            active_survey_tiles.current_depth = None;
-        }
-        return;
     }
 
     let Ok(camera) = camera_query.single() else {

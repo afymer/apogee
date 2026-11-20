@@ -13,6 +13,7 @@ pub mod viewport;
 pub use atmosphere::AtmosphereSettings;
 pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
+pub use stars::StarSettings;
 
 use std::{
     sync::{Arc, Condvar, Mutex, PoisonError},
@@ -172,6 +173,24 @@ impl BevyBridge {
 
     pub fn set_hips_survey(&self, survey: hips::HipsSurvey) {
         self.send_command(ViewportCommand::SetHipsSurvey(survey));
+    }
+
+    pub fn set_hips_survey_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetHipsSurveyOpacity(clamped));
+    }
+
+    pub fn set_star_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetStarOpacity(clamped));
     }
 
     pub fn set_observer(
@@ -350,6 +369,7 @@ fn camera_movement_and_interpolation_system(
     mut camera_sync: ResMut<CameraSyncState>,
     dims: Res<ViewportDimensions>,
     handles: Res<CelestialHandles>,
+    star_settings: Res<stars::StarSettings>,
     mut line_materials: Query<&mut CelestialLineMaterial>,
     mut star_materials: Query<&mut stars::CelestialStarMaterial>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -554,6 +574,7 @@ fn camera_movement_and_interpolation_system(
                 mat.uniforms.projection = proj_params.into();
                 mat.uniforms.viewport_size = Vec2::new(dims.width as f32, dims.height as f32);
                 mat.uniforms.limiting_mag = 10.5;
+                mat.uniforms.opacity = star_settings.opacity;
             }
         }
 
@@ -564,6 +585,12 @@ fn camera_movement_and_interpolation_system(
             ObserverClockSpec::Live => camera.sky_rotation_update_interval(dims.height),
             ObserverClockSpec::FixedUnixSeconds(_) => Duration::from_secs(3600),
         };
+    }
+
+    if let Some(star_entity) = handles.star_entity {
+        if let Ok(mut mat) = star_materials.get_mut(star_entity) {
+            mat.uniforms.opacity = star_settings.opacity;
+        }
     }
 }
 
@@ -627,6 +654,30 @@ fn process_viewport_commands(
                     .get_resource_mut::<hips::HipsSurveySettings>()
                 {
                     settings.survey = survey;
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetHipsSurveyOpacity(opacity) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<hips::HipsSurveySettings>()
+                {
+                    settings.alpha = if opacity.is_finite() {
+                        opacity.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetStarOpacity(opacity) => {
+                if let Some(mut settings) = app.world_mut().get_resource_mut::<stars::StarSettings>()
+                {
+                    settings.opacity = if opacity.is_finite() {
+                        opacity.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
                     *frames_remaining = 3;
                 }
             }
@@ -860,7 +911,7 @@ impl PlanetariumRenderer {
                                 base_radius: 2.2,
                                 min_radius: 0.8,
                                 max_radius: 24.0,
-                                padding: 0.0,
+                                opacity: 1.0,
                             },
                             stars: buffer_handle,
                             star_count: star_count as u32,
@@ -877,6 +928,7 @@ impl PlanetariumRenderer {
                 app.init_resource::<CameraSyncState>();
                 app.init_resource::<atmosphere::AtmosphereSettings>();
                 app.init_resource::<ground::GroundSettings>();
+                app.init_resource::<stars::StarSettings>();
                 let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
                 app.insert_resource(tile_loader);
                 app.init_resource::<hips::HipsMeshCache>();

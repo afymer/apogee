@@ -5,7 +5,10 @@ use gpui::{
     Pixels, Render, ScrollHandle, Subscription, TitlebarOptions, Window, WindowBounds,
     WindowOptions, div, prelude::*, px,
 };
-use persistence::{AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY};
+use persistence::{
+    AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY,
+    DEFAULT_STARS_OPACITY,
+};
 use ui::{
     ActiveTheme, Color, Divider, DividerColor, Icon, IconButton, IconName, IconSize, Label,
     LabelCommon, LabelSize, Switch, SwitchColor, ToggleState, Tooltip, TreeViewItem,
@@ -124,6 +127,68 @@ fn default_categories() -> Vec<SettingsCategory> {
                                 min: 0.0,
                                 max: 1.0,
                                 default: DEFAULT_GROUND_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
+                },
+                SettingsSection {
+                    title: "HiPS Survey",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_hips_survey_enabled",
+                            title: "Show HiPS Survey",
+                            description: "Display progressive HiPS all-sky background imagery in the planetarium viewport.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.hips_survey.enabled,
+                                set: |model, value, cx| model.set_hips_survey_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_hips_survey_opacity",
+                            title: "HiPS Survey Opacity",
+                            description: "Adjust the opacity of the HiPS sky survey imagery layer.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.hips_survey.opacity,
+                                preview: |model, value, cx| {
+                                    model.preview_hips_survey_opacity(value, cx);
+                                },
+                                commit: |model, value, cx| {
+                                    model.commit_hips_survey_opacity(value, cx);
+                                },
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_HIPS_SURVEY_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
+                },
+                SettingsSection {
+                    title: "Stars",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_stars_enabled",
+                            title: "Show Stars",
+                            description: "Display catalog star points in the planetarium viewport.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.stars.enabled,
+                                set: |model, value, cx| model.set_stars_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_stars_opacity",
+                            title: "Stars Opacity",
+                            description: "Adjust the opacity of rendered catalog star points.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.stars.opacity,
+                                preview: |model, value, cx| model.preview_stars_opacity(value, cx),
+                                commit: |model, value, cx| model.commit_stars_opacity(value, cx),
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_STARS_OPACITY,
                                 format: |v| format!("{:.0}%", v * 100.0),
                             },
                         },
