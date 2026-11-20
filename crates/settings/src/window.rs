@@ -1,16 +1,18 @@
+use std::collections::HashMap;
+
 use gpui::{
     App, Context, DEFAULT_ADDITIONAL_WINDOW_SIZE, Entity, FocusHandle, Focusable, IntoElement,
     Pixels, Render, ScrollHandle, Subscription, TitlebarOptions, Window, WindowBounds,
     WindowOptions, div, prelude::*, px,
 };
-use persistence::AppSettings;
+use persistence::{AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY};
 use ui::{
     ActiveTheme, Color, Divider, DividerColor, Icon, IconButton, IconName, IconSize, Label,
     LabelCommon, LabelSize, Switch, SwitchColor, ToggleState, Tooltip, TreeViewItem,
     WithScrollbar, h_flex, prelude::*, v_flex,
 };
 
-use components::{TextField, TextFieldEvent};
+use components::{Slider, SliderEvent, TextField, TextFieldEvent};
 
 use crate::state::{GlobalSettings, SettingsModel};
 
@@ -23,6 +25,15 @@ pub enum SettingControl {
         get: fn(&AppSettings) -> bool,
         set: fn(&mut SettingsModel, bool, &mut Context<SettingsModel>),
         default: bool,
+    },
+    Slider {
+        get: fn(&AppSettings) -> f32,
+        preview: fn(&mut SettingsModel, f32, &mut Context<SettingsModel>),
+        commit: fn(&mut SettingsModel, f32, &mut Context<SettingsModel>),
+        min: f32,
+        max: f32,
+        default: f32,
+        format: fn(f32) -> String,
     },
 }
 
@@ -56,22 +67,99 @@ struct NavBarEntry {
 }
 
 fn default_categories() -> Vec<SettingsCategory> {
-    vec![SettingsCategory {
-        title: "Debug",
-        sections: vec![SettingsSection {
+    vec![
+        SettingsCategory {
             title: "Planetarium",
-            items: vec![SettingItem {
-                id: "debug_show_hips_grid",
-                title: "Show HiPS Grid",
-                description: "Display the green HEALPix hierarchical progressive survey tile boundary lines in the planetarium viewport.",
-                control: SettingControl::Switch {
-                    get: |settings| settings.debug.show_hips_grid,
-                    set: |model, value, cx| model.set_show_hips_grid(value, cx),
-                    default: false,
+            sections: vec![
+                SettingsSection {
+                    title: "Atmosphere",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_atmosphere_enabled",
+                            title: "Show Atmosphere",
+                            description: "Simulate daytime sky scattering and twilight glow based on solar altitude. Mostly disabled at night.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.atmosphere.enabled,
+                                set: |model, value, cx| model.set_atmosphere_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_atmosphere_strength",
+                            title: "Atmosphere Strength",
+                            description: "Adjust the intensity of the day and twilight sky atmosphere in the planetarium viewport.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.atmosphere.strength,
+                                preview: |model, value, cx| model.preview_atmosphere_strength(value, cx),
+                                commit: |model, value, cx| model.commit_atmosphere_strength(value, cx),
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_ATMOSPHERE_STRENGTH,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
                 },
+                SettingsSection {
+                    title: "Ground",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_ground_enabled",
+                            title: "Show Ground",
+                            description: "Mask the lower hemisphere below the local horizon.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.ground.enabled,
+                                set: |model, value, cx| model.set_ground_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_ground_opacity",
+                            title: "Ground Opacity",
+                            description: "Adjust the opacity of the ground hemisphere mask below the horizon.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.ground.opacity,
+                                preview: |model, value, cx| model.preview_ground_opacity(value, cx),
+                                commit: |model, value, cx| model.commit_ground_opacity(value, cx),
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_GROUND_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
+                },
+            ],
+        },
+        SettingsCategory {
+            title: "Debug",
+            sections: vec![SettingsSection {
+                title: "Planetarium",
+                items: vec![SettingItem {
+                    id: "debug_show_hips_grid",
+                    title: "Show HiPS Grid",
+                    description: "Display the green HEALPix hierarchical progressive survey tile boundary lines in the planetarium viewport.",
+                    control: SettingControl::Switch {
+                        get: |settings| settings.debug.show_hips_grid,
+                        set: |model, value, cx| model.set_show_hips_grid(value, cx),
+                        default: false,
+                    },
+                }],
             }],
-        }],
-    }]
+        },
+    ]
+}
+
+fn normalize_slider_value(value: f32, min: f32, max: f32) -> f32 {
+    let span = max - min;
+    if !span.is_finite() || span.abs() <= 1e-6 || !value.is_finite() {
+        return 0.0;
+    }
+    ((value - min) / span).clamp(0.0, 1.0)
+}
+
+fn denormalize_slider_value(norm: f32, min: f32, max: f32) -> f32 {
+    min + norm.clamp(0.0, 1.0) * (max - min)
 }
 
 fn build_navbar_entries(categories: &[SettingsCategory]) -> Vec<NavBarEntry> {
@@ -170,6 +258,7 @@ pub struct SettingsWindow {
     selected_nav_index: usize,
     search_input: Entity<TextField>,
     search_query: String,
+    sliders: HashMap<&'static str, Entity<Slider>>,
     focus_handle: FocusHandle,
     content_scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
@@ -193,10 +282,73 @@ impl SettingsWindow {
                 .frameless(true)
         });
 
-        let mut subscriptions = Vec::new();
+        let settings_entity = cx.try_global::<GlobalSettings>().map(|g| g.0.clone());
+        let initial_settings = settings_entity
+            .as_ref()
+            .map(|entity| entity.read(cx).settings().clone())
+            .unwrap_or_default();
 
-        if let Some(settings_entity) = cx.try_global::<GlobalSettings>().map(|g| g.0.clone()) {
-            subscriptions.push(cx.observe(&settings_entity, |_this, _model, cx| {
+        let mut subscriptions = Vec::new();
+        let mut sliders = HashMap::new();
+
+        for category in &categories {
+            for section in &category.sections {
+                for item in &section.items {
+                    if let SettingControl::Slider {
+                        get,
+                        preview,
+                        commit,
+                        min,
+                        max,
+                        default,
+                        ..
+                    } = item.control
+                    {
+                        let initial_norm = normalize_slider_value(get(&initial_settings), min, max);
+                        let default_norm = normalize_slider_value(default, min, max);
+                        let slider =
+                            cx.new(|_cx| Slider::new(initial_norm).default_value(default_norm));
+                        let settings_handle = settings_entity.clone();
+                        subscriptions.push(cx.subscribe(
+                            &slider,
+                            move |_this, _, event: &SliderEvent, cx| {
+                                if let Some(entity) = &settings_handle {
+                                    entity.update(cx, |model, cx| match *event {
+                                        SliderEvent::Change(t) => preview(
+                                            model,
+                                            denormalize_slider_value(t, min, max),
+                                            cx,
+                                        ),
+                                        SliderEvent::Commit(t) => commit(
+                                            model,
+                                            denormalize_slider_value(t, min, max),
+                                            cx,
+                                        ),
+                                    });
+                                }
+                            },
+                        ));
+                        sliders.insert(item.id, slider);
+                    }
+                }
+            }
+        }
+
+        if let Some(settings_entity) = settings_entity {
+            subscriptions.push(cx.observe(&settings_entity, |this, model, cx| {
+                let current = model.read(cx).settings().clone();
+                for category in &this.categories {
+                    for section in &category.sections {
+                        for item in &section.items {
+                            if let SettingControl::Slider { get, min, max, .. } = item.control
+                                && let Some(slider) = this.sliders.get(item.id)
+                            {
+                                let norm = normalize_slider_value(get(&current), min, max);
+                                slider.update(cx, |s, cx| s.set_value(norm, cx));
+                            }
+                        }
+                    }
+                }
                 cx.notify();
             }));
         }
@@ -234,6 +386,7 @@ impl SettingsWindow {
             selected_nav_index: 0,
             search_input,
             search_query: String::new(),
+            sliders,
             focus_handle: cx.focus_handle(),
             content_scroll_handle: ScrollHandle::new(),
             _subscriptions: subscriptions,
@@ -475,13 +628,83 @@ impl SettingsWindow {
         is_last_in_section: bool,
         app_settings: &AppSettings,
         settings_entity: Option<&Entity<SettingsModel>>,
+        cx: &App,
     ) -> impl IntoElement {
-        let SettingControl::Switch { get, set, default } = item.control;
-        let current_value = get(app_settings);
-        let is_modified = current_value != default;
-
-        let switch_entity = settings_entity.cloned();
-        let reset_entity = settings_entity.cloned();
+        let (is_modified, reset_handler, control_el): (
+            bool,
+            Box<dyn Fn(&mut App) + 'static>,
+            gpui::AnyElement,
+        ) = match item.control {
+            SettingControl::Switch { get, set, default } => {
+                let current_value = get(app_settings);
+                let is_modified = current_value != default;
+                let switch_entity = settings_entity.cloned();
+                let reset_entity = settings_entity.cloned();
+                let reset_fn = Box::new(move |cx: &mut App| {
+                    if let Some(entity) = &reset_entity {
+                        entity.update(cx, |model, cx| {
+                            set(model, default, cx);
+                        });
+                    }
+                });
+                let control = Switch::new(
+                    format!("{}-switch", item.id),
+                    ToggleState::from(current_value),
+                )
+                .color(SwitchColor::Accent)
+                .disabled(settings_entity.is_none())
+                .on_click(move |state, _window, cx| {
+                    if let Some(entity) = &switch_entity {
+                        let next = *state == ToggleState::Selected;
+                        entity.update(cx, |model, cx| {
+                            set(model, next, cx);
+                        });
+                    }
+                })
+                .into_any_element();
+                (is_modified, reset_fn, control)
+            }
+            SettingControl::Slider {
+                get,
+                commit,
+                default,
+                format,
+                ..
+            } => {
+                let current_value = get(app_settings);
+                let is_modified = (current_value - default).abs() > 0.005;
+                let reset_entity = settings_entity.cloned();
+                let reset_fn = Box::new(move |cx: &mut App| {
+                    if let Some(entity) = &reset_entity {
+                        entity.update(cx, |model, cx| {
+                            commit(model, default, cx);
+                        });
+                    }
+                });
+                let formatted = format(current_value);
+                let slider_el = self
+                    .sliders
+                    .get(item.id)
+                    .cloned()
+                    .map(|s| s.into_any_element())
+                    .unwrap_or_else(|| div().into_any_element());
+                let control = h_flex()
+                    .w(px(210.0))
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().child(slider_el))
+                    .child(
+                        div().w(px(40.0)).flex().justify_end().child(
+                            Label::new(formatted)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .buffer_font(cx),
+                        ),
+                    )
+                    .into_any_element();
+                (is_modified, reset_fn, control)
+            }
+        };
 
         let padding_bottom = if is_last_in_section {
             |el: gpui::Stateful<gpui::Div>| el.pb_10()
@@ -525,11 +748,7 @@ impl SettingsWindow {
                                             .icon_size(IconSize::Small)
                                             .tooltip(Tooltip::text("Reset to Default"))
                                             .on_click(move |_, _, cx| {
-                                                if let Some(entity) = &reset_entity {
-                                                    entity.update(cx, |model, cx| {
-                                                        set(model, default, cx);
-                                                    });
-                                                }
+                                                reset_handler(cx);
                                             }),
                                         )
                                     }),
@@ -540,22 +759,7 @@ impl SettingsWindow {
                                     .color(Color::Muted),
                             ),
                     )
-                    .child(
-                        Switch::new(
-                            format!("{}-switch", item.id),
-                            ToggleState::from(current_value),
-                        )
-                        .color(SwitchColor::Accent)
-                        .disabled(settings_entity.is_none())
-                        .on_click(move |state, _window, cx| {
-                            if let Some(entity) = &switch_entity {
-                                let next = *state == ToggleState::Selected;
-                                entity.update(cx, |model, cx| {
-                                    set(model, next, cx);
-                                });
-                            }
-                        }),
-                    ),
+                    .child(control_el),
             )
             .when(!is_last_in_section, |this| this.child(Divider::horizontal()))
     }
@@ -622,6 +826,7 @@ impl SettingsWindow {
                                     is_last_in_section,
                                     &app_settings,
                                     settings_entity.as_ref(),
+                                    cx,
                                 )
                             }))
                     }))

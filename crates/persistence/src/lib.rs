@@ -13,7 +13,10 @@ pub use observer::{
     estimate_longitude_from_utc_offset_minutes, estimate_utc_offset_minutes_from_longitude,
     parse_coordinate, parse_elevation_m, parse_utc_offset_minutes,
 };
-pub use settings::{AppSettings, DebugSettings, SETTINGS_SCHEMA_VERSION};
+pub use settings::{
+    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY,
+    DebugSettings, GroundSettings, PlanetariumSettings, SETTINGS_SCHEMA_VERSION,
+};
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
 
@@ -345,6 +348,16 @@ mod tests {
 
         let updated = AppSettings {
             schema_version: SETTINGS_SCHEMA_VERSION,
+            planetarium: PlanetariumSettings {
+                atmosphere: AtmosphereSettings {
+                    enabled: false,
+                    strength: 0.45,
+                },
+                ground: GroundSettings {
+                    enabled: false,
+                    opacity: 0.65,
+                },
+            },
             debug: DebugSettings {
                 show_hips_grid: true,
             },
@@ -352,6 +365,79 @@ mod tests {
         store.save(&updated).expect("save succeeds");
         let loaded: AppSettings = store.load().expect("load succeeds");
         assert_eq!(loaded, updated);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn app_settings_backcompat_and_planetarium_sanitization() {
+        let dir = temp_test_dir();
+        let store = DocumentStore::open_dir(dir.clone());
+        let backend = JsonFileBackend::new(dir.clone());
+
+        // Legacy settings.json without `planetarium` field loads with atmosphere & ground defaults.
+        backend
+            .write_raw(
+                AppSettings::DOCUMENT_KEY,
+                br#"{"schema_version":1,"debug":{"show_hips_grid":true}}"#,
+            )
+            .expect("raw write succeeds");
+        let legacy: AppSettings = store.load().expect("legacy settings load");
+        assert!(legacy.debug.show_hips_grid);
+        assert!(legacy.planetarium.atmosphere.enabled);
+        assert_eq!(
+            legacy.planetarium.atmosphere.strength,
+            DEFAULT_ATMOSPHERE_STRENGTH
+        );
+        assert!(legacy.planetarium.ground.enabled);
+        assert_eq!(legacy.planetarium.ground.opacity, DEFAULT_GROUND_OPACITY);
+
+        // Out-of-bounds strengths and opacities are clamped on load.
+        backend
+            .write_raw(
+                AppSettings::DOCUMENT_KEY,
+                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":2.5},"ground":{"enabled":true,"opacity":1.8}}}"#,
+            )
+            .expect("raw write succeeds");
+        let clamped_hi: AppSettings = store.load().expect("high values load");
+        assert_eq!(clamped_hi.planetarium.atmosphere.strength, 1.0);
+        assert_eq!(clamped_hi.planetarium.ground.opacity, 1.0);
+
+        backend
+            .write_raw(
+                AppSettings::DOCUMENT_KEY,
+                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":-0.4},"ground":{"enabled":true,"opacity":-0.2}}}"#,
+            )
+            .expect("raw write succeeds");
+        let clamped_lo: AppSettings = store.load().expect("negative values load");
+        assert_eq!(clamped_lo.planetarium.atmosphere.strength, 0.0);
+        assert_eq!(clamped_lo.planetarium.ground.opacity, 0.0);
+
+        let mut non_finite = AtmosphereSettings {
+            enabled: true,
+            strength: f32::NAN,
+        };
+        non_finite.sanitize();
+        assert_eq!(non_finite.strength, DEFAULT_ATMOSPHERE_STRENGTH);
+
+        let disabled = AtmosphereSettings {
+            enabled: false,
+            strength: 0.75,
+        };
+        assert_eq!(disabled.effective_strength(), 0.0);
+
+        let mut non_finite_ground = GroundSettings {
+            enabled: true,
+            opacity: f32::INFINITY,
+        };
+        non_finite_ground.sanitize();
+        assert_eq!(non_finite_ground.opacity, DEFAULT_GROUND_OPACITY);
+
+        let disabled_ground = GroundSettings {
+            enabled: false,
+            opacity: 0.6,
+        };
+        assert_eq!(disabled_ground.effective_opacity(), 0.0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

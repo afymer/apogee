@@ -22,8 +22,8 @@ use bevy::{
             FragmentState, IndexFormat, MultisampleState, PipelineCache, PrimitiveState,
             PrimitiveTopology, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
             SamplerBindingType, ShaderStages, ShaderType, SpecializedMeshPipeline,
-            SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureFormat,
-            TextureSampleType, VertexState,
+            SpecializedMeshPipelineError, SpecializedMeshPipelines, SpecializedRenderPipelines,
+            TextureFormat, TextureSampleType, VertexState,
             binding_types::{sampler, texture_2d, uniform_buffer},
         },
         renderer::{RenderContext, ViewQuery},
@@ -38,6 +38,10 @@ use tracing::error;
 
 use crate::{
     camera::ProjectionParams,
+    sky::{
+        CelestialSkyDraw, CelestialSkyMaterial, CelestialSkyPipeline, CelestialSkyUniforms,
+        SkyPipelineKey,
+    },
     stars::{
         CelestialStarDraw, CelestialStarMaterial, CelestialStarPipeline, CelestialStarUniforms,
     },
@@ -260,6 +264,63 @@ struct CelestialPipelines<'w> {
     tile: Res<'w, CelestialTilePipeline>,
     line: Res<'w, CelestialLinePipeline>,
     star: Res<'w, CelestialStarPipeline>,
+    sky: Res<'w, CelestialSkyPipeline>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct SpecializedCelestialPipelines<'w> {
+    tile: ResMut<'w, SpecializedMeshPipelines<CelestialTilePipeline>>,
+    line: ResMut<'w, SpecializedMeshPipelines<CelestialLinePipeline>>,
+    star: ResMut<'w, SpecializedMeshPipelines<CelestialStarPipeline>>,
+    sky: ResMut<'w, SpecializedRenderPipelines<CelestialSkyPipeline>>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct CelestialUniforms<'w> {
+    tile: Res<'w, ComponentUniforms<CelestialTileUniforms>>,
+    line: Res<'w, ComponentUniforms<CelestialLineUniforms>>,
+    star: Res<'w, ComponentUniforms<CelestialStarUniforms>>,
+    sky: Res<'w, ComponentUniforms<CelestialSkyUniforms>>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct CelestialDrawQueries<'w, 's> {
+    tiles: Query<
+        'w,
+        's,
+        (
+            &'static CelestialTileDraw,
+            &'static DynamicUniformIndex<CelestialTileUniforms>,
+            &'static CelestialPipelineId,
+        ),
+    >,
+    lines: Query<
+        'w,
+        's,
+        (
+            &'static CelestialLineDraw,
+            &'static DynamicUniformIndex<CelestialLineUniforms>,
+            &'static CelestialPipelineId,
+        ),
+    >,
+    stars: Query<
+        'w,
+        's,
+        (
+            &'static CelestialStarDraw,
+            &'static DynamicUniformIndex<CelestialStarUniforms>,
+            &'static CelestialPipelineId,
+        ),
+    >,
+    skies: Query<
+        'w,
+        's,
+        (
+            &'static DynamicUniformIndex<CelestialSkyUniforms>,
+            &'static CelestialPipelineId,
+        ),
+        With<CelestialSkyDraw>,
+    >,
 }
 
 pub fn init_celestial_materials(app: &mut App) {
@@ -267,6 +328,7 @@ pub fn init_celestial_materials(app: &mut App) {
     embedded_asset!(app, "shaders/celestial_tile.wgsl");
     embedded_asset!(app, "shaders/celestial_line.wgsl");
     embedded_asset!(app, "shaders/celestial_star.wgsl");
+    embedded_asset!(app, "shaders/celestial_sky.wgsl");
 
     app.add_plugins((
         ExtractComponentPlugin::<CelestialTileMaterial>::default(),
@@ -275,6 +337,8 @@ pub fn init_celestial_materials(app: &mut App) {
         UniformComponentPlugin::<CelestialLineUniforms>::default(),
         ExtractComponentPlugin::<CelestialStarMaterial>::default(),
         UniformComponentPlugin::<CelestialStarUniforms>::default(),
+        ExtractComponentPlugin::<CelestialSkyMaterial>::default(),
+        UniformComponentPlugin::<CelestialSkyUniforms>::default(),
     ));
 
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -284,6 +348,7 @@ pub fn init_celestial_materials(app: &mut App) {
         .init_resource::<SpecializedMeshPipelines<CelestialTilePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialLinePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialStarPipeline>>()
+        .init_resource::<SpecializedRenderPipelines<CelestialSkyPipeline>>()
         .init_resource::<CelestialTileBindGroupCache>()
         .add_systems(RenderStartup, init_celestial_pipelines)
         .add_systems(
@@ -330,6 +395,9 @@ fn init_celestial_pipelines(mut commands: Commands, asset_server: Res<AssetServe
     commands.insert_resource(CelestialStarPipeline::new(
         asset_server.load("embedded://planetarium/shaders/celestial_star.wgsl"),
     ));
+    commands.insert_resource(CelestialSkyPipeline::new(
+        asset_server.load("embedded://planetarium/shaders/celestial_sky.wgsl"),
+    ));
 }
 
 fn specialize_pipeline<S: SpecializedMeshPipeline<Key = CelestialPipelineKey>>(
@@ -360,24 +428,21 @@ fn specialize_pipeline<S: SpecializedMeshPipeline<Key = CelestialPipelineKey>>(
 fn queue_celestial_pipelines(
     mut commands: Commands,
     cache: Res<PipelineCache>,
-    tile_pipeline: Res<CelestialTilePipeline>,
-    line_pipeline: Res<CelestialLinePipeline>,
-    star_pipeline: Res<CelestialStarPipeline>,
-    mut tile_pipelines: ResMut<SpecializedMeshPipelines<CelestialTilePipeline>>,
-    mut line_pipelines: ResMut<SpecializedMeshPipelines<CelestialLinePipeline>>,
-    mut star_pipelines: ResMut<SpecializedMeshPipelines<CelestialStarPipeline>>,
+    pipelines: CelestialPipelines,
+    mut specialized: SpecializedCelestialPipelines,
     meshes: Res<RenderAssets<RenderMesh>>,
     views: Query<(&ViewTarget, &Msaa)>,
     tiles: Query<(Entity, &CelestialTileDraw)>,
     lines: Query<(Entity, &CelestialLineDraw)>,
     stars: Query<(Entity, &CelestialStarDraw)>,
+    skies: Query<(Entity, &CelestialSkyDraw)>,
 ) {
     for (target, msaa) in &views {
         for (entity, draw) in &tiles {
             if let Some(id) = specialize_pipeline(
                 &cache,
-                &*tile_pipeline,
-                &mut tile_pipelines,
+                &*pipelines.tile,
+                &mut specialized.tile,
                 &meshes,
                 draw.mesh,
                 target,
@@ -389,8 +454,8 @@ fn queue_celestial_pipelines(
         for (entity, draw) in &lines {
             if let Some(id) = specialize_pipeline(
                 &cache,
-                &*line_pipeline,
-                &mut line_pipelines,
+                &*pipelines.line,
+                &mut specialized.line,
                 &meshes,
                 draw.mesh,
                 target,
@@ -402,8 +467,8 @@ fn queue_celestial_pipelines(
         for (entity, draw) in &stars {
             if let Some(id) = specialize_pipeline(
                 &cache,
-                &*star_pipeline,
-                &mut star_pipelines,
+                &*pipelines.star,
+                &mut specialized.star,
                 &meshes,
                 draw.mesh,
                 target,
@@ -411,6 +476,17 @@ fn queue_celestial_pipelines(
             ) {
                 commands.entity(entity).insert(id);
             }
+        }
+        for (entity, _draw) in &skies {
+            let id = specialized.sky.specialize(
+                &cache,
+                &pipelines.sky,
+                SkyPipelineKey {
+                    format: target.main_texture_format(),
+                    samples: msaa.samples(),
+                },
+            );
+            commands.entity(entity).insert(CelestialPipelineId(id));
         }
     }
 }
@@ -430,7 +506,7 @@ struct DrawItem<'a> {
     pipeline: &'a RenderPipeline,
     bind_group: BindGroup,
     uniform_offset: u32,
-    vertex_buffer: BufferSlice<'a>,
+    vertex_buffer: Option<BufferSlice<'a>>,
     geometry: Geometry<'a>,
     instances: Range<u32>,
 }
@@ -477,32 +553,16 @@ fn draw_celestial(
     images: Res<RenderAssets<GpuImage>>,
     allocator: Res<MeshAllocator>,
     shader_buffers: Res<RenderAssets<GpuShaderBuffer>>,
-    tile_uniforms: Res<ComponentUniforms<CelestialTileUniforms>>,
-    line_uniforms: Res<ComponentUniforms<CelestialLineUniforms>>,
-    star_uniforms: Res<ComponentUniforms<CelestialStarUniforms>>,
-    tiles: Query<(
-        &CelestialTileDraw,
-        &DynamicUniformIndex<CelestialTileUniforms>,
-        &CelestialPipelineId,
-    )>,
-    lines: Query<(
-        &CelestialLineDraw,
-        &DynamicUniformIndex<CelestialLineUniforms>,
-        &CelestialPipelineId,
-    )>,
-    stars: Query<(
-        &CelestialStarDraw,
-        &DynamicUniformIndex<CelestialStarUniforms>,
-        &CelestialPipelineId,
-    )>,
+    uniforms: CelestialUniforms,
+    queries: CelestialDrawQueries,
     mut tile_bind_groups: ResMut<CelestialTileBindGroupCache>,
     mut ctx: RenderContext,
 ) {
     let target = view.into_inner();
     let mut items: Vec<DrawItem> = Vec::new();
 
-    if let Some(binding) = tile_uniforms.binding() {
-        let current_buf_id = tile_uniforms.buffer().map(|b| b.id());
+    if let Some(binding) = uniforms.tile.binding() {
+        let current_buf_id = uniforms.tile.buffer().map(|b| b.id());
         if tile_bind_groups.buffer_id != current_buf_id {
             tile_bind_groups.cache.clear();
             tile_bind_groups.buffer_id = current_buf_id;
@@ -511,7 +571,7 @@ fn draw_celestial(
             .cache
             .retain(|img_id, _| images.get(*img_id).is_some());
 
-        let mut sorted_tiles: Vec<_> = tiles.iter().collect();
+        let mut sorted_tiles: Vec<_> = queries.tiles.iter().collect();
         sorted_tiles.sort_by_key(|(draw, _, _)| draw.depth);
 
         for (draw, uniform_index, pipeline_id) in sorted_tiles {
@@ -541,39 +601,15 @@ fn draw_celestial(
                 pipeline,
                 bind_group,
                 uniform_offset: uniform_index.index(),
-                vertex_buffer,
+                vertex_buffer: Some(vertex_buffer),
                 geometry,
                 instances: 0..1,
             });
         }
     }
 
-    if let Some(binding) = line_uniforms.binding() {
-        let bind_group = ctx.render_device().create_bind_group(
-            "celestial_line_bind_group",
-            &pipeline_cache.get_bind_group_layout(&pipelines.line.layout),
-            &BindGroupEntries::sequential((binding,)),
-        );
-        for (draw, uniform_index, pipeline_id) in &lines {
-            let (Some(pipeline), Some((vertex_buffer, geometry))) = (
-                pipeline_cache.get_render_pipeline(pipeline_id.0),
-                locate_mesh(draw.mesh, &meshes, &allocator),
-            ) else {
-                continue;
-            };
-            items.push(DrawItem {
-                pipeline,
-                bind_group: bind_group.clone(),
-                uniform_offset: uniform_index.index(),
-                vertex_buffer,
-                geometry,
-                instances: 0..1,
-            });
-        }
-    }
-
-    if let Some(binding) = star_uniforms.binding() {
-        for (draw, uniform_index, pipeline_id) in &stars {
+    if let Some(binding) = uniforms.star.binding() {
+        for (draw, uniform_index, pipeline_id) in &queries.stars {
             let (Some(pipeline), Some((vertex_buffer, geometry)), Some(stars_buffer)) = (
                 pipeline_cache.get_render_pipeline(pipeline_id.0),
                 locate_mesh(draw.mesh, &meshes, &allocator),
@@ -593,9 +629,56 @@ fn draw_celestial(
                 pipeline,
                 bind_group,
                 uniform_offset: uniform_index.index(),
-                vertex_buffer,
+                vertex_buffer: Some(vertex_buffer),
                 geometry,
                 instances: 0..draw.star_count,
+            });
+        }
+    }
+
+    if !queries.skies.is_empty() {
+        if let Some(binding) = uniforms.sky.binding() {
+            let bind_group = ctx.render_device().create_bind_group(
+                "celestial_sky_bind_group",
+                &pipeline_cache.get_bind_group_layout(&pipelines.sky.layout),
+                &BindGroupEntries::sequential((binding,)),
+            );
+            for (uniform_index, pipeline_id) in &queries.skies {
+                let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_id.0) else {
+                    continue;
+                };
+                items.push(DrawItem {
+                    pipeline,
+                    bind_group: bind_group.clone(),
+                    uniform_offset: uniform_index.index(),
+                    vertex_buffer: None,
+                    geometry: Geometry::Plain { vertex_count: 3 },
+                    instances: 0..1,
+                });
+            }
+        }
+    }
+
+    if let Some(binding) = uniforms.line.binding() {
+        let bind_group = ctx.render_device().create_bind_group(
+            "celestial_line_bind_group",
+            &pipeline_cache.get_bind_group_layout(&pipelines.line.layout),
+            &BindGroupEntries::sequential((binding,)),
+        );
+        for (draw, uniform_index, pipeline_id) in &queries.lines {
+            let (Some(pipeline), Some((vertex_buffer, geometry))) = (
+                pipeline_cache.get_render_pipeline(pipeline_id.0),
+                locate_mesh(draw.mesh, &meshes, &allocator),
+            ) else {
+                continue;
+            };
+            items.push(DrawItem {
+                pipeline,
+                bind_group: bind_group.clone(),
+                uniform_offset: uniform_index.index(),
+                vertex_buffer: Some(vertex_buffer),
+                geometry,
+                instances: 0..1,
             });
         }
     }
@@ -616,7 +699,9 @@ fn draw_celestial(
     for item in &items {
         pass.set_render_pipeline(item.pipeline);
         pass.set_bind_group(0, &item.bind_group, &[item.uniform_offset]);
-        pass.set_vertex_buffer(0, item.vertex_buffer.clone());
+        if let Some(vertex_buffer) = &item.vertex_buffer {
+            pass.set_vertex_buffer(0, vertex_buffer.clone());
+        }
         match &item.geometry {
             Geometry::Indexed {
                 buffer,

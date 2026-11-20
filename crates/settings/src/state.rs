@@ -1,5 +1,8 @@
 use gpui::{App, AppContext, Context, Entity, Global};
-use persistence::{AppSettings, DebugSettings, DocumentStore};
+use persistence::{
+    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY,
+    DebugSettings, DocumentStore, GroundSettings, PlanetariumSettings,
+};
 
 /// Global GPUI entity wrapper for [`SettingsModel`].
 #[derive(Clone)]
@@ -29,6 +32,98 @@ impl SettingsModel {
     /// Returns the full settings document.
     pub fn settings(&self) -> &AppSettings {
         &self.settings
+    }
+
+    /// Returns the planetarium settings section.
+    pub fn planetarium(&self) -> PlanetariumSettings {
+        self.settings.planetarium
+    }
+
+    /// Returns the atmosphere settings.
+    pub fn atmosphere(&self) -> AtmosphereSettings {
+        self.settings.planetarium.atmosphere
+    }
+
+    /// Returns whether the day/twilight atmosphere shader is enabled.
+    pub fn atmosphere_enabled(&self) -> bool {
+        self.settings.planetarium.atmosphere.enabled
+    }
+
+    /// Returns the configured atmosphere strength in `[0.0, 1.0]`.
+    pub fn atmosphere_strength(&self) -> f32 {
+        self.settings.planetarium.atmosphere.strength
+    }
+
+    /// Returns the effective atmosphere strength (`0.0` when disabled).
+    pub fn effective_atmosphere_strength(&self) -> f32 {
+        self.settings.planetarium.atmosphere.effective_strength()
+    }
+
+    /// Sets whether the day/twilight atmosphere shader is enabled and persists the change.
+    pub fn set_atmosphere_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.atmosphere.enabled = enabled,
+            cx,
+        );
+    }
+
+    /// Updates atmosphere strength in memory during interactive slider dragging without persisting.
+    pub fn preview_atmosphere_strength(&mut self, strength: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(strength, DEFAULT_ATMOSPHERE_STRENGTH);
+        if (self.settings.planetarium.atmosphere.strength - clamped).abs() > 1e-6 {
+            self.settings.planetarium.atmosphere.strength = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets atmosphere strength, persists immediately to disk, and notifies observers.
+    pub fn commit_atmosphere_strength(&mut self, strength: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(strength, DEFAULT_ATMOSPHERE_STRENGTH);
+        self.settings.planetarium.atmosphere.strength = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns the ground mask settings.
+    pub fn ground(&self) -> GroundSettings {
+        self.settings.planetarium.ground
+    }
+
+    /// Returns whether the below-horizon ground mask is enabled.
+    pub fn ground_enabled(&self) -> bool {
+        self.settings.planetarium.ground.enabled
+    }
+
+    /// Returns the configured ground mask opacity in `[0.0, 1.0]`.
+    pub fn ground_opacity(&self) -> f32 {
+        self.settings.planetarium.ground.opacity
+    }
+
+    /// Returns the effective ground mask opacity (`0.0` when disabled).
+    pub fn effective_ground_opacity(&self) -> f32 {
+        self.settings.planetarium.ground.effective_opacity()
+    }
+
+    /// Sets whether the below-horizon ground mask is enabled and persists the change.
+    pub fn set_ground_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(|settings| settings.planetarium.ground.enabled = enabled, cx);
+    }
+
+    /// Updates ground mask opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_ground_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_GROUND_OPACITY);
+        if (self.settings.planetarium.ground.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.ground.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets ground mask opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_ground_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_GROUND_OPACITY);
+        self.settings.planetarium.ground.opacity = clamped;
+        self.persist();
+        cx.notify();
     }
 
     /// Returns the debug settings section.
@@ -67,6 +162,14 @@ impl SettingsModel {
         if let Err(err) = self.store.save(&self.settings) {
             tracing::warn!("Failed to persist application settings: {err}");
         }
+    }
+}
+
+fn sanitize_unit(value: f32, default: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        default
     }
 }
 
@@ -109,5 +212,106 @@ mod tests {
 
         let persisted_after_toggle: AppSettings = store.load().expect("persisted settings load");
         assert!(!persisted_after_toggle.debug.show_hips_grid);
+    }
+
+    #[gpui::test]
+    fn settings_model_atmosphere_preview_commit_and_toggle(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let store_for_init = store.clone();
+
+        cx.update(|cx| {
+            init_with_store(store_for_init, cx);
+        });
+
+        let model = cx.read(|cx| cx.global::<GlobalSettings>().0.clone());
+        model.read_with(cx, |m, _| {
+            assert!(m.atmosphere_enabled());
+            assert_eq!(m.atmosphere_strength(), 1.0);
+            assert_eq!(m.effective_atmosphere_strength(), 1.0);
+        });
+
+        // Preview updates in-memory state without writing to disk.
+        model.update(cx, |m, cx| {
+            m.preview_atmosphere_strength(0.42, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!((m.atmosphere_strength() - 0.42).abs() < 1e-6);
+            assert!((m.effective_atmosphere_strength() - 0.42).abs() < 1e-6);
+        });
+        assert!(
+            store
+                .load_optional::<AppSettings>()
+                .expect("load_optional succeeds")
+                .is_none()
+        );
+
+        // Commit with the same previewed value must still persist to disk.
+        model.update(cx, |m, cx| {
+            m.commit_atmosphere_strength(0.42, cx);
+        });
+        let persisted: AppSettings = store.load().expect("committed settings load");
+        assert!((persisted.planetarium.atmosphere.strength - 0.42).abs() < 1e-6);
+
+        // Disabling atmosphere zeroes effective strength while preserving stored strength.
+        model.update(cx, |m, cx| {
+            m.set_atmosphere_enabled(false, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(!m.atmosphere_enabled());
+            assert!((m.atmosphere_strength() - 0.42).abs() < 1e-6);
+            assert_eq!(m.effective_atmosphere_strength(), 0.0);
+        });
+        let persisted_disabled: AppSettings = store.load().expect("disabled settings load");
+        assert!(!persisted_disabled.planetarium.atmosphere.enabled);
+        assert!((persisted_disabled.planetarium.atmosphere.strength - 0.42).abs() < 1e-6);
+    }
+
+    #[gpui::test]
+    fn settings_model_ground_preview_commit_and_toggle(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let store_for_init = store.clone();
+
+        cx.update(|cx| {
+            init_with_store(store_for_init, cx);
+        });
+
+        let model = cx.read(|cx| cx.global::<GlobalSettings>().0.clone());
+        model.read_with(cx, |m, _| {
+            assert!(m.ground_enabled());
+            assert_eq!(m.ground_opacity(), 1.0);
+            assert_eq!(m.effective_ground_opacity(), 1.0);
+        });
+
+        model.update(cx, |m, cx| {
+            m.preview_ground_opacity(0.65, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!((m.ground_opacity() - 0.65).abs() < 1e-6);
+            assert!((m.effective_ground_opacity() - 0.65).abs() < 1e-6);
+        });
+        assert!(
+            store
+                .load_optional::<AppSettings>()
+                .expect("load_optional succeeds")
+                .is_none()
+        );
+
+        model.update(cx, |m, cx| {
+            m.commit_ground_opacity(0.65, cx);
+        });
+        let persisted: AppSettings = store.load().expect("committed ground load");
+        assert!((persisted.planetarium.ground.opacity - 0.65).abs() < 1e-6);
+
+        model.update(cx, |m, cx| {
+            m.set_ground_enabled(false, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(!m.ground_enabled());
+            assert!((m.ground_opacity() - 0.65).abs() < 1e-6);
+            assert_eq!(m.effective_ground_opacity(), 0.0);
+        });
+        let persisted_disabled: AppSettings = store.load().expect("disabled ground load");
+        assert!(!persisted_disabled.planetarium.ground.enabled);
+        assert!((persisted_disabled.planetarium.ground.opacity - 0.65).abs() < 1e-6);
     }
 }

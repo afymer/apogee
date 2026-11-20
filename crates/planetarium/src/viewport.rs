@@ -22,5 +22,7 @@ pub enum ViewportCommand {
     ToggleHipsSurvey(bool),
     SetHipsSurvey(hips::HipsSurvey),
     SetObserver(ObserverUpdate),
+    SetAtmosphereStrength(f32),
+    SetGroundOpacity(f32),
 }
 

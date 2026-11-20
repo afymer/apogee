@@ -1,3 +1,4 @@
+use glam::DVec3;
 use hifitime::Epoch;
 
 use crate::coords::{Angle, geodetic::GeodeticPosition};
@@ -61,16 +62,31 @@ pub fn solar_equatorial_of_date(epoch: Epoch) -> (Angle, Angle) {
     (ra, dec)
 }
 
-/// Computes the Sun's geometric altitude in degrees above the observer's horizon.
-pub fn solar_altitude_deg(location: GeodeticPosition, epoch: Epoch) -> f64 {
+/// Computes the Sun's unit direction vector in topocentric ENU coordinates
+/// (`+X` East, `+Y` North, `+Z` Up).
+pub fn solar_topocentric_enu(location: GeodeticPosition, epoch: Epoch) -> DVec3 {
     let lst = ObservationContext::new(location, epoch).local_sidereal_time();
     let (ra, dec) = solar_equatorial_of_date(epoch);
-    let hour_angle = lst - ra;
+    let ha = lst - ra;
 
     let (sin_lat, cos_lat) = location.latitude.sin_cos();
     let (sin_dec, cos_dec) = dec.sin_cos();
-    let sin_alt = (sin_lat * sin_dec + cos_lat * cos_dec * hour_angle.cos()).clamp(-1.0, 1.0);
-    sin_alt.asin().to_degrees()
+    let (sin_ha, cos_ha) = ha.sin_cos();
+
+    let east = -cos_dec * sin_ha;
+    let north = cos_lat * sin_dec - sin_lat * cos_dec * cos_ha;
+    let up = sin_lat * sin_dec + cos_lat * cos_dec * cos_ha;
+
+    DVec3::new(east, north, up).normalize()
+}
+
+/// Computes the Sun's geometric altitude in degrees above the observer's horizon.
+pub fn solar_altitude_deg(location: GeodeticPosition, epoch: Epoch) -> f64 {
+    solar_topocentric_enu(location, epoch)
+        .z
+        .clamp(-1.0, 1.0)
+        .asin()
+        .to_degrees()
 }
 
 /// Samples solar altitude (in degrees) evenly over a 24-hour local day `[0h..24h]`.
@@ -272,5 +288,30 @@ mod tests {
             SkyPhase::from_solar_altitude_deg(solar_altitude_deg(pole, dec_noon)),
             SkyPhase::AstronomicalNight
         );
+    }
+
+    #[test]
+    fn solar_topocentric_enu_unit_and_equinox_cardinals() {
+        let mid_lat = GeodeticPosition::from_degrees(45.0, 0.0, 0.0);
+
+        let noon = Epoch::from_gregorian_utc(2026, 3, 20, 12, 7, 0, 0);
+        let enu_noon = solar_topocentric_enu(mid_lat, noon);
+        assert!((enu_noon.length() - 1.0).abs() < 1e-12);
+        assert!(enu_noon.x.abs() < 0.05, "expected due south at noon, x={}", enu_noon.x);
+        assert!(enu_noon.y < -0.65, "expected south (-Y) at noon, y={}", enu_noon.y);
+        assert!(enu_noon.z > 0.65, "expected ~45° altitude at noon, z={}", enu_noon.z);
+        assert!((enu_noon.z.asin().to_degrees() - solar_altitude_deg(mid_lat, noon)).abs() < 1e-10);
+
+        let sunrise = Epoch::from_gregorian_utc(2026, 3, 20, 6, 7, 0, 0);
+        let enu_sunrise = solar_topocentric_enu(mid_lat, sunrise);
+        assert!((enu_sunrise.length() - 1.0).abs() < 1e-12);
+        assert!(enu_sunrise.x > 0.95, "expected east (+X) at sunrise, x={}", enu_sunrise.x);
+        assert!(enu_sunrise.z.abs() < 0.08, "expected near horizon at sunrise, z={}", enu_sunrise.z);
+
+        let sunset = Epoch::from_gregorian_utc(2026, 3, 20, 18, 7, 0, 0);
+        let enu_sunset = solar_topocentric_enu(mid_lat, sunset);
+        assert!((enu_sunset.length() - 1.0).abs() < 1e-12);
+        assert!(enu_sunset.x < -0.95, "expected west (-X) at sunset, x={}", enu_sunset.x);
+        assert!(enu_sunset.z.abs() < 0.08, "expected near horizon at sunset, z={}", enu_sunset.z);
     }
 }

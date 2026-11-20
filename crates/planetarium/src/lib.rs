@@ -1,12 +1,17 @@
 #![recursion_limit = "256"]
 
+pub mod atmosphere;
 pub mod camera;
 pub mod grids;
+pub mod ground;
 pub mod hips;
 pub mod material;
+pub mod sky;
 pub mod stars;
 pub mod viewport;
 
+pub use atmosphere::AtmosphereSettings;
+pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
 
 use std::{
@@ -178,6 +183,24 @@ impl BevyBridge {
             location,
             clock,
         }));
+    }
+
+    pub fn set_atmosphere_strength(&self, strength: f32) {
+        let clamped = if strength.is_finite() {
+            strength.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetAtmosphereStrength(clamped));
+    }
+
+    pub fn set_ground_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetGroundOpacity(clamped));
     }
 
     pub fn resize(&self, width: u32, height: u32) {
@@ -607,6 +630,32 @@ fn process_viewport_commands(
                     *frames_remaining = 3;
                 }
             }
+            ViewportCommand::SetAtmosphereStrength(strength) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<atmosphere::AtmosphereSettings>()
+                {
+                    settings.strength = if strength.is_finite() {
+                        strength.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetGroundOpacity(opacity) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<ground::GroundSettings>()
+                {
+                    settings.opacity = if opacity.is_finite() {
+                        opacity.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    *frames_remaining = 3;
+                }
+            }
             movement => {
                 pending.push(movement);
             }
@@ -657,6 +706,9 @@ impl PlanetariumRenderer {
                         guard.last_size = Some((width, height));
                     }
                 }
+
+                let sync_device = device.clone();
+                let sync_queue = queue.clone();
 
                 {
                     let _span = tracing::info_span!("bevy_add_plugins").entered();
@@ -823,6 +875,8 @@ impl PlanetariumRenderer {
                 app.init_resource::<PendingCommands>();
                 app.init_resource::<ObserverClockResource>();
                 app.init_resource::<CameraSyncState>();
+                app.init_resource::<atmosphere::AtmosphereSettings>();
+                app.init_resource::<ground::GroundSettings>();
                 let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
                 app.insert_resource(tile_loader);
                 app.init_resource::<hips::HipsMeshCache>();
@@ -848,6 +902,12 @@ impl PlanetariumRenderer {
                         .id();
                     let star = star_setup
                         .map(|(material, mesh)| world.spawn((Mesh3d(mesh), material)).id());
+                    world.spawn(sky::CelestialSkyMaterial::from_camera(
+                        &initial_camera,
+                        initial_proj,
+                        1.0,
+                        1.0,
+                    ));
                     (horizon, altaz, eq, star)
                 };
 
@@ -869,6 +929,7 @@ impl PlanetariumRenderer {
                             Camera::default(),
                             RenderTarget::Image(target_clone.clone().into()),
                             Tonemapping::None,
+                            bevy::render::view::Msaa::Off,
                             PlanetariumCameraMarker,
                             PlanetariumCamera::default(),
                         ));
@@ -879,6 +940,7 @@ impl PlanetariumRenderer {
                     Update,
                     (
                         camera_movement_and_interpolation_system,
+                        sky::sky_system,
                         hips::hips_survey_system,
                         hips::hips_grid_system,
                     )
@@ -907,8 +969,9 @@ impl PlanetariumRenderer {
                 let mut current_height = height;
                 let mut is_first_frame = true;
                 let mut last_frame_start: Option<std::time::Instant> = None;
+                let mut last_submission: Option<wgpu::SubmissionIndex> = None;
                 let mut idle_update_interval = Duration::from_secs(5);
-                const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+                const MIN_FRAME_INTERVAL: Duration = Duration::from_micros(15_500);
 
                 loop {
                     let mut guard = bridge
@@ -933,7 +996,11 @@ impl PlanetariumRenderer {
                                 .unwrap_or_else(PoisonError::into_inner)
                                 .0;
                         }
-                    } else if let Some(remaining) = last_frame_start
+                    }
+                    if guard.shutdown {
+                        break;
+                    }
+                    if let Some(remaining) = last_frame_start
                         .and_then(|start| MIN_FRAME_INTERVAL.checked_sub(start.elapsed()))
                     {
                         guard = bridge
@@ -949,6 +1016,14 @@ impl PlanetariumRenderer {
                     guard.is_dirty = false;
                     let commands = std::mem::take(&mut guard.pending_commands);
                     drop(guard);
+
+                    if let Some(sub_idx) = last_submission.take() {
+                        let _span = tracing::info_span!("gpu_frame_sync").entered();
+                        let _ = sync_device.poll(wgpu::PollType::Wait {
+                            submission_index: Some(sub_idx),
+                            timeout: Some(Duration::from_millis(100)),
+                        });
+                    }
 
                     last_frame_start = Some(std::time::Instant::now());
                     let first_frame = is_first_frame;
@@ -971,6 +1046,7 @@ impl PlanetariumRenderer {
                         let _span = tracing::info_span!("bevy_app_update").entered();
                         app.update();
                     }
+                    last_submission = Some(sync_queue.submit(std::iter::empty()));
 
                     let mut new_texture_view = None;
                     {

@@ -43,6 +43,8 @@ pub struct PlanetariumPanel {
     last_mouse_pos: Option<Point<Pixels>>,
     last_synced_observer: Option<(GeodeticPosition, ObserverClockSpec)>,
     last_synced_hips_grid: Option<bool>,
+    last_synced_atmosphere_strength: Option<f32>,
+    last_synced_ground_opacity: Option<f32>,
 }
 
 fn observer_spec(model: &ObserverModel) -> (GeodeticPosition, ObserverClockSpec) {
@@ -97,18 +99,43 @@ impl PlanetariumPanel {
             let settings_entity = cx
                 .try_global::<settings::GlobalSettings>()
                 .map(|g| g.0.clone());
-            let initial_hips_grid = settings_entity.as_ref().map(|entity| {
-                let show = entity.read(cx).show_hips_grid();
-                bridge.set_hips_grid_visible(show);
-                show
-            });
+            let (initial_hips_grid, initial_atmosphere_strength, initial_ground_opacity) =
+                if let Some(entity) = settings_entity.as_ref() {
+                    let model = entity.read(cx);
+                    let show = model.show_hips_grid();
+                    let atmo = model.effective_atmosphere_strength();
+                    let ground = model.effective_ground_opacity();
+                    bridge.set_hips_grid_visible(show);
+                    bridge.set_atmosphere_strength(atmo);
+                    bridge.set_ground_opacity(ground);
+                    (Some(show), Some(atmo), Some(ground))
+                } else {
+                    (None, None, None)
+                };
 
             if let Some(entity) = settings_entity {
                 cx.observe(&entity, |this: &mut Self, model, cx| {
-                    let next = model.read(cx).show_hips_grid();
-                    if this.last_synced_hips_grid != Some(next) {
-                        this.last_synced_hips_grid = Some(next);
-                        this.bridge.set_hips_grid_visible(next);
+                    let model_ref = model.read(cx);
+                    let next_grid = model_ref.show_hips_grid();
+                    if this.last_synced_hips_grid != Some(next_grid) {
+                        this.last_synced_hips_grid = Some(next_grid);
+                        this.bridge.set_hips_grid_visible(next_grid);
+                    }
+                    let next_atmo = model_ref.effective_atmosphere_strength();
+                    if this
+                        .last_synced_atmosphere_strength
+                        .map_or(true, |prev| (prev - next_atmo).abs() > 1e-5)
+                    {
+                        this.last_synced_atmosphere_strength = Some(next_atmo);
+                        this.bridge.set_atmosphere_strength(next_atmo);
+                    }
+                    let next_ground = model_ref.effective_ground_opacity();
+                    if this
+                        .last_synced_ground_opacity
+                        .map_or(true, |prev| (prev - next_ground).abs() > 1e-5)
+                    {
+                        this.last_synced_ground_opacity = Some(next_ground);
+                        this.bridge.set_ground_opacity(next_ground);
                     }
                 })
                 .detach();
@@ -148,6 +175,8 @@ impl PlanetariumPanel {
                 last_mouse_pos: None,
                 last_synced_observer: initial_observer,
                 last_synced_hips_grid: initial_hips_grid,
+                last_synced_atmosphere_strength: initial_atmosphere_strength,
+                last_synced_ground_opacity: initial_ground_opacity,
             }
         })
     }
@@ -181,7 +210,6 @@ impl PlanetariumPanel {
         // dy > 0 when dragging down
         self.bridge.pan(dx, dy);
         self.last_mouse_pos = Some(event.position);
-        cx.notify();
     }
 
     fn handle_mouse_up(&mut self, cx: &mut Context<Self>) {
@@ -192,7 +220,7 @@ impl PlanetariumPanel {
         }
     }
 
-    fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent, _cx: &mut Context<Self>) {
         let delta_lines = match event.delta {
             ScrollDelta::Lines(pt) => pt.y as f64,
             ScrollDelta::Pixels(pt) => (f32::from(pt.y) / 20.0) as f64,
@@ -200,7 +228,6 @@ impl PlanetariumPanel {
 
         if delta_lines.abs() > 1e-4 {
             self.bridge.zoom(delta_lines);
-            cx.notify();
         }
     }
 
