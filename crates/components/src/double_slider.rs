@@ -7,6 +7,7 @@ use gpui::{
 };
 use ui::ActiveTheme;
 
+use crate::slider_utils::{lerp_hsla, normalized_x, smoothstep_proximity};
 use crate::theme::SliderThemeExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,43 +126,7 @@ impl DoubleSlider {
         if self.active_knob != ActiveKnob::None {
             return;
         }
-
-        let width = f32::from(bounds.size.width);
-        let height = f32::from(bounds.size.height);
-        if width <= 0.0 || height <= 0.0 {
-            return;
-        }
-
-        let mouse_x = f32::from(mouse_pos.x);
-        let mouse_y = f32::from(mouse_pos.y);
-        let origin_x = f32::from(bounds.origin.x);
-        let origin_y = f32::from(bounds.origin.y);
-
-        let bar_y = origin_y + height / 2.0;
-        let dy = (mouse_y - bar_y).abs();
-
-        let dx = if mouse_x < origin_x {
-            origin_x - mouse_x
-        } else if mouse_x > origin_x + width {
-            mouse_x - (origin_x + width)
-        } else {
-            0.0
-        };
-
-        let dist = (dx * dx + dy * dy).sqrt();
-
-        let d_inner = 3.0;
-        let d_outer = 20.0;
-
-        let target_p = if dist <= d_inner {
-            1.0
-        } else if dist >= d_outer {
-            0.0
-        } else {
-            let u = (d_outer - dist) / (d_outer - d_inner);
-            u * u * (3.0 - 2.0 * u)
-        };
-
+        let target_p = smoothstep_proximity(mouse_pos, bounds);
         if (self.proximity - target_p).abs() > 0.005 {
             self.proximity = target_p;
             cx.notify();
@@ -173,18 +138,12 @@ impl DoubleSlider {
         let Some(bounds) = bounds else {
             return;
         };
-        let width = f32::from(bounds.size.width);
-        if width <= 0.0 {
+        if f32::from(bounds.size.width) <= 0.0 {
             return;
         }
 
         self.proximity = 1.0;
-
-        let radius = 6.0;
-        let usable_width = (width - 2.0 * radius).max(1.0);
-        let mouse_x = f32::from(position.x);
-        let origin_x = f32::from(bounds.origin.x);
-        let t = ((mouse_x - origin_x - radius) / usable_width).clamp(0.0, 1.0);
+        let t = normalized_x(position, bounds, 6.0);
 
         let dist_to_min = (t - self.min_val).abs();
         let dist_to_max = (t - self.max_val).abs();
@@ -203,19 +162,10 @@ impl DoubleSlider {
         bounds: Bounds<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.active_knob == ActiveKnob::None {
+        if self.active_knob == ActiveKnob::None || f32::from(bounds.size.width) <= 0.0 {
             return;
         }
-        let width = f32::from(bounds.size.width);
-        if width <= 0.0 {
-            return;
-        }
-
-        let radius = 6.0;
-        let usable_width = (width - 2.0 * radius).max(1.0);
-        let mouse_x = f32::from(position.x);
-        let origin_x = f32::from(bounds.origin.x);
-        let t = ((mouse_x - origin_x - radius) / usable_width).clamp(0.0, 1.0);
+        let t = normalized_x(position, bounds, 6.0);
         self.update_active_knob_to(t, cx);
     }
 }
@@ -292,16 +242,6 @@ impl Render for DoubleSlider {
         let track_h = 4.0 + 8.0 * p;
         let track_top = (24.0 - track_h) / 2.0;
         let r = track_h / 2.0;
-
-        let lerp_hsla = |a: gpui::Hsla, b: gpui::Hsla, t: f32| -> gpui::Hsla {
-            let t = t.clamp(0.0, 1.0);
-            hsla(
-                a.h + (b.h - a.h) * t,
-                a.s + (b.s - a.s) * t,
-                a.l + (b.l - a.l) * t,
-                a.a + (b.a - a.a) * t,
-            )
-        };
 
         let track_bg = lerp_hsla(colors.track_background, colors.track_background_hover, p);
         let active_bg = lerp_hsla(colors.active_track_idle, colors.active_track, p);
