@@ -1,5 +1,17 @@
 use crate::camera::ViewMode;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ObserverClockSpec {
+    Live,
+    FixedUnixSeconds(f64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObserverUpdate {
+    pub location: celestial::coords::geodetic::GeodeticPosition,
+    pub clock: ObserverClockSpec,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewportCommand {
     Resize(u32, u32),
@@ -9,5 +21,6 @@ pub enum ViewportCommand {
     ToggleHipsGrid(bool),
     ToggleHipsSurvey(bool),
     SetHipsSurvey(hips::HipsSurvey),
+    SetObserver(ObserverUpdate),
 }
 

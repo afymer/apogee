@@ -36,7 +36,7 @@ pub use camera::{PlanetariumCamera, PlanetariumViewInfo, ViewMode};
 use grids::{create_altaz_grid_mesh, create_equatorial_grid_mesh, create_horizon_mesh};
 pub use material::{CelestialLineMaterial, CelestialLineUniforms, init_celestial_materials};
 
-pub use crate::viewport::ViewportCommand;
+pub use crate::viewport::{ObserverClockSpec, ObserverUpdate, ViewportCommand};
 
 #[derive(Default, Component, Clone, Copy)]
 struct PlanetariumCameraMarker;
@@ -169,6 +169,17 @@ impl BevyBridge {
         self.send_command(ViewportCommand::SetHipsSurvey(survey));
     }
 
+    pub fn set_observer(
+        &self,
+        location: celestial::coords::geodetic::GeodeticPosition,
+        clock: ObserverClockSpec,
+    ) {
+        self.send_command(ViewportCommand::SetObserver(ObserverUpdate {
+            location,
+            clock,
+        }));
+    }
+
     pub fn resize(&self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
@@ -251,6 +262,7 @@ struct GridMeshState {
     pitch: f64,
     is_zoomed_in: bool,
     view_mode: ViewMode,
+    location: celestial::coords::geodetic::GeodeticPosition,
     topo_to_cam: glam::DMat3,
     eq_to_cam: glam::DMat3,
     epoch_secs: f64,
@@ -268,11 +280,21 @@ impl Default for GridMeshState {
             pitch: 0.0,
             is_zoomed_in: false,
             view_mode: ViewMode::Horizontal,
+            location: cam.observer.location,
             topo_to_cam: cam.topocentric_to_camera_matrix(),
             eq_to_cam: cam.icrs_to_camera_matrix(),
             epoch_secs,
             last_uniform_epoch_secs: epoch_secs,
         }
+    }
+}
+
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+struct ObserverClockResource(ObserverClockSpec);
+
+impl Default for ObserverClockResource {
+    fn default() -> Self {
+        Self(ObserverClockSpec::Live)
     }
 }
 
@@ -300,6 +322,7 @@ impl Default for CameraSyncState {
 fn camera_movement_and_interpolation_system(
     time: Res<Time>,
     mut pending_commands: ResMut<PendingCommands>,
+    mut observer_clock: ResMut<ObserverClockResource>,
     mut camera_query: Query<&mut PlanetariumCamera>,
     mut camera_sync: ResMut<CameraSyncState>,
     dims: Res<ViewportDimensions>,
@@ -329,6 +352,11 @@ fn camera_movement_and_interpolation_system(
                 camera.set_view_mode(mode);
                 moved = true;
             }
+            ViewportCommand::SetObserver(update) => {
+                camera.observer.location = update.location;
+                observer_clock.0 = update.clock;
+                moved = true;
+            }
             ViewportCommand::Resize(_, _) => {
                 moved = true;
             }
@@ -336,7 +364,12 @@ fn camera_movement_and_interpolation_system(
         }
     }
 
-    camera.observer.update_epoch_now();
+    match observer_clock.0 {
+        ObserverClockSpec::Live => camera.observer.update_epoch_now(),
+        ObserverClockSpec::FixedUnixSeconds(secs) => {
+            camera.observer.set_epoch_unix_seconds(secs);
+        }
+    }
     let epoch_secs = camera.observer.epoch_unix_seconds();
     let epoch_changed = (epoch_secs - grid_state.last_uniform_epoch_secs).abs() > 1e-6;
 
@@ -391,6 +424,7 @@ fn camera_movement_and_interpolation_system(
         let needs_rebuild = grid_state.level != Some(grid_level)
             || grid_state.is_zoomed_in != is_zoomed_in
             || grid_state.view_mode != camera.view_mode
+            || grid_state.location != camera.observer.location
             || moved_significantly;
 
         if needs_rebuild {
@@ -459,6 +493,7 @@ fn camera_movement_and_interpolation_system(
             grid_state.pitch = camera.pitch;
             grid_state.is_zoomed_in = is_zoomed_in;
             grid_state.view_mode = camera.view_mode;
+            grid_state.location = camera.observer.location;
             grid_state.topo_to_cam = topo_to_cam;
             grid_state.eq_to_cam = eq_to_cam;
             grid_state.epoch_secs = epoch_secs;
@@ -502,7 +537,10 @@ fn camera_movement_and_interpolation_system(
         grid_state.last_uniform_epoch_secs = epoch_secs;
         camera_sync.view_info = camera.view_info();
         camera_sync.is_interpolating = is_interpolating;
-        camera_sync.idle_update_interval = camera.sky_rotation_update_interval(dims.height);
+        camera_sync.idle_update_interval = match observer_clock.0 {
+            ObserverClockSpec::Live => camera.sky_rotation_update_interval(dims.height),
+            ObserverClockSpec::FixedUnixSeconds(_) => Duration::from_secs(3600),
+        };
     }
 }
 
@@ -783,6 +821,7 @@ impl PlanetariumRenderer {
                 };
 
                 app.init_resource::<PendingCommands>();
+                app.init_resource::<ObserverClockResource>();
                 app.init_resource::<CameraSyncState>();
                 let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
                 app.insert_resource(tile_loader);

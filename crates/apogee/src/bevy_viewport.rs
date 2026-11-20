@@ -1,12 +1,14 @@
 use std::{sync::Arc, thread::JoinHandle};
 
+use celestial::coords::geodetic::GeodeticPosition;
 use futures::StreamExt;
 use gpui::{
     App, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
     ScrollWheelEvent, Window, div, prelude::*, rgb,
 };
-use planetarium::{BevyBridge, PlanetariumRenderer, ViewMode};
+use observer::{GlobalObserver, ObserverClock, ObserverModel};
+use planetarium::{BevyBridge, ObserverClockSpec, PlanetariumRenderer, ViewMode};
 use theme::ActiveTheme;
 use ui::{
     Button, ButtonCommon, ButtonStyle, Clickable, Color, Label, LabelCommon, LabelSize, h_flex,
@@ -39,6 +41,15 @@ pub struct PlanetariumPanel {
     focus_handle: FocusHandle,
     is_dragging: bool,
     last_mouse_pos: Option<Point<Pixels>>,
+    last_synced_observer: Option<(GeodeticPosition, ObserverClockSpec)>,
+}
+
+fn observer_spec(model: &ObserverModel) -> (GeodeticPosition, ObserverClockSpec) {
+    let clock = match model.clock() {
+        ObserverClock::Live => ObserverClockSpec::Live,
+        ObserverClock::Manual { unix_seconds } => ObserverClockSpec::FixedUnixSeconds(unix_seconds),
+    };
+    (model.geodetic_position(), clock)
 }
 
 impl EventEmitter<PanelEvent> for PlanetariumPanel {}
@@ -64,6 +75,23 @@ impl PlanetariumPanel {
             };
 
             let bridge = BevyBridge::new(notify_ui);
+            let observer_entity = cx.try_global::<GlobalObserver>().map(|g| g.0.clone());
+            let initial_observer = observer_entity.as_ref().map(|entity| {
+                let spec = observer_spec(entity.read(cx));
+                bridge.set_observer(spec.0, spec.1);
+                spec
+            });
+
+            if let Some(entity) = observer_entity {
+                cx.observe(&entity, |this: &mut Self, model, cx| {
+                    let next = observer_spec(model.read(cx));
+                    if this.last_synced_observer != Some(next) {
+                        this.last_synced_observer = Some(next);
+                        this.bridge.set_observer(next.0, next.1);
+                    }
+                })
+                .detach();
+            }
 
             let device = (*window.wgpu_device().expect("wgpu device not available")).clone();
             let queue = (*window.wgpu_queue().expect("wgpu queue not available")).clone();
@@ -97,6 +125,7 @@ impl PlanetariumPanel {
                 focus_handle: cx.focus_handle(),
                 is_dragging: false,
                 last_mouse_pos: None,
+                last_synced_observer: initial_observer,
             }
         })
     }

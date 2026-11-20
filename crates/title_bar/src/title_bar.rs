@@ -1,5 +1,5 @@
 use gpui::{App, Context, IntoElement, Render, WeakEntity, Window, prelude::*};
-use ui::{Button, ButtonStyle, ContextMenu, Icon, IconName, LabelSize, PopoverMenu, prelude::*};
+use ui::{Button, ButtonStyle, ContextMenu, LabelSize, PopoverMenu, prelude::*};
 use workspace::{WorkspaceKind, workbench::Workbench};
 
 pub fn init(cx: &mut App) {
@@ -24,6 +24,12 @@ impl TitleBar {
     ) -> Self {
         if let Some(workbench) = workbench.upgrade() {
             cx.observe(&workbench, |_this, _workbench, cx| {
+                cx.notify();
+            })
+            .detach();
+        }
+        if let Some(observer) = cx.try_global::<observer::GlobalObserver>().map(|g| g.0.clone()) {
+            cx.observe(&observer, |_this, _observer, cx| {
                 cx.notify();
             })
             .detach();
@@ -144,22 +150,6 @@ impl TitleBar {
 
         switcher
     }
-
-    fn render_user_info_dropdown(&self) -> impl IntoElement {
-        PopoverMenu::new("user_info_menu")
-            .trigger(
-                Button::new("user_info_trigger", "Observer")
-                    .start_icon(Icon::new(IconName::UserGroup))
-                    .end_icon(Icon::new(IconName::ChevronDown))
-                    .style(ButtonStyle::Subtle)
-                    .label_size(LabelSize::Small),
-            )
-            .menu(|window, cx| {
-                Some(ContextMenu::build(window, cx, |menu, _window, _cx| {
-                    menu.header("Profile")
-                }))
-            })
-    }
 }
 
 impl Render for TitleBar {
@@ -175,6 +165,6 @@ impl Render for TitleBar {
             .border_color(cx.theme().colors().border)
             .child(self.render_app_menus())
             .child(self.render_workspace_switcher(cx))
-            .child(self.render_user_info_dropdown())
+            .child(observer::observer_menu(cx))
     }
 }

@@ -277,10 +277,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assets",
+ "celestial",
  "client",
  "futures",
  "gpui",
  "gpui_platform",
+ "observer",
  "planetarium",
  "raw_viewer",
  "refineable",
@@ -5705,6 +5707,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "observer"
+version = "0.1.0"
+dependencies = [
+ "celestial",
+ "chrono",
+ "components",
+ "gpui",
+ "persistence",
+ "theme",
+ "tracing",
+ "ui",
+]
+
+[[package]]
 name = "offset-allocator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5926,6 +5942,17 @@ dependencies = [
  "collections",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "persistence"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -8040,6 +8067,7 @@ version = "0.1.0"
 dependencies = [
  "client",
  "gpui",
+ "observer",
  "protocol",
  "theme",
  "tracing",

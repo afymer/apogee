@@ -10,6 +10,7 @@ theme.workspace = true
 workspace.workspace = true
 client.workspace = true
 protocol.workspace = true
+observer.workspace = true
 tracing.workspace = true
 
 [lib]

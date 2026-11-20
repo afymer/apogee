@@ -1,0 +1,17 @@
+[package]
+name = "observer"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+gpui.workspace = true
+ui.workspace = true
+theme.workspace = true
+persistence.workspace = true
+celestial.workspace = true
+components.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
