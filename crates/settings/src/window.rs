@@ -6,8 +6,8 @@ use gpui::{
     WindowOptions, div, prelude::*, px,
 };
 use persistence::{
-    AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY,
-    DEFAULT_STARS_OPACITY,
+    AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY, DEFAULT_GROUND_OPACITY,
+    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY,
 };
 use ui::{
     ActiveTheme, Color, Divider, DividerColor, Icon, IconButton, IconName, IconSize, Label,
@@ -189,6 +189,69 @@ fn default_categories() -> Vec<SettingsCategory> {
                                 min: 0.0,
                                 max: 1.0,
                                 default: DEFAULT_STARS_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
+                },
+                SettingsSection {
+                    title: "Coordinate Grids",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_altaz_grid_enabled",
+                            title: "Show Alt/Az Grid",
+                            description: "Display the horizontal azimuth and altitude coordinate grid in the planetarium viewport.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.altaz_grid.enabled,
+                                set: |model, value, cx| model.set_altaz_grid_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_altaz_grid_opacity",
+                            title: "Alt/Az Grid Opacity",
+                            description: "Adjust the opacity of the horizontal Alt/Az coordinate grid.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.altaz_grid.opacity,
+                                preview: |model, value, cx| {
+                                    model.preview_altaz_grid_opacity(value, cx);
+                                },
+                                commit: |model, value, cx| {
+                                    model.commit_altaz_grid_opacity(value, cx);
+                                },
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_GRID_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_equatorial_grid_enabled",
+                            title: "Show Equatorial Grid",
+                            description: "Display the equatorial RA and Dec coordinate grid in the planetarium viewport.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.equatorial_grid.enabled,
+                                set: |model, value, cx| {
+                                    model.set_equatorial_grid_enabled(value, cx);
+                                },
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_equatorial_grid_opacity",
+                            title: "Equatorial Grid Opacity",
+                            description: "Adjust the opacity of the equatorial RA/Dec coordinate grid.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.equatorial_grid.opacity,
+                                preview: |model, value, cx| {
+                                    model.preview_equatorial_grid_opacity(value, cx);
+                                },
+                                commit: |model, value, cx| {
+                                    model.commit_equatorial_grid_opacity(value, cx);
+                                },
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_GRID_OPACITY,
                                 format: |v| format!("{:.0}%", v * 100.0),
                             },
                         },

@@ -1,8 +1,9 @@
 use gpui::{App, AppContext, Context, Entity, Global};
 use persistence::{
-    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY,
-    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings, DocumentStore,
-    GroundSettings, PlanetariumSettings, StarsSettings, SurveySettings,
+    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
+    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings,
+    DocumentStore, GridLayerSettings, GroundSettings, PlanetariumSettings, StarsSettings,
+    SurveySettings,
 };
 
 /// Global GPUI entity wrapper for [`SettingsModel`].
@@ -210,6 +211,99 @@ impl SettingsModel {
     pub fn commit_stars_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
         let clamped = sanitize_unit(opacity, DEFAULT_STARS_OPACITY);
         self.settings.planetarium.stars.opacity = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns the horizontal (Alt/Az) coordinate grid settings.
+    pub fn altaz_grid(&self) -> GridLayerSettings {
+        self.settings.planetarium.altaz_grid
+    }
+
+    /// Returns whether the Alt/Az coordinate grid is enabled.
+    pub fn altaz_grid_enabled(&self) -> bool {
+        self.settings.planetarium.altaz_grid.enabled
+    }
+
+    /// Returns the configured Alt/Az grid opacity in `[0.0, 1.0]`.
+    pub fn altaz_grid_opacity(&self) -> f32 {
+        self.settings.planetarium.altaz_grid.opacity
+    }
+
+    /// Returns the effective Alt/Az grid opacity (`0.0` when disabled).
+    pub fn effective_altaz_grid_opacity(&self) -> f32 {
+        self.settings.planetarium.altaz_grid.effective_opacity()
+    }
+
+    /// Sets whether the Alt/Az coordinate grid is enabled and persists the change.
+    pub fn set_altaz_grid_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.altaz_grid.enabled = enabled,
+            cx,
+        );
+    }
+
+    /// Updates Alt/Az grid opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_altaz_grid_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_GRID_OPACITY);
+        if (self.settings.planetarium.altaz_grid.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.altaz_grid.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets Alt/Az grid opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_altaz_grid_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_GRID_OPACITY);
+        self.settings.planetarium.altaz_grid.opacity = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns the equatorial (RA/Dec) coordinate grid settings.
+    pub fn equatorial_grid(&self) -> GridLayerSettings {
+        self.settings.planetarium.equatorial_grid
+    }
+
+    /// Returns whether the equatorial coordinate grid is enabled.
+    pub fn equatorial_grid_enabled(&self) -> bool {
+        self.settings.planetarium.equatorial_grid.enabled
+    }
+
+    /// Returns the configured equatorial grid opacity in `[0.0, 1.0]`.
+    pub fn equatorial_grid_opacity(&self) -> f32 {
+        self.settings.planetarium.equatorial_grid.opacity
+    }
+
+    /// Returns the effective equatorial grid opacity (`0.0` when disabled).
+    pub fn effective_equatorial_grid_opacity(&self) -> f32 {
+        self.settings
+            .planetarium
+            .equatorial_grid
+            .effective_opacity()
+    }
+
+    /// Sets whether the equatorial coordinate grid is enabled and persists the change.
+    pub fn set_equatorial_grid_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.equatorial_grid.enabled = enabled,
+            cx,
+        );
+    }
+
+    /// Updates equatorial grid opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_equatorial_grid_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_GRID_OPACITY);
+        if (self.settings.planetarium.equatorial_grid.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.equatorial_grid.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets equatorial grid opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_equatorial_grid_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_GRID_OPACITY);
+        self.settings.planetarium.equatorial_grid.opacity = clamped;
         self.persist();
         cx.notify();
     }
@@ -464,5 +558,68 @@ mod tests {
         assert!((persisted_disabled.planetarium.hips_survey.opacity - 0.35).abs() < 1e-6);
         assert!(!persisted_disabled.planetarium.stars.enabled);
         assert!((persisted_disabled.planetarium.stars.opacity - 0.55).abs() < 1e-6);
+    }
+
+    #[gpui::test]
+    fn settings_model_coordinate_grids_preview_commit_and_toggle(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let store_for_init = store.clone();
+
+        cx.update(|cx| {
+            init_with_store(store_for_init, cx);
+        });
+
+        let model = cx.read(|cx| cx.global::<GlobalSettings>().0.clone());
+        model.read_with(cx, |m, _| {
+            assert!(m.altaz_grid_enabled());
+            assert_eq!(m.altaz_grid_opacity(), 1.0);
+            assert_eq!(m.effective_altaz_grid_opacity(), 1.0);
+            assert!(m.equatorial_grid_enabled());
+            assert_eq!(m.equatorial_grid_opacity(), 1.0);
+            assert_eq!(m.effective_equatorial_grid_opacity(), 1.0);
+        });
+
+        model.update(cx, |m, cx| {
+            m.preview_altaz_grid_opacity(0.4, cx);
+            m.preview_equatorial_grid_opacity(0.7, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!((m.altaz_grid_opacity() - 0.4).abs() < 1e-6);
+            assert!((m.effective_altaz_grid_opacity() - 0.4).abs() < 1e-6);
+            assert!((m.equatorial_grid_opacity() - 0.7).abs() < 1e-6);
+            assert!((m.effective_equatorial_grid_opacity() - 0.7).abs() < 1e-6);
+        });
+        assert!(
+            store
+                .load_optional::<AppSettings>()
+                .expect("load_optional succeeds")
+                .is_none()
+        );
+
+        model.update(cx, |m, cx| {
+            m.commit_altaz_grid_opacity(0.4, cx);
+            m.commit_equatorial_grid_opacity(0.7, cx);
+        });
+        let persisted: AppSettings = store.load().expect("committed grid load");
+        assert!((persisted.planetarium.altaz_grid.opacity - 0.4).abs() < 1e-6);
+        assert!((persisted.planetarium.equatorial_grid.opacity - 0.7).abs() < 1e-6);
+
+        model.update(cx, |m, cx| {
+            m.set_altaz_grid_enabled(false, cx);
+            m.set_equatorial_grid_enabled(false, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(!m.altaz_grid_enabled());
+            assert!((m.altaz_grid_opacity() - 0.4).abs() < 1e-6);
+            assert_eq!(m.effective_altaz_grid_opacity(), 0.0);
+            assert!(!m.equatorial_grid_enabled());
+            assert!((m.equatorial_grid_opacity() - 0.7).abs() < 1e-6);
+            assert_eq!(m.effective_equatorial_grid_opacity(), 0.0);
+        });
+        let persisted_disabled: AppSettings = store.load().expect("disabled grid load");
+        assert!(!persisted_disabled.planetarium.altaz_grid.enabled);
+        assert!((persisted_disabled.planetarium.altaz_grid.opacity - 0.4).abs() < 1e-6);
+        assert!(!persisted_disabled.planetarium.equatorial_grid.enabled);
+        assert!((persisted_disabled.planetarium.equatorial_grid.opacity - 0.7).abs() < 1e-6);
     }
 }

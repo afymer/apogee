@@ -23,6 +23,8 @@ pub enum ViewportCommand {
     SetHipsSurvey(hips::HipsSurvey),
     SetHipsSurveyOpacity(f32),
     SetStarOpacity(f32),
+    SetAltAzGridOpacity(f32),
+    SetEquatorialGridOpacity(f32),
     SetObserver(ObserverUpdate),
     SetAtmosphereStrength(f32),
     SetGroundOpacity(f32),

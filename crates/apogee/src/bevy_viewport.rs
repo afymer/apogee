@@ -7,9 +7,9 @@ use celestial::coords::geodetic::GeodeticPosition;
 use components::{Slider, SliderEvent};
 use futures::StreamExt;
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, Window, div, prelude::*, px, rgb, svg,
+    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, Window, div, prelude::*, px, rgb, svg,
 };
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
 use planetarium::{
@@ -72,16 +72,42 @@ const ICON_LAYER_STARS: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24
   <circle cx="6" cy="17.5" r="0.95" fill="black"/>
 </svg>"##;
 
+const ICON_GRID_ALTAZ: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M5 8.5H19M4 15.5H20" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
+  <path d="M12 3.5V20.5" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
+  <path d="M9.5 4.2Q6.2 12 9.5 19.8M14.5 4.2Q17.8 12 14.5 19.8" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
+</svg>"##;
+
+const ICON_GRID_EQUATORIAL: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M16 4.5L8 19.5" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
+  <path d="M7.3 5.5L20 12.3M4 11.7L16.7 18.5" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
+  <path d="M12.3 3.3Q6.9 9.3 5 17.1M19 6.9Q17.1 14.7 11.7 20.7" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
+</svg>"##;
+
+#[derive(Clone, Copy)]
+struct LayerPillStyle {
+    pill_bg: Hsla,
+    pill_border: Hsla,
+    active_bg: Hsla,
+    hover_bg: Hsla,
+    active_icon: Hsla,
+    disabled_icon: Hsla,
+    popover_ring: Hsla,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QuickLayer {
     Atmosphere,
     Ground,
     HipsSurvey,
     Stars,
+    AltAzGrid,
+    EquatorialGrid,
 }
 
 impl QuickLayer {
-    const ALL: [Self; 4] = [Self::Atmosphere, Self::Ground, Self::HipsSurvey, Self::Stars];
+    const SKY_LAYERS: [Self; 4] = [Self::Atmosphere, Self::Ground, Self::HipsSurvey, Self::Stars];
+    const GRID_LAYERS: [Self; 2] = [Self::AltAzGrid, Self::EquatorialGrid];
 
     fn id(self) -> &'static str {
         match self {
@@ -89,6 +115,8 @@ impl QuickLayer {
             Self::Ground => "quick_layer_ground",
             Self::HipsSurvey => "quick_layer_hips",
             Self::Stars => "quick_layer_stars",
+            Self::AltAzGrid => "quick_layer_altaz_grid",
+            Self::EquatorialGrid => "quick_layer_eq_grid",
         }
     }
 
@@ -98,6 +126,8 @@ impl QuickLayer {
             Self::Ground => "Ground Floor",
             Self::HipsSurvey => "HiPS Survey",
             Self::Stars => "Stars",
+            Self::AltAzGrid => "Alt/Az Grid",
+            Self::EquatorialGrid => "Equatorial Grid",
         }
     }
 
@@ -107,6 +137,16 @@ impl QuickLayer {
             Self::Ground => ICON_LAYER_GROUND,
             Self::HipsSurvey => ICON_LAYER_HIPS,
             Self::Stars => ICON_LAYER_STARS,
+            Self::AltAzGrid => ICON_GRID_ALTAZ,
+            Self::EquatorialGrid => ICON_GRID_EQUATORIAL,
+        }
+    }
+
+    fn active_icon_color(self, default: Hsla) -> Hsla {
+        match self {
+            Self::AltAzGrid => rgb(0x66b5f5).into(),
+            Self::EquatorialGrid => rgb(0xeb9b56).into(),
+            Self::Atmosphere | Self::Ground | Self::HipsSurvey | Self::Stars => default,
         }
     }
 
@@ -116,6 +156,8 @@ impl QuickLayer {
             Self::Ground => model.ground_enabled(),
             Self::HipsSurvey => model.hips_survey_enabled(),
             Self::Stars => model.stars_enabled(),
+            Self::AltAzGrid => model.altaz_grid_enabled(),
+            Self::EquatorialGrid => model.equatorial_grid_enabled(),
         }
     }
 
@@ -125,6 +167,8 @@ impl QuickLayer {
             Self::Ground => model.ground_opacity(),
             Self::HipsSurvey => model.hips_survey_opacity(),
             Self::Stars => model.stars_opacity(),
+            Self::AltAzGrid => model.altaz_grid_opacity(),
+            Self::EquatorialGrid => model.equatorial_grid_opacity(),
         }
     }
 
@@ -138,6 +182,8 @@ impl QuickLayer {
             Self::Ground => model.set_ground_enabled(enabled, cx),
             Self::HipsSurvey => model.set_hips_survey_enabled(enabled, cx),
             Self::Stars => model.set_stars_enabled(enabled, cx),
+            Self::AltAzGrid => model.set_altaz_grid_enabled(enabled, cx),
+            Self::EquatorialGrid => model.set_equatorial_grid_enabled(enabled, cx),
         }
     }
 
@@ -161,6 +207,8 @@ impl QuickLayer {
             Self::Ground => model.preview_ground_opacity(value, cx),
             Self::HipsSurvey => model.preview_hips_survey_opacity(value, cx),
             Self::Stars => model.preview_stars_opacity(value, cx),
+            Self::AltAzGrid => model.preview_altaz_grid_opacity(value, cx),
+            Self::EquatorialGrid => model.preview_equatorial_grid_opacity(value, cx),
         }
     }
 
@@ -182,6 +230,8 @@ impl QuickLayer {
             Self::Ground => model.commit_ground_opacity(value, cx),
             Self::HipsSurvey => model.commit_hips_survey_opacity(value, cx),
             Self::Stars => model.commit_stars_opacity(value, cx),
+            Self::AltAzGrid => model.commit_altaz_grid_opacity(value, cx),
+            Self::EquatorialGrid => model.commit_equatorial_grid_opacity(value, cx),
         }
     }
 }
@@ -219,6 +269,8 @@ pub struct PlanetariumPanel {
     last_synced_hips_survey_enabled: Option<bool>,
     last_synced_hips_survey_opacity: Option<f32>,
     last_synced_stars_opacity: Option<f32>,
+    last_synced_altaz_grid_opacity: Option<f32>,
+    last_synced_equatorial_grid_opacity: Option<f32>,
 }
 
 fn observer_spec(model: &ObserverModel) -> (GeodeticPosition, ObserverClockSpec) {
@@ -278,6 +330,8 @@ impl PlanetariumPanel {
                 initial_hips_survey_enabled,
                 initial_hips_survey_opacity,
                 initial_stars_opacity,
+                initial_altaz_grid_opacity,
+                initial_equatorial_grid_opacity,
             ) = if let Some(entity) = settings_entity.as_ref() {
                 let model = entity.read(cx);
                 let show_grid = model.show_hips_grid();
@@ -286,12 +340,16 @@ impl PlanetariumPanel {
                 let hips_enabled = model.hips_survey_enabled();
                 let hips_opacity = model.hips_survey_opacity();
                 let stars = model.effective_stars_opacity();
+                let altaz_grid = model.effective_altaz_grid_opacity();
+                let eq_grid = model.effective_equatorial_grid_opacity();
                 bridge.set_hips_grid_visible(show_grid);
                 bridge.set_atmosphere_strength(atmo);
                 bridge.set_ground_opacity(ground);
                 bridge.set_hips_survey_visible(hips_enabled);
                 bridge.set_hips_survey_opacity(hips_opacity);
                 bridge.set_star_opacity(stars);
+                bridge.set_altaz_grid_opacity(altaz_grid);
+                bridge.set_equatorial_grid_opacity(eq_grid);
                 (
                     Some(show_grid),
                     Some(atmo),
@@ -299,9 +357,11 @@ impl PlanetariumPanel {
                     Some(hips_enabled),
                     Some(hips_opacity),
                     Some(stars),
+                    Some(altaz_grid),
+                    Some(eq_grid),
                 )
             } else {
-                (None, None, None, None, None, None)
+                (None, None, None, None, None, None, None, None)
             };
 
             let opacity_slider = cx.new(|_cx| Slider::new(1.0).default_value(1.0));
@@ -377,6 +437,22 @@ impl PlanetariumPanel {
                         this.last_synced_stars_opacity = Some(next_stars);
                         this.bridge.set_star_opacity(next_stars);
                     }
+                    let next_altaz_grid = model_ref.effective_altaz_grid_opacity();
+                    if this
+                        .last_synced_altaz_grid_opacity
+                        .map_or(true, |prev| (prev - next_altaz_grid).abs() > 1e-5)
+                    {
+                        this.last_synced_altaz_grid_opacity = Some(next_altaz_grid);
+                        this.bridge.set_altaz_grid_opacity(next_altaz_grid);
+                    }
+                    let next_eq_grid = model_ref.effective_equatorial_grid_opacity();
+                    if this
+                        .last_synced_equatorial_grid_opacity
+                        .map_or(true, |prev| (prev - next_eq_grid).abs() > 1e-5)
+                    {
+                        this.last_synced_equatorial_grid_opacity = Some(next_eq_grid);
+                        this.bridge.set_equatorial_grid_opacity(next_eq_grid);
+                    }
                     if let Some(layer) = this.active_opacity_layer {
                         let stored = layer.stored_opacity(model_ref);
                         this.opacity_slider.update(cx, |slider, cx| {
@@ -439,6 +515,8 @@ impl PlanetariumPanel {
                 last_synced_hips_survey_enabled: initial_hips_survey_enabled,
                 last_synced_hips_survey_opacity: initial_hips_survey_opacity,
                 last_synced_stars_opacity: initial_stars_opacity,
+                last_synced_altaz_grid_opacity: initial_altaz_grid_opacity,
+                last_synced_equatorial_grid_opacity: initial_equatorial_grid_opacity,
             };
             panel.sync_status_bar(cx);
             panel
@@ -588,6 +666,105 @@ impl PlanetariumPanel {
         });
         cx.notify();
     }
+
+    fn render_layer_pill(
+        &self,
+        pill_id: &'static str,
+        layers: &[QuickLayer],
+        style: LayerPillStyle,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let states: Vec<(QuickLayer, bool, f32)> = {
+            let model = cx.try_global::<GlobalSettings>().map(|g| g.0.read(cx));
+            layers
+                .iter()
+                .copied()
+                .map(|layer| {
+                    (
+                        layer,
+                        model.is_none_or(|m| layer.is_visible(m)),
+                        model.map_or(1.0, |m| layer.stored_opacity(m)),
+                    )
+                })
+                .collect()
+        };
+        let active_popover = self.active_opacity_layer;
+
+        h_flex()
+            .id(pill_id)
+            .items_center()
+            .gap_0p5()
+            .p_0p5()
+            .rounded_full()
+            .bg(style.pill_bg)
+            .border_1()
+            .border_color(style.pill_border)
+            .shadow_sm()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_mouse_move(|_, _, cx| cx.stop_propagation())
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if *hovered {
+                    this.cursor_position = None;
+                    this.sync_status_bar(cx);
+                }
+            }))
+            .children(states.into_iter().map(|(layer, is_visible, stored)| {
+                let is_popover_open = active_popover == Some(layer);
+                let status_label = if is_visible {
+                    format!("{:.0}%", stored * 100.0)
+                } else {
+                    "Off".to_string()
+                };
+                let tip = format!(
+                    "{} · {} (Right-click for opacity)",
+                    layer.title(),
+                    status_label
+                );
+
+                div()
+                    .id(layer.id())
+                    .w(px(26.0))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .when(is_visible, |el| el.bg(style.active_bg))
+                    .when(!is_visible, |el| el.hover(|s| s.bg(style.hover_bg)))
+                    .when(is_popover_open, |el| {
+                        el.border_1().border_color(style.popover_ring)
+                    })
+                    .tooltip(Tooltip::text(tip))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_quick_layer(layer, cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.open_opacity_popover(layer, cx);
+                        }),
+                    )
+                    .child(
+                        svg()
+                            .data(layer.icon())
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(if is_visible {
+                                layer.active_icon_color(style.active_icon)
+                            } else {
+                                style.disabled_icon
+                            }),
+                    )
+            }))
+    }
 }
 
 impl Render for PlanetariumPanel {
@@ -620,7 +797,33 @@ impl Render for PlanetariumPanel {
         let text_color = colors.text;
         let muted_text = colors.text_muted;
 
-        let settings_model = cx.try_global::<GlobalSettings>().map(|g| g.0.read(cx));
+        let pill_style = LayerPillStyle {
+            pill_bg,
+            pill_border,
+            active_bg,
+            hover_bg,
+            active_icon,
+            disabled_icon: disabled_layer_icon,
+            popover_ring: popover_ring_border,
+        };
+
+        let active_popover_state = self.active_opacity_layer.map(|layer| {
+            let model = cx.try_global::<GlobalSettings>().map(|g| g.0.read(cx));
+            (
+                layer,
+                model.is_none_or(|m| layer.is_enabled(m)),
+                model.map_or(100.0, |m| layer.stored_opacity(m) * 100.0),
+            )
+        });
+
+        let sky_pill =
+            self.render_layer_pill("layer_quick_toggles", &QuickLayer::SKY_LAYERS, pill_style, cx);
+        let grid_pill = self.render_layer_pill(
+            "grid_quick_toggles",
+            &QuickLayer::GRID_LAYERS,
+            pill_style,
+            cx,
+        );
 
         let coord_options = [
             (
@@ -718,93 +921,8 @@ impl Render for PlanetariumPanel {
                         h_flex()
                             .items_center()
                             .gap_1p5()
-                            .child(
-                                h_flex()
-                                    .id("layer_quick_toggles")
-                                    .items_center()
-                                    .gap_0p5()
-                                    .p_0p5()
-                                    .rounded_full()
-                                    .bg(pill_bg)
-                                    .border_1()
-                                    .border_color(pill_border)
-                                    .shadow_sm()
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                    .on_mouse_move(|_, _, cx| cx.stop_propagation())
-                                    .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                                        if *hovered {
-                                            this.cursor_position = None;
-                                            this.sync_status_bar(cx);
-                                        }
-                                    }))
-                                    .children(QuickLayer::ALL.into_iter().map(|layer| {
-                                        let is_visible = settings_model
-                                            .is_none_or(|m| layer.is_visible(m));
-                                        let stored = settings_model
-                                            .map_or(1.0, |m| layer.stored_opacity(m));
-                                        let is_popover_open =
-                                            self.active_opacity_layer == Some(layer);
-                                        let status_label = if is_visible {
-                                            format!("{:.0}%", stored * 100.0)
-                                        } else {
-                                            "Off".to_string()
-                                        };
-                                        let tip = format!(
-                                            "{} · {} (Right-click for opacity)",
-                                            layer.title(),
-                                            status_label
-                                        );
-
-                                        div()
-                                            .id(layer.id())
-                                            .w(px(26.0))
-                                            .h(px(22.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .cursor_pointer()
-                                            .when(is_visible, |el| el.bg(active_bg))
-                                            .when(!is_visible, |el| {
-                                                el.hover(|s| s.bg(hover_bg))
-                                            })
-                                            .when(is_popover_open, |el| {
-                                                el.border_1().border_color(popover_ring_border)
-                                            })
-                                            .tooltip(Tooltip::text(tip))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _event, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.toggle_quick_layer(layer, cx);
-                                                }),
-                                            )
-                                            .on_mouse_down(
-                                                MouseButton::Right,
-                                                cx.listener(move |this, _event, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.open_opacity_popover(layer, cx);
-                                                }),
-                                            )
-                                            .child(
-                                                svg()
-                                                    .data(layer.icon())
-                                                    .size(px(14.0))
-                                                    .flex_none()
-                                                    .text_color(if is_visible {
-                                                        active_icon
-                                                    } else {
-                                                        disabled_layer_icon
-                                                    }),
-                                            )
-                                    })),
-                            )
+                            .child(sky_pill)
+                            .child(grid_pill)
                             .child(
                                 h_flex()
                                     .id("coord_mode_switch")
@@ -867,10 +985,7 @@ impl Render for PlanetariumPanel {
                                     )),
                             ),
                     )
-                    .when_some(self.active_opacity_layer, |el, layer| {
-                        let is_enabled = settings_model.is_none_or(|m| layer.is_enabled(m));
-                        let stored_pct = settings_model
-                            .map_or(100.0, |m| layer.stored_opacity(m) * 100.0);
+                    .when_some(active_popover_state, |el, (layer, is_enabled, stored_pct)| {
                         let value_label = if is_enabled {
                             format!("{stored_pct:.0}%")
                         } else {
@@ -918,7 +1033,7 @@ impl Render for PlanetariumPanel {
                                                         .size(px(13.0))
                                                         .flex_none()
                                                         .text_color(if is_enabled {
-                                                            text_color
+                                                            layer.active_icon_color(text_color)
                                                         } else {
                                                             muted_text
                                                         }),

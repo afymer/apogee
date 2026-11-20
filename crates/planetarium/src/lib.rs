@@ -11,6 +11,7 @@ pub mod stars;
 pub mod viewport;
 
 pub use atmosphere::AtmosphereSettings;
+pub use grids::CoordinateGridSettings;
 pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
 pub use stars::StarSettings;
@@ -193,6 +194,24 @@ impl BevyBridge {
         self.send_command(ViewportCommand::SetStarOpacity(clamped));
     }
 
+    pub fn set_altaz_grid_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetAltAzGridOpacity(clamped));
+    }
+
+    pub fn set_equatorial_grid_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetEquatorialGridOpacity(clamped));
+    }
+
     pub fn set_observer(
         &self,
         location: celestial::coords::geodetic::GeodeticPosition,
@@ -370,6 +389,7 @@ fn camera_movement_and_interpolation_system(
     dims: Res<ViewportDimensions>,
     handles: Res<CelestialHandles>,
     star_settings: Res<stars::StarSettings>,
+    coord_grid_settings: Res<grids::CoordinateGridSettings>,
     mut line_materials: Query<&mut CelestialLineMaterial>,
     mut star_materials: Query<&mut stars::CelestialStarMaterial>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -560,11 +580,14 @@ fn camera_movement_and_interpolation_system(
             mat.uniforms.transform = delta_topo;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = minor_alpha;
+            mat.uniforms.color.w = grids::ALTAZ_GRID_BASE_ALPHA * coord_grid_settings.altaz_opacity;
         }
         if let Ok(mut mat) = line_materials.get_mut(handles.eq_entity) {
             mat.uniforms.transform = delta_eq;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = minor_alpha;
+            mat.uniforms.color.w =
+                grids::EQUATORIAL_GRID_BASE_ALPHA * coord_grid_settings.equatorial_opacity;
         }
 
         if let Some(star_entity) = handles.star_entity {
@@ -587,6 +610,13 @@ fn camera_movement_and_interpolation_system(
         };
     }
 
+    if let Ok(mut mat) = line_materials.get_mut(handles.altaz_entity) {
+        mat.uniforms.color.w = grids::ALTAZ_GRID_BASE_ALPHA * coord_grid_settings.altaz_opacity;
+    }
+    if let Ok(mut mat) = line_materials.get_mut(handles.eq_entity) {
+        mat.uniforms.color.w =
+            grids::EQUATORIAL_GRID_BASE_ALPHA * coord_grid_settings.equatorial_opacity;
+    }
     if let Some(star_entity) = handles.star_entity {
         if let Ok(mut mat) = star_materials.get_mut(star_entity) {
             mat.uniforms.opacity = star_settings.opacity;
@@ -674,6 +704,32 @@ fn process_viewport_commands(
                 if let Some(mut settings) = app.world_mut().get_resource_mut::<stars::StarSettings>()
                 {
                     settings.opacity = if opacity.is_finite() {
+                        opacity.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetAltAzGridOpacity(opacity) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<grids::CoordinateGridSettings>()
+                {
+                    settings.altaz_opacity = if opacity.is_finite() {
+                        opacity.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetEquatorialGridOpacity(opacity) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<grids::CoordinateGridSettings>()
+                {
+                    settings.equatorial_opacity = if opacity.is_finite() {
                         opacity.clamp(0.0, 1.0)
                     } else {
                         1.0
@@ -835,7 +891,7 @@ impl PlanetariumRenderer {
                         uniforms: CelestialLineUniforms {
                             transform: Mat4::IDENTITY,
                             projection: initial_proj.into(),
-                            color: Vec4::new(0.2, 0.55, 0.85, 0.40),
+                            color: Vec4::new(0.2, 0.55, 0.85, grids::ALTAZ_GRID_BASE_ALPHA),
                             minor_alpha: 1.0,
                         },
                     };
@@ -844,7 +900,7 @@ impl PlanetariumRenderer {
                         uniforms: CelestialLineUniforms {
                             transform: Mat4::IDENTITY,
                             projection: initial_proj.into(),
-                            color: Vec4::new(0.85, 0.50, 0.20, 0.30),
+                            color: Vec4::new(0.85, 0.50, 0.20, grids::EQUATORIAL_GRID_BASE_ALPHA),
                             minor_alpha: 1.0,
                         },
                     };
@@ -929,6 +985,7 @@ impl PlanetariumRenderer {
                 app.init_resource::<atmosphere::AtmosphereSettings>();
                 app.init_resource::<ground::GroundSettings>();
                 app.init_resource::<stars::StarSettings>();
+                app.init_resource::<grids::CoordinateGridSettings>();
                 let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
                 app.insert_resource(tile_loader);
                 app.init_resource::<hips::HipsMeshCache>();

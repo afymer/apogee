@@ -17,6 +17,9 @@ pub const DEFAULT_HIPS_SURVEY_OPACITY: f32 = 1.0;
 /// Default normalized opacity for the catalog stars layer.
 pub const DEFAULT_STARS_OPACITY: f32 = 1.0;
 
+/// Default normalized opacity for coordinate grid overlays (Alt/Az and Equatorial).
+pub const DEFAULT_GRID_OPACITY: f32 = 1.0;
+
 fn default_schema_version() -> u32 {
     SETTINGS_SCHEMA_VERSION
 }
@@ -39,6 +42,10 @@ fn default_hips_survey_opacity() -> f32 {
 
 fn default_stars_opacity() -> f32 {
     DEFAULT_STARS_OPACITY
+}
+
+fn default_grid_opacity() -> f32 {
+    DEFAULT_GRID_OPACITY
 }
 
 fn sanitize_unit_interval(value: &mut f32, default: f32) {
@@ -187,6 +194,38 @@ impl StarsSettings {
     }
 }
 
+/// Coordinate grid overlay settings (horizontal Alt/Az and equatorial RA/Dec) in the planetarium.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GridLayerSettings {
+    /// Whether this coordinate grid is displayed.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Normalized grid opacity multiplier in `[0.0, 1.0]`.
+    #[serde(default = "default_grid_opacity")]
+    pub opacity: f32,
+}
+
+impl Default for GridLayerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            opacity: DEFAULT_GRID_OPACITY,
+        }
+    }
+}
+
+impl GridLayerSettings {
+    /// Clamps finite opacity into `[0.0, 1.0]` and resets non-finite values to the default.
+    pub fn sanitize(&mut self) {
+        sanitize_unit_interval(&mut self.opacity, DEFAULT_GRID_OPACITY);
+    }
+
+    /// Returns the effective opacity in `[0.0, 1.0]`, or `0.0` when disabled.
+    pub fn effective_opacity(&self) -> f32 {
+        effective_unit_interval(self.enabled, self.opacity, DEFAULT_GRID_OPACITY)
+    }
+}
+
 /// Planetarium viewport visual and rendering settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanetariumSettings {
@@ -202,6 +241,12 @@ pub struct PlanetariumSettings {
     /// Catalog point-star rendering settings.
     #[serde(default)]
     pub stars: StarsSettings,
+    /// Horizontal (Azimuth / Altitude) coordinate grid settings.
+    #[serde(default)]
+    pub altaz_grid: GridLayerSettings,
+    /// Equatorial (Right Ascension / Declination) coordinate grid settings.
+    #[serde(default)]
+    pub equatorial_grid: GridLayerSettings,
 }
 
 /// Debugging and viewport diagnostic settings.
@@ -247,5 +292,7 @@ impl Persistable for AppSettings {
         self.planetarium.ground.sanitize();
         self.planetarium.hips_survey.sanitize();
         self.planetarium.stars.sanitize();
+        self.planetarium.altaz_grid.sanitize();
+        self.planetarium.equatorial_grid.sanitize();
     }
 }

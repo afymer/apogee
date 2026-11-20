@@ -1,6 +1,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     mesh::MeshVertexAttribute,
+    prelude::Resource,
     render::{
         mesh::Mesh,
         render_resource::{PrimitiveTopology, VertexFormat},
@@ -9,6 +10,25 @@ use bevy::{
 use celestial::coords::{Angle, SphericalRect};
 pub use celestial::coords::{canonical_spherical_to_cartesian, topocentric_spherical_to_enu};
 use glam::Vec3;
+
+pub const ALTAZ_GRID_BASE_ALPHA: f32 = 0.40;
+pub const EQUATORIAL_GRID_BASE_ALPHA: f32 = 0.30;
+
+/// Renderer-side coordinate grid overlay opacities controlled via [`crate::ViewportCommand`].
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct CoordinateGridSettings {
+    pub altaz_opacity: f32,
+    pub equatorial_opacity: f32,
+}
+
+impl Default for CoordinateGridSettings {
+    fn default() -> Self {
+        Self {
+            altaz_opacity: 1.0,
+            equatorial_opacity: 1.0,
+        }
+    }
+}
 
 pub const ATTRIBUTE_LINE_TIER: MeshVertexAttribute = MeshVertexAttribute::new(
     "LineTier",

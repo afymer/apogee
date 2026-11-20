@@ -14,9 +14,10 @@ pub use observer::{
     parse_coordinate, parse_elevation_m, parse_utc_offset_minutes,
 };
 pub use settings::{
-    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GROUND_OPACITY,
-    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings, GroundSettings,
-    PlanetariumSettings, SETTINGS_SCHEMA_VERSION, StarsSettings, SurveySettings,
+    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
+    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings,
+    GridLayerSettings, GroundSettings, PlanetariumSettings, SETTINGS_SCHEMA_VERSION, StarsSettings,
+    SurveySettings,
 };
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
@@ -366,6 +367,14 @@ mod tests {
                     enabled: false,
                     opacity: 0.75,
                 },
+                altaz_grid: GridLayerSettings {
+                    enabled: false,
+                    opacity: 0.55,
+                },
+                equatorial_grid: GridLayerSettings {
+                    enabled: true,
+                    opacity: 0.85,
+                },
             },
             debug: DebugSettings {
                 show_hips_grid: true,
@@ -407,12 +416,19 @@ mod tests {
         );
         assert!(legacy.planetarium.stars.enabled);
         assert_eq!(legacy.planetarium.stars.opacity, DEFAULT_STARS_OPACITY);
+        assert!(legacy.planetarium.altaz_grid.enabled);
+        assert_eq!(legacy.planetarium.altaz_grid.opacity, DEFAULT_GRID_OPACITY);
+        assert!(legacy.planetarium.equatorial_grid.enabled);
+        assert_eq!(
+            legacy.planetarium.equatorial_grid.opacity,
+            DEFAULT_GRID_OPACITY
+        );
 
         // Out-of-bounds strengths and opacities are clamped on load.
         backend
             .write_raw(
                 AppSettings::DOCUMENT_KEY,
-                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":2.5},"ground":{"enabled":true,"opacity":1.8},"hips_survey":{"enabled":true,"opacity":3.0},"stars":{"enabled":true,"opacity":1.4}}}"#,
+                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":2.5},"ground":{"enabled":true,"opacity":1.8},"hips_survey":{"enabled":true,"opacity":3.0},"stars":{"enabled":true,"opacity":1.4},"altaz_grid":{"enabled":true,"opacity":4.0},"equatorial_grid":{"enabled":true,"opacity":2.1}}}"#,
             )
             .expect("raw write succeeds");
         let clamped_hi: AppSettings = store.load().expect("high values load");
@@ -420,11 +436,13 @@ mod tests {
         assert_eq!(clamped_hi.planetarium.ground.opacity, 1.0);
         assert_eq!(clamped_hi.planetarium.hips_survey.opacity, 1.0);
         assert_eq!(clamped_hi.planetarium.stars.opacity, 1.0);
+        assert_eq!(clamped_hi.planetarium.altaz_grid.opacity, 1.0);
+        assert_eq!(clamped_hi.planetarium.equatorial_grid.opacity, 1.0);
 
         backend
             .write_raw(
                 AppSettings::DOCUMENT_KEY,
-                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":-0.4},"ground":{"enabled":true,"opacity":-0.2},"hips_survey":{"enabled":true,"opacity":-0.5},"stars":{"enabled":true,"opacity":-1.0}}}"#,
+                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":-0.4},"ground":{"enabled":true,"opacity":-0.2},"hips_survey":{"enabled":true,"opacity":-0.5},"stars":{"enabled":true,"opacity":-1.0},"altaz_grid":{"enabled":true,"opacity":-0.3},"equatorial_grid":{"enabled":true,"opacity":-2.0}}}"#,
             )
             .expect("raw write succeeds");
         let clamped_lo: AppSettings = store.load().expect("negative values load");
@@ -432,6 +450,8 @@ mod tests {
         assert_eq!(clamped_lo.planetarium.ground.opacity, 0.0);
         assert_eq!(clamped_lo.planetarium.hips_survey.opacity, 0.0);
         assert_eq!(clamped_lo.planetarium.stars.opacity, 0.0);
+        assert_eq!(clamped_lo.planetarium.altaz_grid.opacity, 0.0);
+        assert_eq!(clamped_lo.planetarium.equatorial_grid.opacity, 0.0);
 
         let mut non_finite = AtmosphereSettings {
             enabled: true,
@@ -484,6 +504,19 @@ mod tests {
             opacity: 0.4,
         };
         assert_eq!(disabled_stars.effective_opacity(), 0.0);
+
+        let mut non_finite_grid = GridLayerSettings {
+            enabled: true,
+            opacity: f32::NAN,
+        };
+        non_finite_grid.sanitize();
+        assert_eq!(non_finite_grid.opacity, DEFAULT_GRID_OPACITY);
+
+        let disabled_grid = GridLayerSettings {
+            enabled: false,
+            opacity: 0.7,
+        };
+        assert_eq!(disabled_grid.effective_opacity(), 0.0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

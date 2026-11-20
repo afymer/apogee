@@ -103,6 +103,9 @@ impl ExtractComponent for CelestialLineMaterial {
     fn extract_component(
         (material, mesh): QueryItem<'_, '_, Self::QueryData>,
     ) -> Option<Self::Out> {
+        if material.uniforms.color.w <= 1e-4 {
+            return None;
+        }
         Some((material.uniforms, CelestialLineDraw { mesh: mesh.id() }))
     }
 }
@@ -718,5 +721,35 @@ fn draw_celestial(
                 pass.draw(0..*vertex_count, item.instances.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_skips_line_material_when_alpha_is_zero() {
+        let mut mat = CelestialLineMaterial {
+            uniforms: CelestialLineUniforms {
+                transform: Mat4::IDENTITY,
+                projection: CelestialProjectionUniforms {
+                    fov_y: 1.0,
+                    aspect_ratio: 1.0,
+                    blend_factor: 0.0,
+                    scale_factor: 1.0,
+                },
+                color: Vec4::new(0.2, 0.55, 0.85, 0.0),
+                minor_alpha: 1.0,
+            },
+        };
+        let mesh = Mesh3d(Handle::default());
+        assert!(CelestialLineMaterial::extract_component((&mat, &mesh)).is_none());
+
+        mat.uniforms.color.w = 1e-4;
+        assert!(CelestialLineMaterial::extract_component((&mat, &mesh)).is_none());
+
+        mat.uniforms.color.w = 0.40;
+        assert!(CelestialLineMaterial::extract_component((&mat, &mesh)).is_some());
     }
 }
