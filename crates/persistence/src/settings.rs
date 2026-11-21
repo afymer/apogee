@@ -11,6 +11,9 @@ pub const DEFAULT_ATMOSPHERE_STRENGTH: f32 = 1.0;
 /// Default normalized opacity for the below-horizon ground hemisphere mask.
 pub const DEFAULT_GROUND_OPACITY: f32 = 1.0;
 
+/// Default normalized opacity for the custom 360° horizon and background layer.
+pub const DEFAULT_HORIZON_OPACITY: f32 = 1.0;
+
 /// Default normalized opacity for the HiPS sky survey layer.
 pub const DEFAULT_HIPS_SURVEY_OPACITY: f32 = 1.0;
 
@@ -34,6 +37,10 @@ fn default_atmosphere_strength() -> f32 {
 
 fn default_ground_opacity() -> f32 {
     DEFAULT_GROUND_OPACITY
+}
+
+fn default_horizon_opacity() -> f32 {
+    DEFAULT_HORIZON_OPACITY
 }
 
 fn default_hips_survey_opacity() -> f32 {
@@ -127,6 +134,42 @@ impl GroundSettings {
     /// Returns the effective opacity in `[0.0, 1.0]`, or `0.0` when disabled.
     pub fn effective_opacity(&self) -> f32 {
         effective_unit_interval(self.enabled, self.opacity, DEFAULT_GROUND_OPACITY)
+    }
+}
+
+/// Custom 360° horizon line & panoramic background settings in the planetarium.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HorizonLayerSettings {
+    /// Whether the custom horizon & background panorama layer is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Normalized custom horizon layer opacity in `[0.0, 1.0]`.
+    #[serde(default = "default_horizon_opacity")]
+    pub opacity: f32,
+    /// Whether to draw the extracted horizon contour line over a 360° panoramic image.
+    #[serde(default)]
+    pub show_line: bool,
+}
+
+impl Default for HorizonLayerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            opacity: DEFAULT_HORIZON_OPACITY,
+            show_line: false,
+        }
+    }
+}
+
+impl HorizonLayerSettings {
+    /// Clamps finite opacity into `[0.0, 1.0]` and resets non-finite values to the default.
+    pub fn sanitize(&mut self) {
+        sanitize_unit_interval(&mut self.opacity, DEFAULT_HORIZON_OPACITY);
+    }
+
+    /// Returns the effective opacity in `[0.0, 1.0]`, or `0.0` when disabled.
+    pub fn effective_opacity(&self) -> f32 {
+        effective_unit_interval(self.enabled, self.opacity, DEFAULT_HORIZON_OPACITY)
     }
 }
 
@@ -235,6 +278,9 @@ pub struct PlanetariumSettings {
     /// Below-horizon ground semi-sphere mask settings.
     #[serde(default)]
     pub ground: GroundSettings,
+    /// Custom 360° horizon & background panorama layer settings.
+    #[serde(default)]
+    pub horizon: HorizonLayerSettings,
     /// HiPS background survey imagery settings.
     #[serde(default)]
     pub hips_survey: SurveySettings,
@@ -290,6 +336,7 @@ impl Persistable for AppSettings {
         self.schema_version = SETTINGS_SCHEMA_VERSION;
         self.planetarium.atmosphere.sanitize();
         self.planetarium.ground.sanitize();
+        self.planetarium.horizon.sanitize();
         self.planetarium.hips_survey.sanitize();
         self.planetarium.stars.sanitize();
         self.planetarium.altaz_grid.sanitize();

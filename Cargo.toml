@@ -19,6 +19,7 @@ members = [
     "crates/persistence",
     "crates/observer",
     "crates/settings",
+    "crates/horizon",
 ]
 default-members = ["crates/apogee"]
 # exclude = ["vendor/zed"]
@@ -49,7 +50,7 @@ zstd = "0.13"
 indicatif = "0.17"
 cdshealpix = "0.9.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 gpui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
 gpui_platform = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing", features = ["font-kit", "wayland", "x11", "wgpu"] }
 ui = { git = "https://github.com/afymer/zed.git", branch = "wgpu-surface-sharing" }
@@ -81,6 +82,7 @@ raw_viewer.path = "crates/raw_viewer"
 persistence.path = "crates/persistence"
 observer.path = "crates/observer"
 settings.path = "crates/settings"
+horizon.path = "crates/horizon"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

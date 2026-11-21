@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use celestial::coords::geodetic::GeodeticPosition;
+use celestial::{HorizonProfile, coords::geodetic::GeodeticPosition};
 use components::{Slider, SliderEvent};
 use futures::StreamExt;
 use gpui::{
@@ -12,10 +12,11 @@ use gpui::{
     Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
     Rgba, ScrollDelta, ScrollWheelEvent, Task, Window, div, prelude::*, px, rgb, svg,
 };
+use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
 use planetarium::{
-    BevyBridge, ObserverClockSpec, PickedStar, PlanetariumRenderer, PlanetariumViewInfo,
-    StarRenderParams, StarSpatialIndex, ViewMode,
+    BevyBridge, HorizonImageData, HorizonLayerData, ObserverClockSpec, PickedStar,
+    PlanetariumRenderer, PlanetariumViewInfo, StarRenderParams, StarSpatialIndex, ViewMode,
 };
 use settings::{GlobalSettings, SettingsModel};
 use status_bar::{
@@ -64,6 +65,12 @@ const ICON_LAYER_GROUND: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 2
   <path d="M12 10.5V18.5" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
 </svg>"##;
 
+const ICON_LAYER_HORIZON: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M2.5 17.5L7.5 10.5L11.8 15L16.2 8.5L21.5 17.5" stroke="black" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.5 19.5H21.5" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
+  <circle cx="8" cy="6.2" r="1.2" fill="black"/>
+</svg>"##;
+
 const ICON_LAYER_HIPS: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
   <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" stroke="black" stroke-width="1.5"/>
   <circle cx="12" cy="12" r="1.4" fill="black"/>
@@ -106,6 +113,7 @@ struct LayerPillStyle {
 enum QuickLayer {
     Atmosphere,
     Ground,
+    Horizon,
     HipsSurvey,
     Stars,
     AltAzGrid,
@@ -113,13 +121,20 @@ enum QuickLayer {
 }
 
 impl QuickLayer {
-    const SKY_LAYERS: [Self; 4] = [Self::Atmosphere, Self::Ground, Self::HipsSurvey, Self::Stars];
+    const SKY_LAYERS: [Self; 5] = [
+        Self::Atmosphere,
+        Self::Ground,
+        Self::Horizon,
+        Self::HipsSurvey,
+        Self::Stars,
+    ];
     const GRID_LAYERS: [Self; 2] = [Self::AltAzGrid, Self::EquatorialGrid];
 
     fn id(self) -> &'static str {
         match self {
             Self::Atmosphere => "quick_layer_atmosphere",
             Self::Ground => "quick_layer_ground",
+            Self::Horizon => "quick_layer_horizon",
             Self::HipsSurvey => "quick_layer_hips",
             Self::Stars => "quick_layer_stars",
             Self::AltAzGrid => "quick_layer_altaz_grid",
@@ -131,6 +146,7 @@ impl QuickLayer {
         match self {
             Self::Atmosphere => "Sky Atmosphere",
             Self::Ground => "Ground Floor",
+            Self::Horizon => "Custom Horizon",
             Self::HipsSurvey => "HiPS Survey",
             Self::Stars => "Stars",
             Self::AltAzGrid => "Alt/Az Grid",
@@ -142,6 +158,7 @@ impl QuickLayer {
         match self {
             Self::Atmosphere => ICON_LAYER_ATMOSPHERE,
             Self::Ground => ICON_LAYER_GROUND,
+            Self::Horizon => ICON_LAYER_HORIZON,
             Self::HipsSurvey => ICON_LAYER_HIPS,
             Self::Stars => ICON_LAYER_STARS,
             Self::AltAzGrid => ICON_GRID_ALTAZ,
@@ -153,7 +170,9 @@ impl QuickLayer {
         match self {
             Self::AltAzGrid => rgb(0x66b5f5).into(),
             Self::EquatorialGrid => rgb(0xeb9b56).into(),
-            Self::Atmosphere | Self::Ground | Self::HipsSurvey | Self::Stars => default,
+            Self::Atmosphere | Self::Ground | Self::Horizon | Self::HipsSurvey | Self::Stars => {
+                default
+            }
         }
     }
 
@@ -161,6 +180,7 @@ impl QuickLayer {
         match self {
             Self::Atmosphere => model.atmosphere_enabled(),
             Self::Ground => model.ground_enabled(),
+            Self::Horizon => model.horizon_enabled(),
             Self::HipsSurvey => model.hips_survey_enabled(),
             Self::Stars => model.stars_enabled(),
             Self::AltAzGrid => model.altaz_grid_enabled(),
@@ -172,6 +192,7 @@ impl QuickLayer {
         match self {
             Self::Atmosphere => model.atmosphere_strength(),
             Self::Ground => model.ground_opacity(),
+            Self::Horizon => model.horizon_opacity(),
             Self::HipsSurvey => model.hips_survey_opacity(),
             Self::Stars => model.stars_opacity(),
             Self::AltAzGrid => model.altaz_grid_opacity(),
@@ -187,6 +208,7 @@ impl QuickLayer {
         match self {
             Self::Atmosphere => model.set_atmosphere_enabled(enabled, cx),
             Self::Ground => model.set_ground_enabled(enabled, cx),
+            Self::Horizon => model.set_horizon_enabled(enabled, cx),
             Self::HipsSurvey => model.set_hips_survey_enabled(enabled, cx),
             Self::Stars => model.set_stars_enabled(enabled, cx),
             Self::AltAzGrid => model.set_altaz_grid_enabled(enabled, cx),
@@ -212,6 +234,7 @@ impl QuickLayer {
         match self {
             Self::Atmosphere => model.preview_atmosphere_strength(value, cx),
             Self::Ground => model.preview_ground_opacity(value, cx),
+            Self::Horizon => model.preview_horizon_opacity(value, cx),
             Self::HipsSurvey => model.preview_hips_survey_opacity(value, cx),
             Self::Stars => model.preview_stars_opacity(value, cx),
             Self::AltAzGrid => model.preview_altaz_grid_opacity(value, cx),
@@ -235,6 +258,7 @@ impl QuickLayer {
         match self {
             Self::Atmosphere => model.commit_atmosphere_strength(value, cx),
             Self::Ground => model.commit_ground_opacity(value, cx),
+            Self::Horizon => model.commit_horizon_opacity(value, cx),
             Self::HipsSurvey => model.commit_hips_survey_opacity(value, cx),
             Self::Stars => model.commit_stars_opacity(value, cx),
             Self::AltAzGrid => model.commit_altaz_grid_opacity(value, cx),
@@ -286,6 +310,12 @@ pub struct PlanetariumPanel {
     last_synced_stars_opacity: Option<f32>,
     last_synced_altaz_grid_opacity: Option<f32>,
     last_synced_equatorial_grid_opacity: Option<f32>,
+    last_synced_horizon_opacity: Option<f32>,
+    last_synced_horizon_show_line: Option<bool>,
+    last_synced_horizon_key: Option<(String, u64)>,
+    last_requested_image_tag: Option<(String, u64)>,
+    active_horizon_profile: Option<HorizonProfile>,
+    horizon_image_load_gen: u64,
 }
 
 fn observer_spec(model: &ObserverModel) -> (GeodeticPosition, ObserverClockSpec) {
@@ -333,6 +363,16 @@ impl PlanetariumPanel {
                         this.last_synced_observer = Some(next);
                         this.bridge.set_observer(next.0, next.1);
                     }
+                    this.sync_horizon_to_bridge(cx);
+                })
+                .detach();
+            }
+
+            let horizons_entity = cx.try_global::<GlobalHorizons>().map(|g| g.0.clone());
+            if let Some(entity) = horizons_entity {
+                cx.observe(&entity, |this: &mut Self, _model, cx| {
+                    this.sync_horizon_to_bridge(cx);
+                    cx.notify();
                 })
                 .detach();
             }
@@ -342,6 +382,8 @@ impl PlanetariumPanel {
                 initial_hips_grid,
                 initial_atmosphere_strength,
                 initial_ground_opacity,
+                initial_horizon_opacity,
+                initial_horizon_show_line,
                 initial_hips_survey_enabled,
                 initial_hips_survey_opacity,
                 initial_stars_opacity,
@@ -352,6 +394,8 @@ impl PlanetariumPanel {
                 let show_grid = model.show_hips_grid();
                 let atmo = model.effective_atmosphere_strength();
                 let ground = model.effective_ground_opacity();
+                let horizon_opacity = model.effective_horizon_opacity();
+                let horizon_show_line = model.horizon_show_line();
                 let hips_enabled = model.hips_survey_enabled();
                 let hips_opacity = model.hips_survey_opacity();
                 let stars = model.effective_stars_opacity();
@@ -360,6 +404,8 @@ impl PlanetariumPanel {
                 bridge.set_hips_grid_visible(show_grid);
                 bridge.set_atmosphere_strength(atmo);
                 bridge.set_ground_opacity(ground);
+                bridge.set_horizon_opacity(horizon_opacity);
+                bridge.set_horizon_line_visible(horizon_show_line);
                 bridge.set_hips_survey_visible(hips_enabled);
                 bridge.set_hips_survey_opacity(hips_opacity);
                 bridge.set_star_opacity(stars);
@@ -369,6 +415,8 @@ impl PlanetariumPanel {
                     Some(show_grid),
                     Some(atmo),
                     Some(ground),
+                    Some(horizon_opacity),
+                    Some(horizon_show_line),
                     Some(hips_enabled),
                     Some(hips_opacity),
                     Some(stars),
@@ -376,7 +424,7 @@ impl PlanetariumPanel {
                     Some(eq_grid),
                 )
             } else {
-                (None, None, None, None, None, None, None, None)
+                (None, None, None, None, None, None, None, None, None, None)
             };
 
             let opacity_slider = cx.new(|_cx| Slider::new(1.0).default_value(1.0));
@@ -430,6 +478,19 @@ impl PlanetariumPanel {
                     {
                         this.last_synced_ground_opacity = Some(next_ground);
                         this.bridge.set_ground_opacity(next_ground);
+                    }
+                    let next_horizon_opacity = model_ref.effective_horizon_opacity();
+                    if this
+                        .last_synced_horizon_opacity
+                        .map_or(true, |prev| (prev - next_horizon_opacity).abs() > 1e-5)
+                    {
+                        this.last_synced_horizon_opacity = Some(next_horizon_opacity);
+                        this.bridge.set_horizon_opacity(next_horizon_opacity);
+                    }
+                    let next_horizon_show_line = model_ref.horizon_show_line();
+                    if this.last_synced_horizon_show_line != Some(next_horizon_show_line) {
+                        this.last_synced_horizon_show_line = Some(next_horizon_show_line);
+                        this.bridge.set_horizon_line_visible(next_horizon_show_line);
                     }
                     let next_hips_enabled = model_ref.hips_survey_enabled();
                     if this.last_synced_hips_survey_enabled != Some(next_hips_enabled) {
@@ -523,7 +584,7 @@ impl PlanetariumPanel {
             })
             .detach();
 
-            let panel = Self {
+            let mut panel = Self {
                 bridge,
                 cached_texture: None,
                 renderer_handle: Some(renderer_handle),
@@ -552,7 +613,14 @@ impl PlanetariumPanel {
                 last_synced_stars_opacity: initial_stars_opacity,
                 last_synced_altaz_grid_opacity: initial_altaz_grid_opacity,
                 last_synced_equatorial_grid_opacity: initial_equatorial_grid_opacity,
+                last_synced_horizon_opacity: initial_horizon_opacity,
+                last_synced_horizon_show_line: initial_horizon_show_line,
+                last_synced_horizon_key: None,
+                last_requested_image_tag: None,
+                active_horizon_profile: None,
+                horizon_image_load_gen: 0,
             };
+            panel.sync_horizon_to_bridge(cx);
             panel.sync_status_bar(cx);
             panel
         })
@@ -607,16 +675,126 @@ impl PlanetariumPanel {
         });
     }
 
-    fn star_layer_flags(&self, cx: &App) -> (bool, bool) {
+    fn sync_horizon_to_bridge(&mut self, cx: &mut Context<Self>) {
+        let active = cx
+            .try_global::<GlobalObserver>()
+            .and_then(|g| g.0.read(cx).active_horizon_id().map(str::to_string))
+            .and_then(|horizon_id| {
+                let horizons = cx.try_global::<GlobalHorizons>()?.0.read(cx);
+                let bg = horizons.background(&horizon_id)?.clone();
+                Some((horizons.live_generation(), bg))
+            });
+
+        let Some((live_gen, bg)) = active else {
+            self.active_horizon_profile = None;
+            self.last_requested_image_tag = None;
+            self.horizon_image_load_gen = self.horizon_image_load_gen.wrapping_add(1);
+            if self.last_synced_horizon_key.take().is_some() {
+                self.bridge.set_horizon(None);
+                self.update_hovered_star(cx);
+            }
+            return;
+        };
+
+        let next_key = (bg.id.clone(), live_gen);
+        if self.last_synced_horizon_key.as_ref() == Some(&next_key) {
+            return;
+        }
+        self.last_synced_horizon_key = Some(next_key);
+        self.active_horizon_profile = Some(HorizonProfile::from_samples(
+            bg.samples_deg.clone(),
+            bg.azimuth_offset_deg,
+        ));
+
+        let image_tag = bg
+            .image_asset
+            .as_ref()
+            .map(|asset| (format!("{}:{asset}", bg.id), bg.image_revision));
+
+        self.bridge.set_horizon(Some(HorizonLayerData {
+            id: bg.id.clone(),
+            revision: bg.revision,
+            samples_deg: bg.samples_deg.clone(),
+            azimuth_offset_deg: bg.azimuth_offset_deg,
+            image: None,
+            image_tag: image_tag.clone(),
+        }));
+
+        if self.last_requested_image_tag != image_tag {
+            self.last_requested_image_tag.clone_from(&image_tag);
+            self.horizon_image_load_gen = self.horizon_image_load_gen.wrapping_add(1);
+            let load_gen = self.horizon_image_load_gen;
+            if let Some(expected_tag) = image_tag {
+                let bytes = cx
+                    .try_global::<GlobalHorizons>()
+                    .and_then(|g| g.0.read(cx).load_image_bytes(&bg.id));
+                if let Some(bytes) = bytes {
+                    let horizon_id = bg.id.clone();
+                    cx.spawn(async move |this, cx| {
+                        let decoded = cx
+                            .background_executor()
+                            .spawn(async move { horizon::decode_rgba_for_planetarium(&bytes) })
+                            .await;
+                        let (width, height, rgba) = match decoded {
+                            Ok(img) => img,
+                            Err(err) => {
+                                tracing::warn!("Failed to decode 360° horizon panorama: {err}");
+                                return;
+                            }
+                        };
+                        let _ = this.update(cx, |this, cx| {
+                            if this.horizon_image_load_gen != load_gen
+                                || this.last_requested_image_tag.as_ref() != Some(&expected_tag)
+                            {
+                                return;
+                            }
+                            let current_bg = cx.try_global::<GlobalHorizons>().and_then(|g| {
+                                let model = g.0.read(cx);
+                                model.background(&horizon_id).cloned()
+                            });
+                            let Some(current_bg) = current_bg else {
+                                return;
+                            };
+                            let current_tag = current_bg
+                                .image_asset
+                                .as_ref()
+                                .map(|asset| (format!("{}:{asset}", current_bg.id), current_bg.image_revision));
+                            if current_tag.as_ref() != Some(&expected_tag) {
+                                return;
+                            }
+                            this.bridge.set_horizon(Some(HorizonLayerData {
+                                id: current_bg.id,
+                                revision: current_bg.revision,
+                                samples_deg: current_bg.samples_deg,
+                                azimuth_offset_deg: current_bg.azimuth_offset_deg,
+                                image: Some(Arc::new(HorizonImageData {
+                                    width,
+                                    height,
+                                    rgba,
+                                })),
+                                image_tag: Some(expected_tag),
+                            }));
+                        });
+                    })
+                    .detach();
+                }
+            }
+        }
+
+        self.update_hovered_star(cx);
+    }
+
+    fn star_layer_flags(&self, cx: &App) -> (bool, bool, bool) {
         cx.try_global::<GlobalSettings>()
             .map(|g| {
                 let m = g.0.read(cx);
                 (
                     m.effective_stars_opacity() > 1e-4,
                     m.effective_ground_opacity() >= 0.95,
+                    m.effective_horizon_opacity() >= 0.95,
                 )
             })
-            .unwrap_or((true, true))
+            .unwrap_or((true, true, true))
     }
 
     fn pick_star_at_cursor(&mut self, cx: &App) -> Option<PickedStar> {
@@ -628,10 +806,15 @@ impl PlanetariumPanel {
             self.cursor_ndc()?,
             self.viewport_bounds.lock().ok().and_then(|g| *g)?,
         );
-        let (stars_visible, occlude_below_horizon) = self.star_layer_flags(cx);
+        let (stars_visible, occlude_ground, occlude_custom_horizon) = self.star_layer_flags(cx);
         if !stars_visible {
             return None;
         }
+        let horizon_occluder = if occlude_custom_horizon {
+            self.active_horizon_profile.as_ref()
+        } else {
+            None
+        };
         let w = f64::from(f32::from(bounds.size.width));
         let h = f64::from(f32::from(bounds.size.height));
         index.pick(
@@ -640,7 +823,8 @@ impl PlanetariumPanel {
             (w, h),
             self.last_scale_factor,
             &StarRenderParams::default(),
-            occlude_below_horizon,
+            occlude_ground,
+            horizon_occluder,
         )
     }
 
@@ -987,15 +1171,23 @@ impl Render for PlanetariumPanel {
             if bw <= 1.0 || bh <= 1.0 {
                 return None;
             }
-            let (stars_visible, occlude_below_horizon) = self.star_layer_flags(cx);
+            let (stars_visible, occlude_ground, occlude_custom_horizon) =
+                self.star_layer_flags(cx);
             if !stars_visible {
                 return None;
             }
             let dir = star.icrs_dir();
-            if occlude_below_horizon {
-                let (_, alt_deg) = self.latest_view_info.icrs_to_topocentric_deg(dir);
-                if alt_deg < 0.0 {
+            if occlude_ground || (occlude_custom_horizon && self.active_horizon_profile.is_some()) {
+                let (az_deg, alt_deg) = self.latest_view_info.icrs_to_topocentric_deg(dir);
+                if occlude_ground && alt_deg < 0.0 {
                     return None;
+                }
+                if occlude_custom_horizon {
+                    if let Some(horizon) = self.active_horizon_profile.as_ref() {
+                        if !horizon.is_visible(az_deg, alt_deg) {
+                            return None;
+                        }
+                    }
                 }
             }
             let (nx, ny) = self.latest_view_info.project_icrs_to_ndc(dir)?;

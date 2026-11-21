@@ -514,6 +514,8 @@ pub struct ObservatoryProfile {
     pub location: GeoLocation,
     #[serde(default)]
     pub timezone: TimezoneConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizon_id: Option<String>,
     #[serde(default)]
     pub source: ProfileSource,
     #[serde(default = "default_revision")]
@@ -552,6 +554,7 @@ impl Default for ObserverCatalog {
                     icon: ObservatoryIcon::Dome,
                     location: GeoLocation::default(),
                     timezone: TimezoneConfig::default(),
+                    horizon_id: None,
                     source: ProfileSource::Local,
                     revision: 1,
                     updated_at_unix_ms: 0,
@@ -562,6 +565,7 @@ impl Default for ObserverCatalog {
                     icon: ObservatoryIcon::Field,
                     location: GeoLocation::new(48.4047, 2.7016, 92.0),
                     timezone: TimezoneConfig::default(),
+                    horizon_id: None,
                     source: ProfileSource::Local,
                     revision: 1,
                     updated_at_unix_ms: 0,
@@ -589,6 +593,14 @@ impl Persistable for ObserverCatalog {
         for profile in &mut self.profiles {
             profile.location = profile.location.sanitized();
             profile.timezone = profile.timezone.sanitized();
+            if let Some(hid) = profile.horizon_id.as_mut() {
+                let trimmed_h = hid.trim();
+                if trimmed_h.is_empty() {
+                    profile.horizon_id = None;
+                } else if trimmed_h.len() != hid.len() {
+                    *hid = trimmed_h.to_string();
+                }
+            }
             let trimmed = profile.name.trim();
             if trimmed.is_empty() {
                 profile.name = "Observatory".to_string();
@@ -625,6 +637,7 @@ impl ObserverCatalog {
                     icon: ObservatoryIcon::Dome,
                     location: GeoLocation::new(45.0, lon, 115.0),
                     timezone: TimezoneConfig::default(),
+                    horizon_id: None,
                     source: ProfileSource::Local,
                     revision: 1,
                     updated_at_unix_ms: 0,
@@ -635,6 +648,7 @@ impl ObserverCatalog {
                     icon: ObservatoryIcon::Field,
                     location: GeoLocation::new(44.57, field_lon, 92.0),
                     timezone: TimezoneConfig::default(),
+                    horizon_id: None,
                     source: ProfileSource::Local,
                     revision: 1,
                     updated_at_unix_ms: 0,
@@ -730,6 +744,28 @@ impl ObserverCatalog {
         Ok(profile)
     }
 
+    /// Assigns or clears the custom horizon background linked to a profile.
+    pub fn set_horizon(
+        &mut self,
+        id: &str,
+        horizon_id: Option<String>,
+    ) -> Result<&ObservatoryProfile, PersistenceError> {
+        let Some(profile) = self.profiles.iter_mut().find(|p| p.id == id) else {
+            return Err(PersistenceError::ProfileNotFound(id.to_string()));
+        };
+        profile.horizon_id = horizon_id.and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        profile.revision = profile.revision.saturating_add(1);
+        profile.updated_at_unix_ms = now_unix_ms();
+        Ok(profile)
+    }
+
     /// Creates a new local profile, activates it, and returns a reference to it.
     pub fn create_profile(
         &mut self,
@@ -750,6 +786,7 @@ impl ObserverCatalog {
             icon,
             location: location.sanitized(),
             timezone: TimezoneConfig::default(),
+            horizon_id: None,
             source: ProfileSource::Local,
             revision: 1,
             updated_at_unix_ms: now_unix_ms(),
@@ -782,6 +819,14 @@ impl ObserverCatalog {
     pub fn upsert_remote_profile(&mut self, mut remote: ObservatoryProfile) -> MergeOutcome {
         remote.location = remote.location.sanitized();
         remote.timezone = remote.timezone.sanitized();
+        if let Some(hid) = remote.horizon_id.as_mut() {
+            let trimmed_h = hid.trim();
+            if trimmed_h.is_empty() {
+                remote.horizon_id = None;
+            } else if trimmed_h.len() != hid.len() {
+                *hid = trimmed_h.to_string();
+            }
+        }
         if remote.name.trim().is_empty() {
             remote.name = "Remote Observatory".to_string();
         } else {

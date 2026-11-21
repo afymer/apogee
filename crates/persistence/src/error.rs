@@ -15,6 +15,10 @@ pub enum PersistenceError {
     #[error("invalid persistence document key: {0:?}")]
     InvalidDocumentKey(String),
 
+    /// Asset name contains unsafe or empty characters.
+    #[error("invalid persistence asset name: {0:?}")]
+    InvalidAssetName(String),
+
     /// On-disk schema version is newer than this binary supports.
     #[error("unsupported schema version {found} (max supported {max_supported})")]
     UnsupportedSchemaVersion { found: u32, max_supported: u32 },
@@ -22,6 +26,10 @@ pub enum PersistenceError {
     /// Requested observatory profile ID does not exist.
     #[error("observatory profile {0:?} not found")]
     ProfileNotFound(String),
+
+    /// Requested horizon background ID does not exist.
+    #[error("horizon background {0:?} not found")]
+    HorizonNotFound(String),
 
     /// Cannot delete the sole remaining observatory profile.
     #[error("cannot delete the last remaining observatory profile")]

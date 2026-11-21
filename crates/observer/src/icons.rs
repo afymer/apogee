@@ -97,6 +97,13 @@ pub const ICON_ELEVATION: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 
   <path d="M18.5 8.5V4M18.5 4L16.5 6M18.5 4L20.5 6" stroke="black" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>"##;
 
+/// Custom horizon ridge silhouette micro-icon.
+pub const ICON_HORIZON: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M2.5 16.5L7.5 11.5L11 14.5L15.5 9L21.5 16.5" stroke="black" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.5 19H21.5" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="7" cy="6.5" r="1.1" fill="black"/>
+</svg>"##;
+
 /// Returns the embedded SVG bytes for a given [`ObservatoryIcon`].
 pub fn observatory_icon_svg(icon: ObservatoryIcon) -> &'static [u8] {
     match icon {
@@ -111,9 +118,5 @@ pub fn observatory_icon_svg(icon: ObservatoryIcon) -> &'static [u8] {
 
 /// Renders an embedded monochrome SVG with explicit dimensions and tint color.
 pub fn render_svg_icon(bytes: &'static [u8], size: Pixels, color: Hsla) -> impl IntoElement {
-    svg()
-        .data(bytes)
-        .size(size)
-        .flex_none()
-        .text_color(color)
+    svg().data(bytes).size(size).flex_none().text_color(color)
 }

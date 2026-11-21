@@ -98,4 +98,29 @@ impl DocumentStore {
         let bytes = serde_json::to_vec_pretty(doc)?;
         self.backend.write_raw(T::DOCUMENT_KEY, &bytes)
     }
+
+    /// Reads an auxiliary binary asset stored under `(namespace, name)`.
+    pub fn read_asset(&self, namespace: &str, name: &str) -> Result<Option<Vec<u8>>, PersistenceError> {
+        self.backend.read_asset(namespace, name)
+    }
+
+    /// Atomically persists an auxiliary binary asset under `(namespace, name)`.
+    pub fn write_asset(
+        &self,
+        namespace: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.backend.write_asset(namespace, name, bytes)
+    }
+
+    /// Deletes an auxiliary binary asset under `(namespace, name)`.
+    pub fn delete_asset(&self, namespace: &str, name: &str) -> Result<(), PersistenceError> {
+        self.backend.delete_asset(namespace, name)
+    }
+
+    /// Returns the filesystem path for `(namespace, name)` if backed by local files.
+    pub fn asset_path(&self, namespace: &str, name: &str) -> Option<PathBuf> {
+        self.backend.asset_path(namespace, name)
+    }
 }

@@ -1,16 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use celestial::{
-    DailyTargetVisibility, StarMetadata,
+    DailyTargetVisibility, HorizonProfile, StarMetadata,
+    compute_target_visibility_with_horizon,
     coords::{Angle, canonical_spherical_to_cartesian},
-    compute_target_visibility, sample_day_equatorial_altitude,
+    sample_day_equatorial_track,
 };
 use glam::DVec3;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Pixels, Point, Render, Rgba, Window, div, fill, hsla, point, prelude::*, px, rgb,
+    Pixels, Point, Render, Rgba, Window, div, fill, hsla, point, prelude::*, px, rgb, svg,
 };
+use horizon::GlobalHorizons;
 use observer::{
     GlobalObserver, ObserverModel, paint_circle, paint_twilight_backdrop, sample_day_profile,
 };
@@ -30,6 +32,11 @@ const GRAPH_HEIGHT_PX: f32 = 156.0;
 const GRAPH_PAD_Y: f32 = 8.0;
 const GRAPH_MIN_ALT_DEG: f64 = -25.0;
 const GRAPH_MAX_ALT_DEG: f64 = 90.0;
+
+const ICON_HORIZON_OVERLAY: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M2.5 17.5L7.5 10.5L11.8 15L16.2 8.5L21.5 17.5" stroke="black" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.5 19.5H21.5" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
+</svg>"##;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectedStar {
@@ -147,13 +154,14 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct ProfileCacheKey {
     catalog_index: u32,
     lat_bits: u64,
     lon_bits: u64,
     elev_bits: u64,
     local_midnight_secs: i64,
+    horizon_key: Option<(String, u64)>,
 }
 
 pub struct StarDetailsPanel {
@@ -162,7 +170,11 @@ pub struct StarDetailsPanel {
     cache_key: Option<ProfileCacheKey>,
     cached_solar_profile: Vec<f64>,
     cached_star_profile: Vec<f64>,
+    cached_horizon_profile: Vec<f64>,
     cached_visibility: Option<DailyTargetVisibility>,
+    cached_has_custom_horizon: bool,
+    cached_active_horizon: Option<HorizonProfile>,
+    show_horizon_overlay: bool,
     graph_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     is_scrubbing: bool,
 }
@@ -205,13 +217,25 @@ impl StarDetailsPanel {
                 .detach();
             }
 
+            if let Some(horizons_entity) = cx.try_global::<GlobalHorizons>().map(|g| g.0.clone()) {
+                cx.observe(&horizons_entity, |this: &mut Self, _model, cx| {
+                    this.ensure_profiles_fresh(cx);
+                    cx.notify();
+                })
+                .detach();
+            }
+
             let mut panel = Self {
                 focus_handle: cx.focus_handle(),
                 last_activation_nonce: initial_nonce,
                 cache_key: None,
                 cached_solar_profile: Vec::new(),
                 cached_star_profile: Vec::new(),
+                cached_horizon_profile: Vec::new(),
                 cached_visibility: None,
+                cached_has_custom_horizon: false,
+                cached_active_horizon: None,
+                show_horizon_overlay: true,
                 graph_bounds: Arc::new(Mutex::new(None)),
                 is_scrubbing: false,
             };
@@ -228,13 +252,24 @@ impl StarDetailsPanel {
             self.cache_key = None;
             self.cached_solar_profile.clear();
             self.cached_star_profile.clear();
+            self.cached_horizon_profile.clear();
             self.cached_visibility = None;
+            self.cached_has_custom_horizon = false;
+            self.cached_active_horizon = None;
             return;
         };
 
         let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.read(cx)) else {
             return;
         };
+
+        let horizon_info = observer.active_horizon_id().and_then(|id| {
+            let horizons = cx.try_global::<GlobalHorizons>()?.0.read(cx);
+            let prof = horizons.profile_for(id)?;
+            Some(((id.to_string(), horizons.live_generation()), prof))
+        });
+        let horizon_key = horizon_info.as_ref().map(|(k, _)| k.clone());
+        let active_profile = horizon_info.map(|(_, p)| p);
 
         let loc = observer.geodetic_position();
         let midnight = observer.local_midnight_unix_seconds();
@@ -244,17 +279,35 @@ impl StarDetailsPanel {
             lon_bits: loc.longitude_deg().to_bits(),
             elev_bits: loc.elevation_m().to_bits(),
             local_midnight_secs: midnight.round() as i64,
+            horizon_key,
         };
 
-        if self.cache_key == Some(next_key) {
+        if self.cache_key.as_ref() == Some(&next_key) {
             return;
         }
 
         let ra = Angle::from_degrees(star.ra_deg);
         let dec = Angle::from_degrees(star.dec_deg);
         self.cached_solar_profile = observer.solar_day_profile(97);
-        self.cached_star_profile = sample_day_equatorial_altitude(loc, midnight, ra, dec, 97);
-        self.cached_visibility = Some(compute_target_visibility(loc, midnight, ra, dec));
+        let track = sample_day_equatorial_track(loc, midnight, ra, dec, 97);
+        self.cached_star_profile = track.iter().map(|(_, alt)| *alt).collect();
+        self.cached_horizon_profile = if let Some(ref prof) = active_profile {
+            track
+                .iter()
+                .map(|(az, _)| prof.altitude_at_azimuth_deg(*az))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.cached_visibility = Some(compute_target_visibility_with_horizon(
+            loc,
+            midnight,
+            ra,
+            dec,
+            active_profile.as_ref(),
+        ));
+        self.cached_has_custom_horizon = active_profile.is_some();
+        self.cached_active_horizon = active_profile;
         self.cache_key = Some(next_key);
     }
 
@@ -324,8 +377,8 @@ fn alt_to_y(alt_deg: f64, bounds: Bounds<Pixels>) -> f32 {
 
 fn paint_above_horizon_segments(
     profile: &[f64],
+    horizon_profile: &[f64],
     bounds: Bounds<Pixels>,
-    horizon_y: f32,
     stroke_width: f32,
     color: Rgba,
     window: &mut Window,
@@ -343,21 +396,26 @@ fn paint_above_horizon_segments(
     for i in 1..profile.len() {
         let a0 = profile[i - 1];
         let a1 = profile[i];
+        let h0 = horizon_profile.get(i - 1).copied().unwrap_or(0.0);
+        let h1 = horizon_profile.get(i).copied().unwrap_or(0.0);
+        let c0 = a0 - h0;
+        let c1 = a1 - h1;
         let p0 = curve_pt(i - 1);
         let p1 = curve_pt(i);
 
-        if a0 >= 0.0 && a1 >= 0.0 {
+        if c0 >= 0.0 && c1 >= 0.0 {
             let builder = path_builder.get_or_insert_with(|| {
                 let mut b = PathBuilder::stroke(px(stroke_width));
                 b.move_to(p0);
                 b
             });
             builder.line_to(p1);
-        } else if a0 < 0.0 && a1 >= 0.0 {
-            let frac = ((-a0) / (a1 - a0).max(1e-6)) as f32;
+        } else if c0 < 0.0 && c1 >= 0.0 {
+            let frac = ((-c0) / (c1 - c0).max(1e-6)).clamp(0.0, 1.0) as f32;
+            let cross_alt = a0 + (a1 - a0) * f64::from(frac);
             let cross = point(
                 px(f32::from(p0.x) + (f32::from(p1.x) - f32::from(p0.x)) * frac),
-                px(horizon_y),
+                px(alt_to_y(cross_alt, bounds)),
             );
             let builder = path_builder.get_or_insert_with(|| {
                 let mut b = PathBuilder::stroke(px(stroke_width));
@@ -365,11 +423,12 @@ fn paint_above_horizon_segments(
                 b
             });
             builder.line_to(p1);
-        } else if a0 >= 0.0 && a1 < 0.0 {
-            let frac = (a0 / (a0 - a1).max(1e-6)) as f32;
+        } else if c0 >= 0.0 && c1 < 0.0 {
+            let frac = (c0 / (c0 - c1).max(1e-6)).clamp(0.0, 1.0) as f32;
+            let cross_alt = a0 + (a1 - a0) * f64::from(frac);
             let cross = point(
                 px(f32::from(p0.x) + (f32::from(p1.x) - f32::from(p0.x)) * frac),
-                px(horizon_y),
+                px(alt_to_y(cross_alt, bounds)),
             );
             if let Some(mut builder) = path_builder.take() {
                 builder.line_to(cross);
@@ -392,6 +451,7 @@ fn paint_visibility_graph(
     hour_of_day: f64,
     solar_profile: &[f64],
     star_profile: &[f64],
+    horizon_profile: &[f64],
     visibility: Option<DailyTargetVisibility>,
     star_rgb: Rgba,
     window: &mut Window,
@@ -434,6 +494,36 @@ fn paint_visibility_graph(
         hsla(0.0, 0.0, 1.0, 0.34),
     ));
 
+    // 3b. Custom horizon obstruction silhouette & curve along the star's daily azimuth track.
+    if horizon_profile.len() >= 2 {
+        let denom_h = (horizon_profile.len() - 1) as f32;
+        let h_pt = |i: usize| -> Point<Pixels> {
+            let x = origin_x + (i as f32 / denom_h) * width;
+            let y = alt_to_y(horizon_profile[i], bounds);
+            point(px(x), px(y))
+        };
+        let bottom_y = origin_y + height;
+        let mut poly = PathBuilder::fill();
+        poly.move_to(point(px(origin_x), px(bottom_y)));
+        for i in 0..horizon_profile.len() {
+            poly.line_to(h_pt(i));
+        }
+        poly.line_to(point(px(origin_x + width), px(bottom_y)));
+        poly.close();
+        if let Ok(path) = poly.build() {
+            window.paint_path(path, rgb(0x0b1624).alpha(0.62));
+        }
+
+        let mut line = PathBuilder::stroke(px(1.5));
+        line.move_to(h_pt(0));
+        for i in 1..horizon_profile.len() {
+            line.line_to(h_pt(i));
+        }
+        if let Ok(path) = line.build() {
+            window.paint_path(path, rgb(0x22b8cf).alpha(0.85));
+        }
+    }
+
     let crisp_color = lerp_rgba(star_rgb, rgb(0xffffff), 0.25).alpha(0.96);
 
     // 4. Star elevation curve + transit peak marker.
@@ -457,16 +547,16 @@ fn paint_visibility_graph(
         // Dark backing keeps bright curve legible across bright daytime sky gradients.
         paint_above_horizon_segments(
             star_profile,
+            horizon_profile,
             bounds,
-            horizon_y,
             3.8,
             rgb(0x060a14).alpha(0.55),
             window,
         );
         paint_above_horizon_segments(
             star_profile,
+            horizon_profile,
             bounds,
-            horizon_y,
             2.2,
             crisp_color,
             window,
@@ -474,7 +564,13 @@ fn paint_visibility_graph(
     }
 
     if let Some(vis) = visibility {
-        if vis.max_altitude_deg >= 0.0 {
+        let visible_at_peak = if horizon_profile.is_empty() {
+            vis.max_altitude_deg >= 0.0
+        } else {
+            !vis.never_rises
+                && vis.max_altitude_deg >= sample_day_profile(horizon_profile, vis.transit_hour)
+        };
+        if visible_at_peak {
             let peak_x = origin_x + (vis.transit_hour / 24.0).clamp(0.0, 1.0) as f32 * width;
             let peak_y = alt_to_y(vis.max_altitude_deg, bounds);
             let peak_pt = point(px(peak_x), px(peak_y));
@@ -581,14 +677,30 @@ impl Render for StarDetailsPanel {
         let (hour_of_day, date_label, az_deg, alt_deg) =
             observer_snapshot.unwrap_or_else(|| (0.0, String::new(), 0.0, 0.0));
 
-        let alt_readout = if alt_deg >= 0.0 {
+        let local_horizon_alt = self
+            .cached_active_horizon
+            .as_ref()
+            .map(|h| h.altitude_at_azimuth_deg(az_deg));
+        let is_visible_now = local_horizon_alt.map_or(alt_deg >= 0.0, |h| alt_deg >= h);
+        let alt_readout = if is_visible_now {
             format!("{alt_deg:+.1}°")
+        } else if alt_deg >= 0.0 {
+            if let Some(h) = local_horizon_alt {
+                format!("{alt_deg:+.1}° · Obstructed ({h:+.0}°)")
+            } else {
+                format!("{alt_deg:+.1}° · Below horizon")
+            }
         } else {
             format!("{alt_deg:+.1}° · Below horizon")
         };
 
         let solar_profile = self.cached_solar_profile.clone();
         let star_profile = self.cached_star_profile.clone();
+        let horizon_profile = if self.show_horizon_overlay {
+            self.cached_horizon_profile.clone()
+        } else {
+            Vec::new()
+        };
         let visibility = self.cached_visibility;
         let bounds_store = self.graph_bounds.clone();
         let entity = cx.entity().clone();
@@ -605,6 +717,7 @@ impl Render for StarDetailsPanel {
                     hour_of_day,
                     &solar_profile,
                     &star_profile,
+                    &horizon_profile,
                     visibility,
                     star_rgb,
                     window,
@@ -748,12 +861,18 @@ impl Render for StarDetailsPanel {
                         None,
                     )
                 } else if vis.never_rises {
+                    let (below_label, never_label) =
+                        if self.cached_has_custom_horizon && vis.max_altitude_deg >= 0.0 {
+                            ("Obstructed", "Blocked")
+                        } else {
+                            ("Below", "Never rises")
+                        };
                     (
-                        "Below".to_string(),
+                        below_label.to_string(),
                         None,
                         transit_val,
                         Some(vis.transit_hour),
-                        "Never rises".to_string(),
+                        never_label.to_string(),
                         None,
                     )
                 } else {
@@ -871,13 +990,50 @@ impl Render for StarDetailsPanel {
                                             .text_size(px(10.5))
                                             .text_color(colors.text_muted)
                                             .child(date_label),
-                                    ),
+                                    )
+                                    .when(self.cached_has_custom_horizon, |row| {
+                                        let active = self.show_horizon_overlay;
+                                        row.child(
+                                            div()
+                                                .id("star_visibility_horizon_toggle")
+                                                .w(px(20.0))
+                                                .h(px(20.0))
+                                                .rounded_sm()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .when(active, |el| el.bg(rgb(0x22b8cf).alpha(0.16)))
+                                                .hover(|h| h.bg(colors.element_hover))
+                                                .tooltip(Tooltip::text(if active {
+                                                    "Hide horizon line"
+                                                } else {
+                                                    "Show horizon line"
+                                                }))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.show_horizon_overlay =
+                                                        !this.show_horizon_overlay;
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    svg()
+                                                        .data(ICON_HORIZON_OVERLAY)
+                                                        .size(px(13.0))
+                                                        .flex_none()
+                                                        .text_color(if active {
+                                                            rgb(0x22b8cf).into()
+                                                        } else {
+                                                            colors.text_muted
+                                                        }),
+                                                ),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
                                     .font_buffer(cx)
                                     .text_size(px(11.0))
-                                    .text_color(if alt_deg >= 0.0 {
+                                    .text_color(if is_visible_now {
                                         star_color
                                     } else {
                                         colors.text_muted

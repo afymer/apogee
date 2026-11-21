@@ -1,12 +1,20 @@
 pub mod backend;
 pub mod error;
+pub mod horizon;
 pub mod observer;
 pub mod settings;
 pub mod store;
 pub mod tz_offset;
 
-pub use backend::{DocumentBackend, JsonFileBackend, MemoryBackend, default_config_dir, validate_key};
+pub use backend::{
+    DocumentBackend, JsonFileBackend, MemoryBackend, default_config_dir, validate_asset_name,
+    validate_key,
+};
 pub use error::PersistenceError;
+pub use horizon::{
+    DEFAULT_HORIZON_SAMPLE_COUNT, HORIZON_ASSET_NAMESPACE, HORIZON_SCHEMA_VERSION,
+    HorizonBackground, HorizonCatalog,
+};
 pub use observer::{
     CoordinateAxis, GeoLocation, MergeOutcome, OBSERVER_SCHEMA_VERSION, ObservatoryIcon,
     ObservatoryProfile, ObserverCatalog, ProfileSource, TimezoneConfig, TimezoneMode,
@@ -15,9 +23,9 @@ pub use observer::{
 };
 pub use settings::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
-    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings,
-    GridLayerSettings, GroundSettings, PlanetariumSettings, SETTINGS_SCHEMA_VERSION, StarsSettings,
-    SurveySettings,
+    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
+    DEFAULT_STARS_OPACITY, DebugSettings, GridLayerSettings, GroundSettings, HorizonLayerSettings,
+    PlanetariumSettings, SETTINGS_SCHEMA_VERSION, StarsSettings, SurveySettings,
 };
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
@@ -180,6 +188,7 @@ mod tests {
             icon: ObservatoryIcon::Remote,
             location: GeoLocation::new(48.8, 2.3, 70.0),
             timezone: TimezoneConfig::default(),
+            horizon_id: None,
             source: ProfileSource::Remote {
                 endpoint: "ws://192.168.1.42:4000/ws".to_string(),
                 last_synced_unix_ms: Some(1_000),
@@ -359,6 +368,11 @@ mod tests {
                     enabled: false,
                     opacity: 0.65,
                 },
+                horizon: HorizonLayerSettings {
+                    enabled: false,
+                    opacity: 0.8,
+                    show_line: true,
+                },
                 hips_survey: SurveySettings {
                     enabled: false,
                     opacity: 0.35,
@@ -535,5 +549,165 @@ mod tests {
             err,
             PersistenceError::UnsupportedSchemaVersion { .. }
         ));
+    }
+
+    #[test]
+    fn binary_assets_round_trip_and_validate_names() {
+        for backend_kind in [false, true] {
+            let dir = temp_test_dir();
+            let store = if backend_kind {
+                DocumentStore::open_dir(dir.clone())
+            } else {
+                DocumentStore::in_memory()
+            };
+
+            let payload = vec![1_u8, 2, 3, 4, 250, 255];
+            store
+                .write_asset(HORIZON_ASSET_NAMESPACE, "garden.jpg", &payload)
+                .expect("write_asset succeeds");
+            assert_eq!(
+                store
+                    .read_asset(HORIZON_ASSET_NAMESPACE, "garden.jpg")
+                    .expect("read_asset succeeds"),
+                Some(payload.clone())
+            );
+            if backend_kind {
+                assert!(
+                    store
+                        .asset_path(HORIZON_ASSET_NAMESPACE, "garden.jpg")
+                        .is_some()
+                );
+            } else {
+                assert!(
+                    store
+                        .asset_path(HORIZON_ASSET_NAMESPACE, "garden.jpg")
+                        .is_none()
+                );
+            }
+
+            store
+                .delete_asset(HORIZON_ASSET_NAMESPACE, "garden.jpg")
+                .expect("delete_asset succeeds");
+            assert_eq!(
+                store
+                    .read_asset(HORIZON_ASSET_NAMESPACE, "garden.jpg")
+                    .expect("read missing succeeds"),
+                None
+            );
+            // Deleting a missing asset should succeed idempotently.
+            store
+                .delete_asset(HORIZON_ASSET_NAMESPACE, "garden.jpg")
+                .expect("delete missing succeeds");
+
+            assert!(matches!(
+                store.write_asset(HORIZON_ASSET_NAMESPACE, "../escape.jpg", b"x"),
+                Err(PersistenceError::InvalidAssetName(_))
+            ));
+            assert!(matches!(
+                store.write_asset(HORIZON_ASSET_NAMESPACE, ".hidden", b"x"),
+                Err(PersistenceError::InvalidAssetName(_))
+            ));
+
+            if backend_kind {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
+    #[test]
+    fn horizon_catalog_crud_persistence_and_observer_link() {
+        let dir = temp_test_dir();
+        let store = DocumentStore::open_dir(dir.clone());
+
+        let mut horizons = HorizonCatalog::default();
+        let bg = horizons.create_background(
+            None,
+            "Backyard Trees",
+            Some("backyard-trees.jpg".to_string()),
+            Some("pano.jpg".to_string()),
+            Some((4096, 2048)),
+            vec![12.0; 720],
+            35.0,
+        );
+        let bg_id = bg.id.clone();
+        assert_eq!(bg_id, "backyard-trees");
+        assert_eq!(bg.revision, 1);
+        assert_eq!(bg.image_revision, 1);
+
+        // Editing horizon curve bumps revision but NOT image_revision.
+        horizons
+            .commit_horizon(&bg_id, vec![15.0; 720], 42.0)
+            .expect("commit_horizon succeeds");
+        let after_commit = horizons.background(&bg_id).unwrap();
+        assert_eq!(after_commit.revision, 2);
+        assert_eq!(after_commit.image_revision, 1);
+        assert!((after_commit.azimuth_offset_deg - 42.0).abs() < 1e-9);
+
+        // Replacing image bumps both revision and image_revision.
+        let (prev_asset, after_img) = horizons
+            .replace_image(
+                &bg_id,
+                Some("backyard-trees-v2.png".to_string()),
+                Some("new.png".to_string()),
+                Some((2048, 1024)),
+                None,
+            )
+            .expect("replace_image succeeds");
+        assert_eq!(prev_asset.as_deref(), Some("backyard-trees.jpg"));
+        assert_eq!(after_img.revision, 3);
+        assert_eq!(after_img.image_revision, 2);
+
+        store.save(&horizons).expect("save horizon catalog");
+        let loaded: HorizonCatalog = store.load().expect("load horizon catalog");
+        assert_eq!(loaded, horizons);
+
+        // ObserverCatalog links and sanitizes horizon_id.
+        let mut observers = ObserverCatalog::default();
+        assert_eq!(observers.active_profile().horizon_id, None);
+        observers
+            .set_horizon("backyard", Some(bg_id.clone()))
+            .expect("set_horizon succeeds");
+        assert_eq!(
+            observers.active_profile().horizon_id.as_deref(),
+            Some(bg_id.as_str())
+        );
+        observers
+            .set_horizon("backyard", Some("   ".to_string()))
+            .expect("clear empty horizon_id succeeds");
+        assert_eq!(observers.active_profile().horizon_id, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_horizon_layer_backcompat_and_sanitization() {
+        let store = DocumentStore::in_memory();
+        let defaults = store.load_or_default::<AppSettings>();
+        assert!(defaults.planetarium.horizon.enabled);
+        assert_eq!(defaults.planetarium.horizon.opacity, DEFAULT_HORIZON_OPACITY);
+        assert!(!defaults.planetarium.horizon.show_line);
+
+        let legacy: HorizonLayerSettings =
+            serde_json::from_str(r#"{"enabled":true,"opacity":0.8}"#).unwrap();
+        assert!(!legacy.show_line);
+
+        let enabled_line: HorizonLayerSettings =
+            serde_json::from_str(r#"{"enabled":true,"opacity":0.8,"show_line":true}"#).unwrap();
+        assert!(enabled_line.show_line);
+
+        let mut h = HorizonLayerSettings {
+            enabled: true,
+            opacity: f32::NAN,
+            show_line: false,
+        };
+        h.sanitize();
+        assert_eq!(h.opacity, DEFAULT_HORIZON_OPACITY);
+
+        let disabled = HorizonLayerSettings {
+            enabled: false,
+            opacity: 0.6,
+            show_line: true,
+        };
+        assert_eq!(disabled.effective_opacity(), 0.0);
     }
 }

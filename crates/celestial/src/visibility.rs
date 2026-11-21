@@ -1,7 +1,20 @@
 use hifitime::Epoch;
 
 use crate::coords::{Angle, geodetic::GeodeticPosition};
+use crate::horizon::HorizonProfile;
 use crate::observer::ObservationContext;
+
+/// Computes topocentric `(azimuth_deg, altitude_deg)` for an equatorial ICRS target.
+pub fn equatorial_az_alt_deg(
+    location: GeodeticPosition,
+    epoch: Epoch,
+    ra: Angle,
+    dec: Angle,
+) -> (f64, f64) {
+    let (az, alt) = ObservationContext::new(location, epoch)
+        .equatorial_to_topocentric_coords(ra, dec);
+    (az.degrees(), alt.degrees())
+}
 
 /// Computes topocentric altitude in degrees above the horizon for an equatorial ICRS target.
 pub fn equatorial_altitude_deg(
@@ -10,10 +23,25 @@ pub fn equatorial_altitude_deg(
     ra: Angle,
     dec: Angle,
 ) -> f64 {
-    ObservationContext::new(location, epoch)
-        .equatorial_to_topocentric_coords(ra, dec)
-        .1
-        .degrees()
+    equatorial_az_alt_deg(location, epoch, ra, dec).1
+}
+
+/// Samples topocentric `(azimuth_deg, altitude_deg)` evenly across a 24-hour window `[0h..24h]`.
+pub fn sample_day_equatorial_track(
+    location: GeodeticPosition,
+    local_midnight_unix_secs: f64,
+    ra: Angle,
+    dec: Angle,
+    samples: usize,
+) -> Vec<(f64, f64)> {
+    let count = samples.max(2);
+    let denom = (count - 1) as f64;
+    (0..count)
+        .map(|i| {
+            let t_secs = local_midnight_unix_secs + (i as f64 / denom) * 86_400.0;
+            equatorial_az_alt_deg(location, Epoch::from_unix_seconds(t_secs), ra, dec)
+        })
+        .collect()
 }
 
 /// Samples topocentric altitude (in degrees) evenly across a 24-hour window `[0h..24h]`.
@@ -24,13 +52,9 @@ pub fn sample_day_equatorial_altitude(
     dec: Angle,
     samples: usize,
 ) -> Vec<f64> {
-    let count = samples.max(2);
-    let denom = (count - 1) as f64;
-    (0..count)
-        .map(|i| {
-            let t_secs = local_midnight_unix_secs + (i as f64 / denom) * 86_400.0;
-            equatorial_altitude_deg(location, Epoch::from_unix_seconds(t_secs), ra, dec)
-        })
+    sample_day_equatorial_track(location, local_midnight_unix_secs, ra, dec, samples)
+        .into_iter()
+        .map(|(_, alt)| alt)
         .collect()
 }
 
@@ -46,24 +70,39 @@ pub struct DailyTargetVisibility {
     pub never_rises: bool,
 }
 
-fn refine_horizon_crossing(
+fn clearance_at_hour(
     location: GeodeticPosition,
     local_midnight_unix_secs: f64,
     ra: Angle,
     dec: Angle,
+    hour: f64,
+    horizon: Option<&HorizonProfile>,
+) -> f64 {
+    let (az, alt) = equatorial_az_alt_deg(
+        location,
+        Epoch::from_unix_seconds(local_midnight_unix_secs + hour * 3600.0),
+        ra,
+        dec,
+    );
+    alt - horizon.map_or(0.0, |prof| prof.altitude_at_azimuth_deg(az))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refine_clearance_crossing(
+    location: GeodeticPosition,
+    local_midnight_unix_secs: f64,
+    ra: Angle,
+    dec: Angle,
+    horizon: Option<&HorizonProfile>,
     mut h_lo: f64,
     mut h_hi: f64,
     rising: bool,
 ) -> f64 {
     for _ in 0..8 {
         let mid = f64::midpoint(h_lo, h_hi);
-        let alt = equatorial_altitude_deg(
-            location,
-            Epoch::from_unix_seconds(local_midnight_unix_secs + mid * 3600.0),
-            ra,
-            dec,
-        );
-        let above = alt >= 0.0;
+        let clearance =
+            clearance_at_hour(location, local_midnight_unix_secs, ra, dec, mid, horizon);
+        let above = clearance >= 0.0;
         if (rising && above) || (!rising && !above) {
             h_hi = mid;
         } else {
@@ -83,7 +122,7 @@ fn refine_extremum(
     find_max: bool,
 ) -> (f64, f64) {
     // 2/3-point ternary search converges quickly on the unimodal transit/lower-culmination window.
-    for _ in 0..16 {
+    for _ in 0..26 {
         let third = (h_hi - h_lo) / 3.0;
         let m1 = h_lo + third;
         let m2 = h_hi - third;
@@ -116,70 +155,62 @@ fn refine_extremum(
     (mid, alt)
 }
 
-/// Computes rise, transit, set, and visibility flags over `[0h, 24h]` from `local_midnight_unix_secs`.
+/// Computes rise, transit, set, and visibility flags over `[0h, 24h]` from `local_midnight_unix_secs`
+/// using the flat geometric `0°` horizon.
 pub fn compute_target_visibility(
     location: GeodeticPosition,
     local_midnight_unix_secs: f64,
     ra: Angle,
     dec: Angle,
 ) -> DailyTargetVisibility {
-    const STEPS: usize = 96;
+    compute_target_visibility_with_horizon(location, local_midnight_unix_secs, ra, dec, None)
+}
 
-    let profile = sample_day_equatorial_altitude(
+/// Computes rise, transit, set, and visibility flags over `[0h, 24h]` from `local_midnight_unix_secs`,
+/// optionally accounting for a custom [`HorizonProfile`].
+///
+/// `transit_hour`, `max_altitude_deg`, and `min_altitude_deg` always report the true astronomical
+/// culmination values; `rise_hour`, `set_hour`, `circumpolar`, and `never_rises` reflect visibility
+/// above `horizon` (or `0°` when `None`).
+pub fn compute_target_visibility_with_horizon(
+    location: GeodeticPosition,
+    local_midnight_unix_secs: f64,
+    ra: Angle,
+    dec: Angle,
+    horizon: Option<&HorizonProfile>,
+) -> DailyTargetVisibility {
+    let steps: usize = if horizon.is_some() { 288 } else { 96 };
+    let step_hours = 24.0 / steps as f64;
+
+    let track = sample_day_equatorial_track(
         location,
         local_midnight_unix_secs,
         ra,
         dec,
-        STEPS + 1,
+        steps + 1,
     );
-    let step_hours = 24.0 / STEPS as f64;
 
-    let mut rise_hour = None;
-    let mut set_hour = None;
+    let mut profile = Vec::with_capacity(track.len());
+    let mut clearances = Vec::with_capacity(track.len());
+    for &(az, alt) in &track {
+        profile.push(alt);
+        let h_alt = horizon.map_or(0.0, |prof| prof.altitude_at_azimuth_deg(az));
+        clearances.push(alt - h_alt);
+    }
+
     let mut max_idx = 0usize;
     let mut min_idx = 0usize;
-
-    for i in 0..profile.len() {
-        if profile[i] > profile[max_idx] {
+    for (i, &alt) in profile.iter().enumerate() {
+        if alt > profile[max_idx] {
             max_idx = i;
         }
-        if profile[i] < profile[min_idx] {
+        if alt < profile[min_idx] {
             min_idx = i;
-        }
-        if i == 0 {
-            continue;
-        }
-        let prev = profile[i - 1];
-        let curr = profile[i];
-        let h0 = (i - 1) as f64 * step_hours;
-        let h1 = i as f64 * step_hours;
-
-        if rise_hour.is_none() && prev < 0.0 && curr >= 0.0 {
-            rise_hour = Some(refine_horizon_crossing(
-                location,
-                local_midnight_unix_secs,
-                ra,
-                dec,
-                h0,
-                h1,
-                true,
-            ));
-        }
-        if set_hour.is_none() && prev >= 0.0 && curr < 0.0 {
-            set_hour = Some(refine_horizon_crossing(
-                location,
-                local_midnight_unix_secs,
-                ra,
-                dec,
-                h0,
-                h1,
-                false,
-            ));
         }
     }
 
     let max_lo = max_idx.saturating_sub(1) as f64 * step_hours;
-    let max_hi = (max_idx + 1).min(STEPS) as f64 * step_hours;
+    let max_hi = (max_idx + 1).min(steps) as f64 * step_hours;
     let (refined_transit, refined_max) = refine_extremum(
         location,
         local_midnight_unix_secs,
@@ -196,7 +227,7 @@ pub fn compute_target_visibility(
     };
 
     let min_lo = min_idx.saturating_sub(1) as f64 * step_hours;
-    let min_hi = (min_idx + 1).min(STEPS) as f64 * step_hours;
+    let min_hi = (min_idx + 1).min(steps) as f64 * step_hours;
     let (_, refined_min) = refine_extremum(
         location,
         local_midnight_unix_secs,
@@ -208,12 +239,96 @@ pub fn compute_target_visibility(
     );
     let min_altitude_deg = refined_min.min(profile[min_idx]);
 
-    let circumpolar = min_altitude_deg >= 0.0;
-    let never_rises = max_altitude_deg < 0.0;
-    if circumpolar || never_rises {
-        rise_hour = None;
-        set_hour = None;
+    let mut intervals: Vec<(f64, f64)> = Vec::new();
+    let mut open_start: Option<f64> = if clearances[0] >= 0.0 {
+        Some(0.0)
+    } else {
+        None
+    };
+
+    for i in 1..clearances.len() {
+        let prev = clearances[i - 1];
+        let curr = clearances[i];
+        let h0 = (i - 1) as f64 * step_hours;
+        let h1 = i as f64 * step_hours;
+
+        if prev < 0.0 && curr >= 0.0 {
+            let rise = refine_clearance_crossing(
+                location,
+                local_midnight_unix_secs,
+                ra,
+                dec,
+                horizon,
+                h0,
+                h1,
+                true,
+            );
+            open_start = Some(rise);
+        } else if prev >= 0.0 && curr < 0.0 {
+            let set = refine_clearance_crossing(
+                location,
+                local_midnight_unix_secs,
+                ra,
+                dec,
+                horizon,
+                h0,
+                h1,
+                false,
+            );
+            if let Some(start) = open_start.take() {
+                intervals.push((start, set));
+            }
+        }
     }
+    if let Some(start) = open_start.take() {
+        intervals.push((start, 24.0));
+    }
+
+    let (circumpolar, never_rises) = if horizon.is_none() {
+        (min_altitude_deg >= 0.0, max_altitude_deg < 0.0)
+    } else {
+        let all_above =
+            intervals.len() == 1 && intervals[0].0 == 0.0 && intervals[0].1 == 24.0;
+        let all_below = intervals.is_empty();
+        (all_above, all_below)
+    };
+
+    let (rise_hour, set_hour) = if circumpolar || never_rises || intervals.is_empty() {
+        (None, None)
+    } else {
+        let has_wrap = intervals.len() >= 2
+            && intervals[0].0 == 0.0
+            && intervals[intervals.len() - 1].1 == 24.0;
+        let mut best: Option<(f64, f64, f64, bool)> = None;
+
+        if has_wrap {
+            let first_end = intervals[0].1;
+            let last_start = intervals[intervals.len() - 1].0;
+            let wrap_dur = (24.0 - last_start) + first_end;
+            best = Some((last_start, first_end, wrap_dur, true));
+            for &(s, e) in &intervals[1..intervals.len() - 1] {
+                let dur = e - s;
+                if best.is_none_or(|(_, _, bd, _)| dur > bd) {
+                    best = Some((s, e, dur, false));
+                }
+            }
+        } else {
+            for &(s, e) in &intervals {
+                let dur = e - s;
+                if best.is_none_or(|(_, _, bd, _)| dur > bd) {
+                    best = Some((s, e, dur, false));
+                }
+            }
+        }
+
+        match best {
+            Some((r, s, _, wrapped)) => (
+                if wrapped || r > 0.0 { Some(r) } else { None },
+                if wrapped || s < 24.0 { Some(s) } else { None },
+            ),
+            None => (None, None),
+        }
+    };
 
     DailyTargetVisibility {
         rise_hour,
@@ -299,5 +414,101 @@ mod tests {
             equatorial_altitude_deg(loc, Epoch::from_unix_seconds(midnight + 86_400.0), ra, dec);
         assert!((samples[0] - first).abs() < 1e-10);
         assert!((samples[96] - last).abs() < 1e-10);
+    }
+
+    #[test]
+    fn elevated_flat_horizon_shortens_visibility_window() {
+        let equator = GeodeticPosition::from_degrees(0.0, 0.0, 0.0);
+        let midnight = Epoch::from_gregorian_utc(2026, 3, 20, 0, 0, 0, 0).to_unix_seconds();
+        let ra = Angle::from_degrees(90.0);
+        let dec = Angle::from_degrees(0.0);
+
+        let flat_zero = compute_target_visibility_with_horizon(equator, midnight, ra, dec, None);
+        let elevated = HorizonProfile::flat(30.0, 360);
+        let vis_elevated =
+            compute_target_visibility_with_horizon(equator, midnight, ra, dec, Some(&elevated));
+
+        assert!(!vis_elevated.circumpolar);
+        assert!(!vis_elevated.never_rises);
+        assert!((vis_elevated.max_altitude_deg - flat_zero.max_altitude_deg).abs() < 1e-3);
+
+        let rise = vis_elevated.rise_hour.expect("should rise above 30 deg");
+        let set = vis_elevated.set_hour.expect("should set below 30 deg");
+        let hours_above = (set - rise).rem_euclid(24.0);
+        // At equator for dec=0, altitude > 30 deg spans 120 deg of hour angle (~8 sidereal hours).
+        assert!(
+            (hours_above - 7.98).abs() < 0.25,
+            "expected ~8h above 30 deg, got {hours_above}"
+        );
+    }
+
+    #[test]
+    fn directional_eastern_obstacle_delays_rise_without_shifting_set() {
+        let equator = GeodeticPosition::from_degrees(0.0, 0.0, 0.0);
+        let midnight = Epoch::from_gregorian_utc(2026, 3, 20, 0, 0, 0, 0).to_unix_seconds();
+        let ra = Angle::from_degrees(90.0);
+        let dec = Angle::from_degrees(0.0);
+
+        let baseline = compute_target_visibility_with_horizon(equator, midnight, ra, dec, None);
+        let mut east_wall = HorizonProfile::flat(0.0, 360);
+        // Block azimuth 45..135 (East) up to 45 deg
+        east_wall.set_segment_world_az(45.0, 45.0, 135.0, 45.0);
+
+        let vis =
+            compute_target_visibility_with_horizon(equator, midnight, ra, dec, Some(&east_wall));
+        let base_rise = baseline.rise_hour.unwrap();
+        let wall_rise = vis.rise_hour.unwrap();
+        let base_set = baseline.set_hour.unwrap();
+        let wall_set = vis.set_hour.unwrap();
+
+        let rise_delay = (wall_rise - base_rise).rem_euclid(24.0);
+        assert!(
+            (rise_delay - 3.0).abs() < 0.25,
+            "expected ~3h rise delay from 45 deg East wall, got {rise_delay}"
+        );
+        assert!(
+            (wall_set - base_set).abs() < 0.1,
+            "West set should be unchanged: base={base_set}, wall={wall_set}"
+        );
+    }
+
+    #[test]
+    fn blocked_target_is_never_rises_even_when_max_altitude_positive() {
+        let paris = GeodeticPosition::from_degrees(48.8566, 2.3522, 35.0);
+        let midnight = Epoch::from_gregorian_utc(2026, 6, 21, 0, 0, 0, 0).to_unix_seconds();
+        // Rigel-ish southern star peaking around ~33 deg at Paris, blocked by 45 deg horizon
+        let ra = Angle::from_degrees(78.634);
+        let dec = Angle::from_degrees(-8.2016);
+        let high_horizon = HorizonProfile::flat(45.0, 360);
+        let vis = compute_target_visibility_with_horizon(
+            paris,
+            midnight,
+            ra,
+            dec,
+            Some(&high_horizon),
+        );
+        assert!(vis.max_altitude_deg > 20.0);
+        assert!(vis.never_rises);
+        assert!(!vis.circumpolar);
+        assert!(vis.rise_hour.is_none());
+        assert!(vis.set_hour.is_none());
+    }
+
+    #[test]
+    fn obstructed_circumpolar_target_loses_circumpolar_flag() {
+        let paris = GeodeticPosition::from_degrees(48.8566, 2.3522, 35.0);
+        let midnight = Epoch::from_gregorian_utc(2026, 6, 21, 0, 0, 0, 0).to_unix_seconds();
+        // Dec +60 at lat +48.86 ranges between ~18.9 deg and ~78.9 deg altitude.
+        let ra = Angle::from_degrees(180.0);
+        let dec = Angle::from_degrees(60.0);
+        let base = compute_target_visibility_with_horizon(paris, midnight, ra, dec, None);
+        assert!(base.circumpolar);
+
+        let wall = HorizonProfile::flat(35.0, 360);
+        let vis = compute_target_visibility_with_horizon(paris, midnight, ra, dec, Some(&wall));
+        assert!(!vis.circumpolar);
+        assert!(!vis.never_rises);
+        assert!(vis.rise_hour.is_some());
+        assert!(vis.set_hour.is_some());
     }
 }

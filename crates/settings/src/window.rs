@@ -7,7 +7,7 @@ use gpui::{
 };
 use persistence::{
     AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY, DEFAULT_GROUND_OPACITY,
-    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY,
+    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY, DEFAULT_STARS_OPACITY,
 };
 use ui::{
     ActiveTheme, Color, Divider, DividerColor, Icon, IconButton, IconName, IconSize, Label,
@@ -128,6 +128,45 @@ fn default_categories() -> Vec<SettingsCategory> {
                                 max: 1.0,
                                 default: DEFAULT_GROUND_OPACITY,
                                 format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
+                },
+                SettingsSection {
+                    title: "Custom Horizon",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_horizon_enabled",
+                            title: "Show Custom Horizon",
+                            description: "Display the observatory's custom horizon silhouette and 360° background panorama.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.horizon.enabled,
+                                set: |model, value, cx| model.set_horizon_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_horizon_opacity",
+                            title: "Custom Horizon Opacity",
+                            description: "Adjust the opacity of the custom horizon line and 360° landscape layer.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.horizon.opacity,
+                                preview: |model, value, cx| model.preview_horizon_opacity(value, cx),
+                                commit: |model, value, cx| model.commit_horizon_opacity(value, cx),
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_HORIZON_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_horizon_show_line",
+                            title: "Show Horizon Line",
+                            description: "Draw the horizon contour line (blue) on top of the horizon profile or 360° panoramic background.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.horizon.show_line,
+                                set: |model, value, cx| model.set_horizon_show_line(value, cx),
+                                default: false,
                             },
                         },
                     ],

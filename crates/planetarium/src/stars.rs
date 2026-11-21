@@ -277,6 +277,7 @@ impl StarSpatialIndex {
     }
 
     /// Picks the highest-priority star under `cursor_ndc`, prioritizing brighter/larger stars.
+    #[allow(clippy::too_many_arguments)]
     pub fn pick(
         &self,
         view_info: &PlanetariumViewInfo,
@@ -285,6 +286,7 @@ impl StarSpatialIndex {
         scale_factor: f64,
         params: &StarRenderParams,
         occlude_below_horizon: bool,
+        occlude_horizon: Option<&celestial::HorizonProfile>,
     ) -> Option<PickedStar> {
         let vw = viewport_logical.0;
         let vh = viewport_logical.1;
@@ -386,6 +388,11 @@ impl StarSpatialIndex {
                 let alt_deg = alt.degrees();
                 if occlude_below_horizon && alt_deg < 0.0 {
                     continue;
+                }
+                if let Some(horizon) = occlude_horizon {
+                    if !horizon.is_visible(az.degrees(), alt_deg) {
+                        continue;
+                    }
                 }
 
                 let dx_px = (nx - cursor_ndc.0) * 0.5 * vw;
@@ -731,7 +738,7 @@ mod tests {
         ];
         let index = StarSpatialIndex::build(&records);
         let picked = index
-            .pick(&info, (0.0, 0.0), viewport, 1.0, &params, false)
+            .pick(&info, (0.0, 0.0), viewport, 1.0, &params, false, None)
             .expect("should pick bright star");
         assert_eq!(picked.catalog_index, 1);
         assert!((picked.mag - 2.0).abs() < 0.02);
@@ -751,7 +758,7 @@ mod tests {
         ];
         let index = StarSpatialIndex::build(&records);
         let picked = index
-            .pick(&info, (faint_ndc_x, 0.0), viewport, 1.0, &params, false)
+            .pick(&info, (faint_ndc_x, 0.0), viewport, 1.0, &params, false, None)
             .expect("should pick isolated faint star");
         assert_eq!(picked.catalog_index, 1);
         assert!((picked.mag - 7.2).abs() < 0.02);
@@ -769,7 +776,7 @@ mod tests {
         ];
         let index = StarSpatialIndex::build(&records);
         let picked = index
-            .pick(&info, (0.0, 0.0), viewport, 1.0, &params, false)
+            .pick(&info, (0.0, 0.0), viewport, 1.0, &params, false, None)
             .expect("should pick nearest star");
         assert_eq!(picked.catalog_index, 1);
     }
@@ -794,12 +801,66 @@ mod tests {
 
         assert!(
             index
-                .pick(&info, (0.0, 0.0), viewport, 1.0, &params, true)
+                .pick(&info, (0.0, 0.0), viewport, 1.0, &params, true, None)
                 .is_none()
         );
         assert!(
             index
-                .pick(&info, (0.0, 0.0), viewport, 1.0, &params, false)
+                .pick(&info, (0.0, 0.0), viewport, 1.0, &params, false, None)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn star_picker_respects_custom_horizon_occlusion() {
+        let mut cam = crate::camera::PlanetariumCamera::default();
+        cam.observer.location =
+            celestial::coords::geodetic::GeodeticPosition::from_degrees(0.0, 0.0, 0.0);
+        cam.observer.set_epoch_unix_seconds(1_742_472_000.0);
+        cam.view_mode = crate::camera::ViewMode::Horizontal;
+        cam.yaw = 0.0;
+        cam.pitch = 10.0_f64.to_radians();
+        cam.target_yaw = cam.yaw;
+        cam.target_pitch = cam.pitch;
+        let info = cam.view_info(16.0 / 9.0);
+        let viewport = (1600.0, 900.0);
+        let params = StarRenderParams::default();
+
+        let records = vec![star_at_offset_px(&info, viewport, 0.0, 0.0, 2.0, 0.3)];
+        let index = StarSpatialIndex::build(&records);
+
+        let high_horizon = celestial::HorizonProfile::flat(25.0, 360);
+        let low_horizon = celestial::HorizonProfile::flat(5.0, 360);
+
+        assert!(
+            index
+                .pick(
+                    &info,
+                    (0.0, 0.0),
+                    viewport,
+                    1.0,
+                    &params,
+                    true,
+                    Some(&high_horizon),
+                )
+                .is_none()
+        );
+        assert!(
+            index
+                .pick(
+                    &info,
+                    (0.0, 0.0),
+                    viewport,
+                    1.0,
+                    &params,
+                    true,
+                    Some(&low_horizon),
+                )
+                .is_some()
+        );
+        assert!(
+            index
+                .pick(&info, (0.0, 0.0), viewport, 1.0, &params, true, None)
                 .is_some()
         );
     }
@@ -843,7 +904,7 @@ mod tests {
         let index = StarSpatialIndex::build_with_metadata(&records, metadata);
 
         let named = index
-            .pick(&info, (0.0, 0.0), viewport, 1.0, &params, false)
+            .pick(&info, (0.0, 0.0), viewport, 1.0, &params, false, None)
             .expect("pick named star");
         assert_eq!(
             named.display_title_and_subtitle(),
@@ -855,7 +916,7 @@ mod tests {
 
         let unnamed_ndc_x = (2.0 * 40.0) / viewport.0;
         let unnamed = index
-            .pick(&info, (unnamed_ndc_x, 0.0), viewport, 1.0, &params, false)
+            .pick(&info, (unnamed_ndc_x, 0.0), viewport, 1.0, &params, false, None)
             .expect("pick unnamed star");
         assert!(unnamed.metadata.is_none());
         assert_eq!(

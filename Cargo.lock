@@ -284,6 +284,7 @@ dependencies = [
  "glam",
  "gpui",
  "gpui_platform",
+ "horizon",
  "observer",
  "planetarium",
  "raw_viewer",
@@ -4128,6 +4129,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon"
+version = "0.1.0"
+dependencies = [
+ "celestial",
+ "components",
+ "gpui",
+ "image",
+ "persistence",
+ "theme",
+ "tracing",
+ "ui",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5719,6 +5734,7 @@ dependencies = [
  "chrono",
  "components",
  "gpui",
+ "horizon",
  "persistence",
  "theme",
  "tracing",
@@ -8085,6 +8101,7 @@ version = "0.1.0"
 dependencies = [
  "client",
  "gpui",
+ "horizon",
  "observer",
  "protocol",
  "settings",

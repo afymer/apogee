@@ -10,6 +10,7 @@ theme.workspace = true
 workspace.workspace = true
 client.workspace = true
 protocol.workspace = true
+horizon.workspace = true
 observer.workspace = true
 settings.workspace = true
 tracing.workspace = true

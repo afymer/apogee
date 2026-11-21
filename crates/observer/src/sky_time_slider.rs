@@ -68,7 +68,13 @@ impl SkyTimeSlider {
         }
     }
 
-    fn scrub_to_position(&mut self, pos: Point<Pixels>, shift_held: bool, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+    fn scrub_to_position(
+        &mut self,
+        pos: Point<Pixels>,
+        shift_held: bool,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         let width = f32::from(bounds.size.width);
         if width <= 0.0 {
             return;
@@ -190,8 +196,10 @@ pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], wi
         if x1 <= x0 {
             continue;
         }
-        let c0 = solar_altitude_to_sky_color(sample_day_profile(solar_profile, f64::from(t0) * 24.0));
-        let c1 = solar_altitude_to_sky_color(sample_day_profile(solar_profile, f64::from(t1) * 24.0));
+        let c0 =
+            solar_altitude_to_sky_color(sample_day_profile(solar_profile, f64::from(t0) * 24.0));
+        let c1 =
+            solar_altitude_to_sky_color(sample_day_profile(solar_profile, f64::from(t1) * 24.0));
         let strip_bounds = Bounds::new(
             point(px(x0), px(origin_y)),
             Size::new(px(x1 - x0), px(height)),
@@ -374,7 +382,12 @@ impl Render for SkyTimeSlider {
                         e.update(cx, |this, cx| {
                             if this.is_dragging {
                                 if event.pressed_button == Some(MouseButton::Left) {
-                                    this.scrub_to_position(event.position, event.modifiers.shift, bounds, cx);
+                                    this.scrub_to_position(
+                                        event.position,
+                                        event.modifiers.shift,
+                                        bounds,
+                                        cx,
+                                    );
                                 } else {
                                     this.is_dragging = false;
                                     cx.notify();
@@ -418,7 +431,12 @@ impl Render for SkyTimeSlider {
                             let bounds = this.track_bounds.lock().ok().and_then(|g| *g);
                             if let Some(bounds) = bounds {
                                 this.is_dragging = true;
-                                this.scrub_to_position(event.position, event.modifiers.shift, bounds, cx);
+                                this.scrub_to_position(
+                                    event.position,
+                                    event.modifiers.shift,
+                                    bounds,
+                                    cx,
+                                );
                             }
                             cx.stop_propagation();
                         }),

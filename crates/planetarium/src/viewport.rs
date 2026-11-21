@@ -1,4 +1,5 @@
 use crate::camera::ViewMode;
+use crate::landscape::HorizonLayerData;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ObserverClockSpec {
@@ -31,5 +32,8 @@ pub enum ViewportCommand {
     SetObserver(ObserverUpdate),
     SetAtmosphereStrength(f32),
     SetGroundOpacity(f32),
+    SetHorizon(Option<HorizonLayerData>),
+    SetHorizonOpacity(f32),
+    SetHorizonLineVisible(bool),
 }
 

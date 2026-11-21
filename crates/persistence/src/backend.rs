@@ -18,6 +18,23 @@ pub trait DocumentBackend: Send + Sync {
 
     /// Atomically persists raw bytes for `key`.
     fn write_raw(&self, key: &str, bytes: &[u8]) -> Result<(), PersistenceError>;
+
+    /// Reads an auxiliary binary asset stored under `(namespace, name)`.
+    fn read_asset(&self, namespace: &str, name: &str) -> Result<Option<Vec<u8>>, PersistenceError>;
+
+    /// Atomically persists an auxiliary binary asset under `(namespace, name)`.
+    fn write_asset(
+        &self,
+        namespace: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), PersistenceError>;
+
+    /// Deletes an auxiliary binary asset under `(namespace, name)`, ignoring missing files.
+    fn delete_asset(&self, namespace: &str, name: &str) -> Result<(), PersistenceError>;
+
+    /// Returns the filesystem path for `(namespace, name)` if backed by local files.
+    fn asset_path(&self, namespace: &str, name: &str) -> Option<PathBuf>;
 }
 
 /// Validates that `key` is a safe single-segment identifier without path separators.
@@ -28,6 +45,20 @@ pub fn validate_key(key: &str) -> Result<(), PersistenceError> {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
         return Err(PersistenceError::InvalidDocumentKey(key.to_string()));
+    }
+    Ok(())
+}
+
+/// Validates that `name` is a safe single-segment filename without path traversal.
+pub fn validate_asset_name(name: &str) -> Result<(), PersistenceError> {
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.contains("..")
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+    {
+        return Err(PersistenceError::InvalidAssetName(name.to_string()));
     }
     Ok(())
 }
@@ -73,6 +104,50 @@ impl JsonFileBackend {
         validate_key(key)?;
         Ok(self.root.join(format!("{key}.json")))
     }
+
+    fn asset_dir_and_path(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<(PathBuf, PathBuf), PersistenceError> {
+        validate_key(namespace)?;
+        validate_asset_name(name)?;
+        let dir = self.root.join(namespace);
+        let path = dir.join(name);
+        Ok((dir, path))
+    }
+}
+
+fn atomic_write_bytes(
+    dir: &Path,
+    target: &Path,
+    tmp_label: &str,
+    bytes: &[u8],
+) -> Result<(), PersistenceError> {
+    std::fs::create_dir_all(dir)?;
+
+    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let tmp_path = dir.join(format!(".{tmp_label}.tmp.{pid}.{seq}"));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp_path, target)?;
+        Ok(())
+    })();
+
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(PersistenceError::Io(err));
+    }
+
+    Ok(())
 }
 
 impl DocumentBackend for JsonFileBackend {
@@ -87,30 +162,41 @@ impl DocumentBackend for JsonFileBackend {
 
     fn write_raw(&self, key: &str, bytes: &[u8]) -> Result<(), PersistenceError> {
         let target = self.path_for(key)?;
-        std::fs::create_dir_all(&self.root)?;
+        atomic_write_bytes(&self.root, &target, &format!("{key}.json"), bytes)
+    }
 
-        let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let tmp_path = self.root.join(format!(".{key}.json.tmp.{pid}.{seq}"));
-
-        let write_result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&tmp_path)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&tmp_path, &target)?;
-            Ok(())
-        })();
-
-        if let Err(err) = write_result {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(PersistenceError::Io(err));
+    fn read_asset(&self, namespace: &str, name: &str) -> Result<Option<Vec<u8>>, PersistenceError> {
+        let (_, path) = self.asset_dir_and_path(namespace, name)?;
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(PersistenceError::Io(err)),
         }
+    }
 
-        Ok(())
+    fn write_asset(
+        &self,
+        namespace: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let (dir, target) = self.asset_dir_and_path(namespace, name)?;
+        atomic_write_bytes(&dir, &target, name, bytes)
+    }
+
+    fn delete_asset(&self, namespace: &str, name: &str) -> Result<(), PersistenceError> {
+        let (_, path) = self.asset_dir_and_path(namespace, name)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(PersistenceError::Io(err)),
+        }
+    }
+
+    fn asset_path(&self, namespace: &str, name: &str) -> Option<PathBuf> {
+        self.asset_dir_and_path(namespace, name)
+            .ok()
+            .map(|(_, path)| path)
     }
 }
 
@@ -118,6 +204,7 @@ impl DocumentBackend for JsonFileBackend {
 #[derive(Debug, Default)]
 pub struct MemoryBackend {
     docs: Mutex<HashMap<String, Vec<u8>>>,
+    assets: Mutex<HashMap<(String, String), Vec<u8>>>,
 }
 
 impl MemoryBackend {
@@ -139,5 +226,37 @@ impl DocumentBackend for MemoryBackend {
         let mut guard = self.docs.lock().unwrap_or_else(PoisonError::into_inner);
         guard.insert(key.to_string(), bytes.to_vec());
         Ok(())
+    }
+
+    fn read_asset(&self, namespace: &str, name: &str) -> Result<Option<Vec<u8>>, PersistenceError> {
+        validate_key(namespace)?;
+        validate_asset_name(name)?;
+        let guard = self.assets.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(guard.get(&(namespace.to_string(), name.to_string())).cloned())
+    }
+
+    fn write_asset(
+        &self,
+        namespace: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), PersistenceError> {
+        validate_key(namespace)?;
+        validate_asset_name(name)?;
+        let mut guard = self.assets.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.insert((namespace.to_string(), name.to_string()), bytes.to_vec());
+        Ok(())
+    }
+
+    fn delete_asset(&self, namespace: &str, name: &str) -> Result<(), PersistenceError> {
+        validate_key(namespace)?;
+        validate_asset_name(name)?;
+        let mut guard = self.assets.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.remove(&(namespace.to_string(), name.to_string()));
+        Ok(())
+    }
+
+    fn asset_path(&self, _namespace: &str, _name: &str) -> Option<PathBuf> {
+        None
     }
 }

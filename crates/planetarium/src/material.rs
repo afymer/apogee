@@ -38,6 +38,10 @@ use tracing::error;
 
 use crate::{
     camera::ProjectionParams,
+    landscape::{
+        CelestialLandscapeDraw, CelestialLandscapeMaterial, CelestialLandscapePipeline,
+        CelestialLandscapeUniforms, LandscapePipelineKey,
+    },
     sky::{
         CelestialSkyDraw, CelestialSkyMaterial, CelestialSkyPipeline, CelestialSkyUniforms,
         SkyPipelineKey,
@@ -271,6 +275,7 @@ struct CelestialPipelines<'w> {
     line: Res<'w, CelestialLinePipeline>,
     star: Res<'w, CelestialStarPipeline>,
     sky: Res<'w, CelestialSkyPipeline>,
+    landscape: Res<'w, CelestialLandscapePipeline>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -279,6 +284,7 @@ struct SpecializedCelestialPipelines<'w> {
     line: ResMut<'w, SpecializedMeshPipelines<CelestialLinePipeline>>,
     star: ResMut<'w, SpecializedMeshPipelines<CelestialStarPipeline>>,
     sky: ResMut<'w, SpecializedRenderPipelines<CelestialSkyPipeline>>,
+    landscape: ResMut<'w, SpecializedRenderPipelines<CelestialLandscapePipeline>>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -287,6 +293,7 @@ struct CelestialUniforms<'w> {
     line: Res<'w, ComponentUniforms<CelestialLineUniforms>>,
     star: Res<'w, ComponentUniforms<CelestialStarUniforms>>,
     sky: Res<'w, ComponentUniforms<CelestialSkyUniforms>>,
+    landscape: Res<'w, ComponentUniforms<CelestialLandscapeUniforms>>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -327,6 +334,15 @@ struct CelestialDrawQueries<'w, 's> {
         ),
         With<CelestialSkyDraw>,
     >,
+    landscapes: Query<
+        'w,
+        's,
+        (
+            &'static CelestialLandscapeDraw,
+            &'static DynamicUniformIndex<CelestialLandscapeUniforms>,
+            &'static CelestialPipelineId,
+        ),
+    >,
 }
 
 pub fn init_celestial_materials(app: &mut App) {
@@ -335,6 +351,7 @@ pub fn init_celestial_materials(app: &mut App) {
     embedded_asset!(app, "shaders/celestial_line.wgsl");
     embedded_asset!(app, "shaders/celestial_star.wgsl");
     embedded_asset!(app, "shaders/celestial_sky.wgsl");
+    embedded_asset!(app, "shaders/celestial_landscape.wgsl");
 
     app.add_plugins((
         ExtractComponentPlugin::<CelestialTileMaterial>::default(),
@@ -345,6 +362,8 @@ pub fn init_celestial_materials(app: &mut App) {
         UniformComponentPlugin::<CelestialStarUniforms>::default(),
         ExtractComponentPlugin::<CelestialSkyMaterial>::default(),
         UniformComponentPlugin::<CelestialSkyUniforms>::default(),
+        ExtractComponentPlugin::<CelestialLandscapeMaterial>::default(),
+        UniformComponentPlugin::<CelestialLandscapeUniforms>::default(),
     ));
 
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -355,6 +374,7 @@ pub fn init_celestial_materials(app: &mut App) {
         .init_resource::<SpecializedMeshPipelines<CelestialLinePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialStarPipeline>>()
         .init_resource::<SpecializedRenderPipelines<CelestialSkyPipeline>>()
+        .init_resource::<SpecializedRenderPipelines<CelestialLandscapePipeline>>()
         .init_resource::<CelestialTileBindGroupCache>()
         .add_systems(RenderStartup, init_celestial_pipelines)
         .add_systems(
@@ -404,6 +424,9 @@ fn init_celestial_pipelines(mut commands: Commands, asset_server: Res<AssetServe
     commands.insert_resource(CelestialSkyPipeline::new(
         asset_server.load("embedded://planetarium/shaders/celestial_sky.wgsl"),
     ));
+    commands.insert_resource(CelestialLandscapePipeline::new(
+        asset_server.load("embedded://planetarium/shaders/celestial_landscape.wgsl"),
+    ));
 }
 
 fn specialize_pipeline<S: SpecializedMeshPipeline<Key = CelestialPipelineKey>>(
@@ -442,6 +465,7 @@ fn queue_celestial_pipelines(
     lines: Query<(Entity, &CelestialLineDraw)>,
     stars: Query<(Entity, &CelestialStarDraw)>,
     skies: Query<(Entity, &CelestialSkyDraw)>,
+    landscapes: Query<(Entity, &CelestialLandscapeDraw)>,
 ) {
     for (target, msaa) in &views {
         for (entity, draw) in &tiles {
@@ -488,6 +512,17 @@ fn queue_celestial_pipelines(
                 &cache,
                 &pipelines.sky,
                 SkyPipelineKey {
+                    format: target.main_texture_format(),
+                    samples: msaa.samples(),
+                },
+            );
+            commands.entity(entity).insert(CelestialPipelineId(id));
+        }
+        for (entity, _draw) in &landscapes {
+            let id = specialized.landscape.specialize(
+                &cache,
+                &pipelines.landscape,
+                LandscapePipelineKey {
                     format: target.main_texture_format(),
                     samples: msaa.samples(),
                 },
@@ -656,6 +691,38 @@ fn draw_celestial(
                 items.push(DrawItem {
                     pipeline,
                     bind_group: bind_group.clone(),
+                    uniform_offset: uniform_index.index(),
+                    vertex_buffer: None,
+                    geometry: Geometry::Plain { vertex_count: 3 },
+                    instances: 0..1,
+                });
+            }
+        }
+    }
+
+    if !queries.landscapes.is_empty() {
+        if let Some(binding) = uniforms.landscape.binding() {
+            for (draw, uniform_index, pipeline_id) in &queries.landscapes {
+                let (Some(pipeline), Some(horizon_buf), Some(gpu_image)) = (
+                    pipeline_cache.get_render_pipeline(pipeline_id.0),
+                    shader_buffers.get(draw.horizon_buffer),
+                    images.get(draw.panorama_image),
+                ) else {
+                    continue;
+                };
+                let bind_group = ctx.render_device().create_bind_group(
+                    "celestial_landscape_bind_group",
+                    &pipeline_cache.get_bind_group_layout(&pipelines.landscape.layout),
+                    &BindGroupEntries::sequential((
+                        binding.clone(),
+                        horizon_buf.buffer.as_entire_binding(),
+                        &gpu_image.texture_view,
+                        &gpu_image.sampler,
+                    )),
+                );
+                items.push(DrawItem {
+                    pipeline,
+                    bind_group,
                     uniform_offset: uniform_index.index(),
                     vertex_buffer: None,
                     geometry: Geometry::Plain { vertex_count: 3 },

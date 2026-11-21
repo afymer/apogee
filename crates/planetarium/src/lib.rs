@@ -5,6 +5,7 @@ pub mod camera;
 pub mod grids;
 pub mod ground;
 pub mod hips;
+pub mod landscape;
 pub mod material;
 pub mod sky;
 pub mod stars;
@@ -14,6 +15,7 @@ pub use atmosphere::AtmosphereSettings;
 pub use grids::CoordinateGridSettings;
 pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
+pub use landscape::{HorizonImageData, HorizonLayerData, HorizonRenderSettings};
 pub use stars::{PickedStar, StarRenderParams, StarSettings, StarSpatialIndex};
 
 use std::{
@@ -26,6 +28,7 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::RenderTarget,
     core_pipeline::tonemapping::Tonemapping,
+    image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
     render::{
         RenderPlugin,
@@ -40,6 +43,7 @@ use bevy::{
 };
 
 pub use camera::{PlanetariumCamera, PlanetariumViewInfo, SkyCoordinates, ViewMode};
+use celestial::HorizonProfile;
 use grids::{create_altaz_grid_mesh, create_equatorial_grid_mesh, create_horizon_mesh};
 pub use material::{CelestialLineMaterial, CelestialLineUniforms, init_celestial_materials};
 
@@ -262,6 +266,23 @@ impl BevyBridge {
         self.send_command(ViewportCommand::SetGroundOpacity(clamped));
     }
 
+    pub fn set_horizon(&self, data: Option<HorizonLayerData>) {
+        self.send_command(ViewportCommand::SetHorizon(data));
+    }
+
+    pub fn set_horizon_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetHorizonOpacity(clamped));
+    }
+
+    pub fn set_horizon_line_visible(&self, visible: bool) {
+        self.send_command(ViewportCommand::SetHorizonLineVisible(visible));
+    }
+
     pub fn resize(&self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
@@ -401,6 +422,11 @@ impl Default for CameraSyncState {
 }
 
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+/// Alpha of the flat 0° horizon circle; hidden unless the horizon line setting is enabled.
+fn horizon_line_alpha(settings: &landscape::HorizonRenderSettings) -> f32 {
+    if settings.show_line { 0.85 } else { 0.0 }
+}
+
 fn camera_movement_and_interpolation_system(
     time: Res<Time>,
     mut pending_commands: ResMut<PendingCommands>,
@@ -411,6 +437,7 @@ fn camera_movement_and_interpolation_system(
     handles: Res<CelestialHandles>,
     star_settings: Res<stars::StarSettings>,
     coord_grid_settings: Res<grids::CoordinateGridSettings>,
+    horizon_settings: Res<landscape::HorizonRenderSettings>,
     mut line_materials: Query<&mut CelestialLineMaterial>,
     mut star_materials: Query<&mut stars::CelestialStarMaterial>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -605,6 +632,7 @@ fn camera_movement_and_interpolation_system(
             mat.uniforms.transform = delta_topo;
             mat.uniforms.projection = proj_params.into();
             mat.uniforms.minor_alpha = 1.0;
+            mat.uniforms.color.w = horizon_line_alpha(&horizon_settings);
         }
         if let Ok(mut mat) = line_materials.get_mut(handles.altaz_entity) {
             mat.uniforms.transform = delta_topo;
@@ -645,6 +673,9 @@ fn camera_movement_and_interpolation_system(
         };
     }
 
+    if let Ok(mut mat) = line_materials.get_mut(handles.horizon_entity) {
+        mat.uniforms.color.w = horizon_line_alpha(&horizon_settings);
+    }
     if let Ok(mut mat) = line_materials.get_mut(handles.altaz_entity) {
         mat.uniforms.color.w = grids::ALTAZ_GRID_BASE_ALPHA * coord_grid_settings.altaz_opacity;
     }
@@ -797,6 +828,125 @@ fn process_viewport_commands(
                     };
                     *frames_remaining = 3;
                 }
+            }
+            ViewportCommand::SetHorizonOpacity(opacity) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<landscape::HorizonRenderSettings>()
+                {
+                    settings.opacity = if opacity.is_finite() {
+                        opacity.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetHorizonLineVisible(visible) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<landscape::HorizonRenderSettings>()
+                {
+                    settings.show_line = visible;
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetHorizon(maybe_data) => {
+                let Some((horizon_buffer_handle, fallback_image_handle, prev_tag)) = app
+                    .world()
+                    .get_resource::<landscape::HorizonRenderSettings>()
+                    .map(|s| {
+                        (
+                            s.horizon_buffer.clone(),
+                            s.fallback_image.clone(),
+                            s.current_image_tag.clone(),
+                        )
+                    })
+                else {
+                    continue;
+                };
+
+                if let Some(data) = maybe_data {
+                    let profile =
+                        HorizonProfile::from_samples(data.samples_deg, data.azimuth_offset_deg);
+                    let mut samples_rad = profile.to_radians_vec();
+                    if samples_rad.is_empty() {
+                        samples_rad.push(0.0);
+                    }
+                    let sample_count = samples_rad.len() as u32;
+                    let azimuth_offset_rad = profile.azimuth_offset_deg.to_radians() as f32;
+
+                    if let Some(mut buf) = app
+                        .world_mut()
+                        .resource_mut::<Assets<ShaderBuffer>>()
+                        .get_mut(&horizon_buffer_handle)
+                    {
+                        buf.data = Some(bytemuck::cast_slice(&samples_rad).to_vec());
+                    }
+
+                    let new_image_handle = match (&data.image_tag, data.image) {
+                        (Some(_tag), Some(img_data)) => {
+                            let mut image = Image::new(
+                                Extent3d {
+                                    width: img_data.width.max(1),
+                                    height: img_data.height.max(1),
+                                    depth_or_array_layers: 1,
+                                },
+                                TextureDimension::D2,
+                                img_data.rgba.clone(),
+                                TextureFormat::Rgba8UnormSrgb,
+                                RenderAssetUsages::RENDER_WORLD,
+                            );
+                            image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                                address_mode_u: ImageAddressMode::Repeat,
+                                address_mode_v: ImageAddressMode::ClampToEdge,
+                                address_mode_w: ImageAddressMode::ClampToEdge,
+                                ..ImageSamplerDescriptor::linear()
+                            });
+                            Some(app.world_mut().resource_mut::<Assets<Image>>().add(image))
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(mut settings) = app
+                        .world_mut()
+                        .get_resource_mut::<landscape::HorizonRenderSettings>()
+                    {
+                        settings.active = true;
+                        settings.azimuth_offset_rad = azimuth_offset_rad;
+                        settings.sample_count = sample_count;
+                        match (data.image_tag, new_image_handle) {
+                            (None, _) => {
+                                settings.panorama_image = fallback_image_handle;
+                                settings.has_texture = false;
+                                settings.current_image_tag = None;
+                            }
+                            (Some(tag), Some(handle)) => {
+                                settings.panorama_image = handle;
+                                settings.has_texture = true;
+                                settings.current_image_tag = Some(tag);
+                            }
+                            (Some(tag), None) => {
+                                if prev_tag.as_ref() != Some(&tag) {
+                                    settings.panorama_image = fallback_image_handle;
+                                    settings.has_texture = false;
+                                    settings.current_image_tag = None;
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<landscape::HorizonRenderSettings>()
+                {
+                    settings.active = false;
+                    settings.has_texture = false;
+                    settings.sample_count = 0;
+                    settings.azimuth_offset_rad = 0.0;
+                    settings.panorama_image = fallback_image_handle;
+                    settings.current_image_tag = None;
+                }
+                *frames_remaining = 3;
             }
             movement => {
                 pending.push(movement);
@@ -1047,6 +1197,50 @@ impl PlanetariumRenderer {
                 app.init_resource::<hips::HipsSurveySettings>();
                 app.insert_resource(bridge.clone());
                 app.insert_resource(ViewportDimensions { width, height });
+
+                let initial_horizon_settings = {
+                    let initial_samples = vec![0.0_f32; celestial::DEFAULT_HORIZON_SAMPLES];
+                    let horizon_buffer = app
+                        .world_mut()
+                        .resource_mut::<Assets<ShaderBuffer>>()
+                        .add(ShaderBuffer::new(
+                            bytemuck::cast_slice(&initial_samples),
+                            RenderAssetUsages::default(),
+                        ));
+                    let mut fallback = Image::new(
+                        Extent3d {
+                            width: 1,
+                            height: 1,
+                            depth_or_array_layers: 1,
+                        },
+                        TextureDimension::D2,
+                        vec![0, 0, 0, 0],
+                        TextureFormat::Rgba8UnormSrgb,
+                        RenderAssetUsages::RENDER_WORLD,
+                    );
+                    fallback.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                        address_mode_u: ImageAddressMode::Repeat,
+                        address_mode_v: ImageAddressMode::ClampToEdge,
+                        address_mode_w: ImageAddressMode::ClampToEdge,
+                        ..ImageSamplerDescriptor::linear()
+                    });
+                    let fallback_image =
+                        app.world_mut().resource_mut::<Assets<Image>>().add(fallback);
+                    landscape::HorizonRenderSettings {
+                        opacity: 1.0,
+                        active: false,
+                        has_texture: false,
+                        show_line: false,
+                        azimuth_offset_rad: 0.0,
+                        sample_count: 0,
+                        horizon_buffer,
+                        panorama_image: fallback_image.clone(),
+                        fallback_image,
+                        current_image_tag: None,
+                    }
+                };
+                app.insert_resource(initial_horizon_settings.clone());
+
                 let (horizon_entity, altaz_entity, eq_entity, star_entity) = {
                     let _span = tracing::info_span!("spawn_celestial_entities").entered();
                     let world = app.world_mut();
@@ -1066,6 +1260,11 @@ impl PlanetariumRenderer {
                         initial_proj,
                         1.0,
                         1.0,
+                    ));
+                    world.spawn(landscape::CelestialLandscapeMaterial::from_camera_and_settings(
+                        &initial_camera,
+                        initial_proj,
+                        &initial_horizon_settings,
                     ));
                     (horizon, altaz, eq, star)
                 };
@@ -1100,6 +1299,7 @@ impl PlanetariumRenderer {
                     (
                         camera_movement_and_interpolation_system,
                         sky::sky_system,
+                        landscape::landscape_system,
                         hips::hips_survey_system,
                         hips::hips_grid_system,
                     )

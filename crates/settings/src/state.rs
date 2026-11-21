@@ -1,9 +1,9 @@
 use gpui::{App, AppContext, Context, Entity, Global};
 use persistence::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
-    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings,
-    DocumentStore, GridLayerSettings, GroundSettings, PlanetariumSettings, StarsSettings,
-    SurveySettings,
+    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
+    DEFAULT_STARS_OPACITY, DebugSettings, DocumentStore, GridLayerSettings, GroundSettings,
+    HorizonLayerSettings, PlanetariumSettings, StarsSettings, SurveySettings,
 };
 
 /// Global GPUI entity wrapper for [`SettingsModel`].
@@ -124,6 +124,58 @@ impl SettingsModel {
     pub fn commit_ground_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
         let clamped = sanitize_unit(opacity, DEFAULT_GROUND_OPACITY);
         self.settings.planetarium.ground.opacity = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns the custom horizon & background panorama settings.
+    pub fn horizon(&self) -> HorizonLayerSettings {
+        self.settings.planetarium.horizon
+    }
+
+    /// Returns whether the custom horizon & background layer is enabled.
+    pub fn horizon_enabled(&self) -> bool {
+        self.settings.planetarium.horizon.enabled
+    }
+
+    /// Returns the configured custom horizon layer opacity in `[0.0, 1.0]`.
+    pub fn horizon_opacity(&self) -> f32 {
+        self.settings.planetarium.horizon.opacity
+    }
+
+    /// Returns the effective custom horizon layer opacity (`0.0` when disabled).
+    pub fn effective_horizon_opacity(&self) -> f32 {
+        self.settings.planetarium.horizon.effective_opacity()
+    }
+
+    /// Sets whether the custom horizon & background layer is enabled and persists the change.
+    pub fn set_horizon_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(|settings| settings.planetarium.horizon.enabled = enabled, cx);
+    }
+
+    /// Returns whether the extracted horizon contour line is drawn over 360° panorama images.
+    pub fn horizon_show_line(&self) -> bool {
+        self.settings.planetarium.horizon.show_line
+    }
+
+    /// Sets whether the horizon contour line is drawn over 360° panorama images and persists.
+    pub fn set_horizon_show_line(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.update(|settings| settings.planetarium.horizon.show_line = show, cx);
+    }
+
+    /// Updates custom horizon opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_horizon_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_HORIZON_OPACITY);
+        if (self.settings.planetarium.horizon.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.horizon.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets custom horizon opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_horizon_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_HORIZON_OPACITY);
+        self.settings.planetarium.horizon.opacity = clamped;
         self.persist();
         cx.notify();
     }
@@ -621,5 +673,64 @@ mod tests {
         assert!((persisted_disabled.planetarium.altaz_grid.opacity - 0.4).abs() < 1e-6);
         assert!(!persisted_disabled.planetarium.equatorial_grid.enabled);
         assert!((persisted_disabled.planetarium.equatorial_grid.opacity - 0.7).abs() < 1e-6);
+    }
+
+    #[gpui::test]
+    fn settings_model_horizon_preview_commit_and_toggle(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let store_for_init = store.clone();
+
+        cx.update(|cx| {
+            init_with_store(store_for_init, cx);
+        });
+
+        let model = cx.read(|cx| cx.global::<GlobalSettings>().0.clone());
+        model.read_with(cx, |m, _| {
+            assert!(m.horizon_enabled());
+            assert_eq!(m.horizon_opacity(), 1.0);
+            assert_eq!(m.effective_horizon_opacity(), 1.0);
+            assert!(!m.horizon_show_line());
+        });
+
+        model.update(cx, |m, cx| {
+            m.preview_horizon_opacity(0.55, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!((m.horizon_opacity() - 0.55).abs() < 1e-6);
+            assert!((m.effective_horizon_opacity() - 0.55).abs() < 1e-6);
+        });
+        assert!(
+            store
+                .load_optional::<AppSettings>()
+                .expect("load_optional succeeds")
+                .is_none()
+        );
+
+        model.update(cx, |m, cx| {
+            m.commit_horizon_opacity(0.55, cx);
+        });
+        let persisted: AppSettings = store.load().expect("committed horizon load");
+        assert!((persisted.planetarium.horizon.opacity - 0.55).abs() < 1e-6);
+
+        model.update(cx, |m, cx| {
+            m.set_horizon_enabled(false, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(!m.horizon_enabled());
+            assert!((m.horizon_opacity() - 0.55).abs() < 1e-6);
+            assert_eq!(m.effective_horizon_opacity(), 0.0);
+        });
+        let persisted_disabled: AppSettings = store.load().expect("disabled horizon load");
+        assert!(!persisted_disabled.planetarium.horizon.enabled);
+        assert!((persisted_disabled.planetarium.horizon.opacity - 0.55).abs() < 1e-6);
+
+        model.update(cx, |m, cx| {
+            m.set_horizon_show_line(true, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(m.horizon_show_line());
+        });
+        let persisted_line: AppSettings = store.load().expect("show_line horizon load");
+        assert!(persisted_line.planetarium.horizon.show_line);
     }
 }

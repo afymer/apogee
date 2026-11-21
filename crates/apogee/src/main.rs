@@ -62,6 +62,11 @@ fn main() {
         }
 
         {
+            let _span = ::tracing::info_span!("horizon_init").entered();
+            horizon::init(cx);
+        }
+
+        {
             let _span = ::tracing::info_span!("observer_init").entered();
             observer::init(cx);
         }

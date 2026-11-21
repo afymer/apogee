@@ -1,24 +1,28 @@
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use celestial::HorizonProfile;
 use chrono::Timelike;
 use components::{Slider, SliderEvent, StepPrecision, TextField, TextFieldEvent};
 use gpui::{
-    App, Context, CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Render, ScrollDelta,
-    ScrollWheelEvent, Task, Window, div, prelude::*, px, rgb,
+    App, Bounds, Context, CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    ScrollDelta, ScrollWheelEvent, Task, Window, canvas, div, prelude::*, px, rgb,
 };
+use horizon::{GlobalHorizons, open_horizon_manager_window};
 use persistence::{
     CoordinateAxis, GeoLocation, ObservatoryIcon, ObservatoryProfile, TimezoneConfig,
     parse_coordinate, parse_elevation_m, parse_utc_offset_minutes,
 };
 use ui::{
-    ActiveTheme, Button, ButtonCommon, ButtonStyle, Clickable, Color, Divider, IconButton,
+    ActiveTheme, Button, ButtonCommon, ButtonStyle, Clickable, Color, Divider, Icon, IconButton,
     IconButtonShape, IconName, IconSize, Label, LabelCommon, LabelSize, StyledTypography, h_flex,
     v_flex,
 };
 
 use crate::icons::{
-    ICON_ELEVATION, ICON_LATITUDE, ICON_LONGITUDE, observatory_icon_svg, render_svg_icon,
+    ICON_ELEVATION, ICON_HORIZON, ICON_LATITUDE, ICON_LONGITUDE, observatory_icon_svg,
+    render_svg_icon,
 };
 use crate::sky_time_slider::{SkyTimeSlider, SkyTimeSliderEvent};
 use crate::state::GlobalObserver;
@@ -53,6 +57,9 @@ pub struct ObserverPopover {
     lat_initial_text: String,
     lon_initial_text: String,
     profile_editor: Option<ProfileEditorState>,
+    horizon_dropdown_open: bool,
+    horizon_trigger_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    horizon_dropdown_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     last_synced_profile_id: String,
 }
 
@@ -69,15 +76,7 @@ impl ObserverPopover {
         let focus_handle = cx.focus_handle();
         let observer_entity = cx.global::<GlobalObserver>().0.clone();
 
-        let (
-            profile_id,
-            loc,
-            hour_of_day,
-            is_live,
-            solar_profile,
-            time_str,
-            std_utc_mins,
-        ) = {
+        let (profile_id, loc, hour_of_day, is_live, solar_profile, time_str, std_utc_mins) = {
             let model = observer_entity.read(cx);
             let dt = model.effective_local_datetime();
             (
@@ -150,6 +149,13 @@ impl ObserverPopover {
         })
         .detach();
 
+        if let Some(horizons_entity) = cx.try_global::<GlobalHorizons>().map(|g| g.0.clone()) {
+            cx.observe_in(&horizons_entity, window, |_this, _model, _window, cx| {
+                cx.notify();
+            })
+            .detach();
+        }
+
         cx.subscribe(&sky_slider, |_, _, event: &SkyTimeSliderEvent, cx| {
             let SkyTimeSliderEvent::Scrub { hour_of_day } = *event;
             let observer = cx.global::<GlobalObserver>().0.clone();
@@ -190,15 +196,22 @@ impl ObserverPopover {
             lat_initial_text: lat_dms,
             lon_initial_text: lon_dms,
             profile_editor: None,
+            horizon_dropdown_open: false,
+            horizon_trigger_bounds: Arc::new(Mutex::new(None)),
+            horizon_dropdown_bounds: Arc::new(Mutex::new(None)),
             last_synced_profile_id: profile_id,
         }
     }
 
-    fn wire_location_slider(
-        slider: &Entity<Slider>,
-        axis: CoordinateAxis,
-        cx: &mut Context<Self>,
-    ) {
+    fn horizon_dropdown_contains(&self, pos: Point<Pixels>) -> bool {
+        self.horizon_dropdown_bounds
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some_and(|b| b.contains(&pos))
+    }
+
+    fn wire_location_slider(slider: &Entity<Slider>, axis: CoordinateAxis, cx: &mut Context<Self>) {
         cx.subscribe(slider, move |_, _, event: &SliderEvent, cx| {
             let observer = cx.global::<GlobalObserver>().0.clone();
             observer.update(cx, |model, cx| {
@@ -250,8 +263,10 @@ impl ObserverPopover {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        cx.subscribe_in(input, window, move |this, entity, event: &TextFieldEvent, window, cx| {
-            match event {
+        cx.subscribe_in(
+            input,
+            window,
+            move |this, entity, event: &TextFieldEvent, window, cx| match event {
                 TextFieldEvent::Submit(raw) => {
                     if let Some(deg) = parse_coordinate(raw, axis) {
                         match axis {
@@ -276,8 +291,12 @@ impl ObserverPopover {
                 }
                 TextFieldEvent::Blur(raw) => {
                     let (is_editing, initial) = match axis {
-                        CoordinateAxis::Latitude => (this.editing_lat, this.lat_initial_text.as_str()),
-                        CoordinateAxis::Longitude => (this.editing_lon, this.lon_initial_text.as_str()),
+                        CoordinateAxis::Latitude => {
+                            (this.editing_lat, this.lat_initial_text.as_str())
+                        }
+                        CoordinateAxis::Longitude => {
+                            (this.editing_lon, this.lon_initial_text.as_str())
+                        }
                     };
                     if !is_editing {
                         return;
@@ -332,8 +351,12 @@ impl ObserverPopover {
                 }
                 TextFieldEvent::Cancel => {
                     let (is_editing, initial) = match axis {
-                        CoordinateAxis::Latitude => (this.editing_lat, this.lat_initial_text.clone()),
-                        CoordinateAxis::Longitude => (this.editing_lon, this.lon_initial_text.clone()),
+                        CoordinateAxis::Latitude => {
+                            (this.editing_lat, this.lat_initial_text.clone())
+                        }
+                        CoordinateAxis::Longitude => {
+                            (this.editing_lon, this.lon_initial_text.clone())
+                        }
                     };
                     match axis {
                         CoordinateAxis::Latitude => this.editing_lat = false,
@@ -362,14 +385,16 @@ impl ObserverPopover {
                     cx.notify();
                 }
                 TextFieldEvent::Change(_) => {}
-            }
-        })
+            },
+        )
         .detach();
     }
 
     fn wire_elevation_input(input: &Entity<TextField>, window: &Window, cx: &mut Context<Self>) {
-        cx.subscribe_in(input, window, |this, entity, event: &TextFieldEvent, window, cx| {
-            match event {
+        cx.subscribe_in(
+            input,
+            window,
+            |this, entity, event: &TextFieldEvent, window, cx| match event {
                 TextFieldEvent::Submit(raw) | TextFieldEvent::Blur(raw) => {
                     let current_elev = cx
                         .global::<GlobalObserver>()
@@ -435,14 +460,16 @@ impl ObserverPopover {
                     window.focus(&this.focus_handle, cx);
                 }
                 TextFieldEvent::Change(_) => {}
-            }
-        })
+            },
+        )
         .detach();
     }
 
     fn wire_time_input(input: &Entity<TextField>, window: &Window, cx: &mut Context<Self>) {
-        cx.subscribe_in(input, window, |this, entity, event: &TextFieldEvent, window, cx| {
-            match event {
+        cx.subscribe_in(
+            input,
+            window,
+            |this, entity, event: &TextFieldEvent, window, cx| match event {
                 TextFieldEvent::Submit(raw) | TextFieldEvent::Blur(raw) => {
                     let current_dt = cx
                         .global::<GlobalObserver>()
@@ -476,7 +503,10 @@ impl ObserverPopover {
                     let (fallback_hm, midnight) = {
                         let model = observer.read(cx);
                         let dt = model.effective_local_datetime();
-                        ((dt.hour(), dt.minute()), model.local_midnight_unix_seconds())
+                        (
+                            (dt.hour(), dt.minute()),
+                            model.local_midnight_unix_seconds(),
+                        )
                     };
                     let next_total_mins = step_time_total_minutes(
                         entity.read(cx).text(),
@@ -505,14 +535,16 @@ impl ObserverPopover {
                     window.focus(&this.focus_handle, cx);
                 }
                 TextFieldEvent::Change(_) => {}
-            }
-        })
+            },
+        )
         .detach();
     }
 
     fn wire_utc_input(input: &Entity<TextField>, window: &Window, cx: &mut Context<Self>) {
-        cx.subscribe_in(input, window, |this, entity, event: &TextFieldEvent, window, cx| {
-            match event {
+        cx.subscribe_in(
+            input,
+            window,
+            |this, entity, event: &TextFieldEvent, window, cx| match event {
                 TextFieldEvent::Submit(raw) => {
                     if let Some(opt_mins) = parse_utc_offset_minutes(raw) {
                         this.utc_editing = false;
@@ -548,8 +580,7 @@ impl ObserverPopover {
                     precision,
                 } => {
                     let observer = cx.global::<GlobalObserver>().0.clone();
-                    let fallback_mins =
-                        observer.read(cx).effective_standard_utc_offset_minutes();
+                    let fallback_mins = observer.read(cx).effective_standard_utc_offset_minutes();
                     let next_mins = step_utc_offset_mins(
                         entity.read(cx).text(),
                         fallback_mins,
@@ -570,8 +601,8 @@ impl ObserverPopover {
                     cx.notify();
                 }
                 TextFieldEvent::Change(_) => {}
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -648,6 +679,7 @@ impl ObserverPopover {
             self.editing_lat = false;
             self.editing_lon = false;
             self.utc_editing = false;
+            self.horizon_dropdown_open = false;
             self.utc_reset_task = None;
             self.utc_pre_reset = None;
         }
@@ -715,7 +747,8 @@ impl ObserverPopover {
             .active_profile()
             .clone();
         let name_input = cx.new(|cx| {
-            let mut field = TextField::new(active.name.clone(), window, cx).placeholder("Site name");
+            let mut field =
+                TextField::new(active.name.clone(), window, cx).placeholder("Site name");
             field.focus(window, cx);
             field
         });
@@ -734,8 +767,10 @@ impl ObserverPopover {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        cx.subscribe_in(input, window, |this, _, event: &TextFieldEvent, window, cx| {
-            match event {
+        cx.subscribe_in(
+            input,
+            window,
+            |this, _, event: &TextFieldEvent, window, cx| match event {
                 TextFieldEvent::Submit(_) => {
                     this.save_profile_editor(cx);
                     window.focus(&this.focus_handle, cx);
@@ -748,8 +783,8 @@ impl ObserverPopover {
                 TextFieldEvent::Change(_)
                 | TextFieldEvent::Blur(_)
                 | TextFieldEvent::Step { .. } => {}
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -768,7 +803,11 @@ impl ObserverPopover {
                     .profile(&id)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "Observatory".to_string());
-                let name = if raw_name.is_empty() { fallback } else { raw_name };
+                let name = if raw_name.is_empty() {
+                    fallback
+                } else {
+                    raw_name
+                };
                 model.update_profile_meta(&id, &name, icon, cx);
             } else {
                 let name = if raw_name.is_empty() {
@@ -974,6 +1013,7 @@ impl ObserverPopover {
                     })
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.profile_editor = None;
+                        this.horizon_dropdown_open = false;
                         this.editing_lat = false;
                         this.editing_lon = false;
                         this.utc_editing = false;
@@ -1012,7 +1052,10 @@ impl ObserverPopover {
                                     .font_buffer(cx)
                                     .text_size(px(9.5))
                                     .text_color(colors.text_muted.opacity(0.8))
-                                    .child(format!("{:.0} m", profile.location.elevation_m.round())),
+                                    .child(format!(
+                                        "{:.0} m",
+                                        profile.location.elevation_m.round()
+                                    )),
                             ),
                     ),
             );
@@ -1044,7 +1087,10 @@ impl ObserverPopover {
                     colors.ghost_element_background
                 })
                 .cursor_pointer()
-                .hover(|s| s.bg(colors.element_hover).border_color(colors.border_focused))
+                .hover(|s| {
+                    s.bg(colors.element_hover)
+                        .border_color(colors.border_focused)
+                })
                 .on_click(cx.listener(|this, _event, window, cx| {
                     if this
                         .profile_editor
@@ -1158,19 +1204,17 @@ impl ObserverPopover {
                     .w_full()
                     .justify_between()
                     .items_center()
-                    .child(
-                        div().when(is_edit && can_delete, |el| {
-                            el.child(
-                                Button::new("delete_profile_btn", "Delete")
-                                    .style(ButtonStyle::Subtle)
-                                    .label_size(LabelSize::Small)
-                                    .color(Color::Error)
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.delete_edited_profile(cx);
-                                    })),
-                            )
-                        }),
-                    )
+                    .child(div().when(is_edit && can_delete, |el| {
+                        el.child(
+                            Button::new("delete_profile_btn", "Delete")
+                                .style(ButtonStyle::Subtle)
+                                .label_size(LabelSize::Small)
+                                .color(Color::Error)
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.delete_edited_profile(cx);
+                                })),
+                        )
+                    }))
                     .child(
                         h_flex()
                             .gap_1()
@@ -1190,9 +1234,11 @@ impl ObserverPopover {
                                 )
                                 .style(ButtonStyle::Filled)
                                 .label_size(LabelSize::Small)
-                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                    this.save_profile_editor(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _event, _window, cx| {
+                                        this.save_profile_editor(cx);
+                                    },
+                                )),
                             ),
                     ),
             )
@@ -1241,7 +1287,10 @@ impl ObserverPopover {
         };
 
         let utc_control = if self.utc_editing {
-            div().w(px(58.0)).child(self.utc_input.clone()).into_any_element()
+            div()
+                .w(px(58.0))
+                .child(self.utc_input.clone())
+                .into_any_element()
         } else {
             let (utc_dec, utc_inc) = match utc_step_buttons {
                 Some((dec, inc)) => (Some(dec), Some(inc)),
@@ -1586,7 +1635,11 @@ impl ObserverPopover {
             .child(label)
     }
 
-    fn render_coordinates_band(&self, loc: GeoLocation, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_coordinates_band(
+        &self,
+        loc: GeoLocation,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = cx.theme().colors();
 
         v_flex()
@@ -1661,10 +1714,275 @@ impl ObserverPopover {
                     .child(self.elev_slider.clone()),
             )
     }
+
+    fn render_horizon_band(
+        &self,
+        active: &ObservatoryProfile,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let cyan: Hsla = rgb(0x42b3c2).into();
+
+        let backgrounds: Vec<persistence::HorizonBackground> = cx
+            .try_global::<GlobalHorizons>()
+            .map(|g| g.0.read(cx).backgrounds().to_vec())
+            .unwrap_or_default();
+
+        let selected_bg = active
+            .horizon_id
+            .as_deref()
+            .and_then(|id| backgrounds.iter().find(|b| b.id == id));
+        let selected_label = selected_bg
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|| "None (Flat 0°)".to_string());
+        let selected_id = selected_bg.map(|b| b.id.clone());
+        let is_open = self.horizon_dropdown_open;
+        if !is_open {
+            if let Ok(mut guard) = self.horizon_dropdown_bounds.lock() {
+                *guard = None;
+            }
+        }
+
+        let trigger_bounds_store = self.horizon_trigger_bounds.clone();
+        let dropdown_bounds_store = self.horizon_dropdown_bounds.clone();
+        let viewport_h = f32::from(window.viewport_size().height);
+        let open_upward = self
+            .horizon_trigger_bounds
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some_and(|b| f32::from(b.origin.y) + f32::from(b.size.height) + 200.0 > viewport_h);
+
+        let manage_id_row = selected_id.clone();
+
+        v_flex()
+            .w_full()
+            .gap_1p5()
+            .child(section_eyebrow("HORIZON BACKGROUND", cx))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .child(
+                        div().absolute().inset_0().child(
+                            canvas(
+                                move |bounds, _window, _cx| {
+                                    if let Ok(mut guard) = trigger_bounds_store.lock() {
+                                        *guard = Some(bounds);
+                                    }
+                                },
+                                |_, (), _, _| {},
+                            )
+                            .size_full(),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .id("horizon_dropdown_trigger")
+                            .w_full()
+                            .h(px(28.0))
+                            .px_2()
+                            .gap_1p5()
+                            .items_center()
+                            .justify_between()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(colors.surface_background.opacity(0.75))
+                            .border_1()
+                            .border_color(if is_open {
+                                cyan.opacity(0.75)
+                            } else {
+                                colors.border_variant
+                            })
+                            .hover(|s| {
+                                s.bg(colors.element_hover)
+                                    .border_color(colors.border_focused)
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.horizon_dropdown_open = !this.horizon_dropdown_open;
+                                cx.notify();
+                            }))
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(render_svg_icon(
+                                        ICON_HORIZON,
+                                        px(14.0),
+                                        if selected_bg.is_some() {
+                                            rgb(0x7be0ec).into()
+                                        } else {
+                                            colors.text_muted
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(12.0))
+                                            .text_color(if selected_bg.is_some() {
+                                                colors.text
+                                            } else {
+                                                colors.text_muted
+                                            })
+                                            .child(selected_label),
+                                    ),
+                            )
+                            .child(
+                                Icon::new(if is_open {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                            ),
+                    )
+                    .when(is_open, |el| {
+                        el.child(
+                            gpui::deferred(
+                                v_flex()
+                                    .id("horizon_dropdown_panel")
+                                    .debug_selector(|| "horizon_dropdown_panel".to_string())
+                                    .absolute()
+                                    .left_0()
+                                    .right_0()
+                                    .when(open_upward, |el| el.bottom(px(32.0)))
+                                    .when(!open_upward, |el| el.top(px(32.0)))
+                                    .occlude()
+                                    .shadow_lg()
+                                    .p_1()
+                                    .gap_0p5()
+                                    .rounded_lg()
+                                    .bg(colors.elevated_surface_background.alpha(1.0))
+                                    .border_1()
+                                    .border_color(colors.border)
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .child(
+                                        div().absolute().inset_0().child(
+                                            canvas(
+                                                move |bounds, _window, _cx| {
+                                                    if let Ok(mut guard) =
+                                                        dropdown_bounds_store.lock()
+                                                    {
+                                                        *guard = Some(bounds);
+                                                    }
+                                                },
+                                                |_, (), _, _| {},
+                                            )
+                                            .size_full(),
+                                        ),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .id("horizon_dropdown_scroll")
+                                            .debug_selector(|| {
+                                                "horizon_dropdown_scroll".to_string()
+                                            })
+                                            .w_full()
+                                            .max_h(px(152.0))
+                                            .overflow_y_scroll()
+                                            .gap_0p5()
+                                            .child(horizon_dropdown_option(
+                                                "horizon_opt_none",
+                                                "None (Flat 0°)",
+                                                None,
+                                                selected_id.is_none(),
+                                                cx,
+                                                cx.listener(|this, _event, _window, cx| {
+                                                    this.horizon_dropdown_open = false;
+                                                    let observer =
+                                                        cx.global::<GlobalObserver>().0.clone();
+                                                    observer.update(cx, |model, cx| {
+                                                        model.set_active_horizon(None, cx);
+                                                    });
+                                                    cx.notify();
+                                                }),
+                                            ))
+                                            .children(backgrounds.into_iter().map(|bg| {
+                                                let bg_id = bg.id.clone();
+                                                let is_active =
+                                                    selected_id.as_deref() == Some(bg_id.as_str());
+                                                let prof = HorizonProfile::from_samples(
+                                                    bg.samples_deg,
+                                                    bg.azimuth_offset_deg,
+                                                );
+                                                let (min_a, max_a) = prof.min_max_altitude_deg();
+                                                let range_str =
+                                                    format!("{min_a:+.0}°..{max_a:+.0}°");
+                                                let click_id = bg_id.clone();
+                                                horizon_dropdown_option(
+                                                    format!("horizon_opt_{bg_id}"),
+                                                    bg.name,
+                                                    Some(range_str),
+                                                    is_active,
+                                                    cx,
+                                                    cx.listener(
+                                                        move |this, _event, _window, cx| {
+                                                            this.horizon_dropdown_open = false;
+                                                            let observer = cx
+                                                                .global::<GlobalObserver>()
+                                                                .0
+                                                                .clone();
+                                                            observer.update(cx, |model, cx| {
+                                                                model.set_active_horizon(
+                                                                    Some(&click_id),
+                                                                    cx,
+                                                                );
+                                                            });
+                                                            cx.notify();
+                                                        },
+                                                    ),
+                                                )
+                                            })),
+                                    )
+                                    .child(Divider::horizontal())
+                                    .child(
+                                        h_flex()
+                                            .id("horizon_dropdown_manage_row")
+                                            .debug_selector(|| {
+                                                "horizon_dropdown_manage_row".to_string()
+                                            })
+                                            .w_full()
+                                            .px_2()
+                                            .py_1()
+                                            .items_center()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(colors.element_hover))
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.dismiss(cx);
+                                                    open_horizon_manager_window(
+                                                        manage_id_row.clone(),
+                                                        cx,
+                                                    );
+                                                },
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.5))
+                                                    .text_color(colors.text)
+                                                    .child("Manage Backgrounds…"),
+                                            ),
+                                    ),
+                            )
+                            .with_priority(10),
+                        )
+                    }),
+            )
+    }
 }
 
 impl Render for ObserverPopover {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let (active, profiles, solar_alt, lst_text) = {
             let model = cx.global::<GlobalObserver>().0.read(cx);
@@ -1693,11 +2011,18 @@ impl Render for ObserverPopover {
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
+                    if this.horizon_dropdown_open {
+                        this.horizon_dropdown_open = false;
+                        cx.notify();
+                    }
                     cx.stop_propagation();
                 }),
             )
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                if this.horizon_dropdown_open && this.horizon_dropdown_contains(event.position) {
+                    return;
+                }
                 this.dismiss(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
@@ -1717,6 +2042,9 @@ impl Render for ObserverPopover {
                     } else if this.profile_editor.is_some() {
                         this.profile_editor = None;
                         cx.notify();
+                    } else if this.horizon_dropdown_open {
+                        this.horizon_dropdown_open = false;
+                        cx.notify();
                     } else {
                         this.dismiss(cx);
                     }
@@ -1732,7 +2060,74 @@ impl Render for ObserverPopover {
             .child(self.render_time_band(cx))
             .child(Divider::horizontal())
             .child(self.render_coordinates_band(active.location, cx))
+            .child(Divider::horizontal())
+            .child(self.render_horizon_band(&active, window, cx))
     }
+}
+
+fn horizon_dropdown_option(
+    id: impl Into<gpui::ElementId>,
+    title: impl Into<gpui::SharedString>,
+    subtitle: Option<String>,
+    selected: bool,
+    cx: &App,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    let cyan: Hsla = rgb(0x42b3c2).into();
+    let title: gpui::SharedString = title.into();
+
+    h_flex()
+        .id(id)
+        .w_full()
+        .px_2()
+        .py_1()
+        .gap_1p5()
+        .items_center()
+        .justify_between()
+        .rounded_sm()
+        .cursor_pointer()
+        .when(selected, |el| el.bg(cyan.opacity(0.14)))
+        .hover(|s| s.bg(colors.element_hover))
+        .on_click(on_click)
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1p5()
+                .items_center()
+                .child(div().w(px(12.0)).flex_none().child(if selected {
+                    Icon::new(IconName::Check)
+                        .size(IconSize::XSmall)
+                        .color(Color::Accent)
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(if selected {
+                            colors.text
+                        } else {
+                            colors.text_muted
+                        })
+                        .child(title),
+                ),
+        )
+        .when_some(subtitle, |el, sub| {
+            el.child(
+                div()
+                    .flex_none()
+                    .font_buffer(cx)
+                    .text_size(px(10.0))
+                    .text_color(colors.text_muted.opacity(0.85))
+                    .child(sub),
+            )
+        })
 }
 
 fn section_eyebrow(title: &'static str, cx: &App) -> impl IntoElement {
@@ -1901,8 +2296,14 @@ pub(crate) fn parse_hm_input(input: &str) -> Option<(u32, u32)> {
     let (h, m) = match parts.as_slice() {
         [single] if single.chars().all(|c| c.is_ascii_digit()) => match single.len() {
             1..=2 => (single.parse::<u32>().ok()?, 0),
-            3 => (single[..1].parse::<u32>().ok()?, single[1..].parse::<u32>().ok()?),
-            4 => (single[..2].parse::<u32>().ok()?, single[2..].parse::<u32>().ok()?),
+            3 => (
+                single[..1].parse::<u32>().ok()?,
+                single[1..].parse::<u32>().ok()?,
+            ),
+            4 => (
+                single[..2].parse::<u32>().ok()?,
+                single[2..].parse::<u32>().ok()?,
+            ),
             _ => return None,
         },
         [hh, mm] => (hh.parse::<u32>().ok()?, mm.parse::<u32>().ok()?),
@@ -1963,24 +2364,31 @@ fn is_dms_input(raw: &str) -> bool {
     let has_marker = raw.chars().any(|c| {
         matches!(
             c,
-            '°' | '\'' | '"' | '′' | '″' | 'd' | 'D' | 'm' | 'M' | 's' | 'S' | 'n' | 'N'
-                | 'e' | 'E' | 'w' | 'W'
+            '°' | '\''
+                | '"'
+                | '′'
+                | '″'
+                | 'd'
+                | 'D'
+                | 'm'
+                | 'M'
+                | 's'
+                | 'S'
+                | 'n'
+                | 'N'
+                | 'e'
+                | 'E'
+                | 'w'
+                | 'W'
         )
     });
     has_marker || raw.split_whitespace().count() > 1
 }
 
-fn format_decimal_preserving_precision(
-    value: f64,
-    raw: &str,
-    precision: StepPrecision,
-) -> String {
-    let raw_decimals = raw
-        .trim()
-        .split_once('.')
-        .map_or(0, |(_, frac)| {
-            frac.chars().take_while(char::is_ascii_digit).count()
-        });
+fn format_decimal_preserving_precision(value: f64, raw: &str, precision: StepPrecision) -> String {
+    let raw_decimals = raw.trim().split_once('.').map_or(0, |(_, frac)| {
+        frac.chars().take_while(char::is_ascii_digit).count()
+    });
     let decimals = match precision {
         StepPrecision::Fine => raw_decimals.max(1),
         StepPrecision::Normal | StepPrecision::Coarse => raw_decimals,
@@ -2071,43 +2479,256 @@ mod tests {
     #[test]
     fn stepping_helpers_support_modifiers_and_bounds() {
         assert_eq!(step_elevation_m("115", 0.0, 1, StepPrecision::Fine), 116.0);
-        assert_eq!(step_elevation_m("115", 0.0, 1, StepPrecision::Normal), 125.0);
-        assert_eq!(step_elevation_m("115", 0.0, 1, StepPrecision::Coarse), 215.0);
-        assert_eq!(step_elevation_m("8950", 0.0, 1, StepPrecision::Coarse), 9000.0);
-        assert_eq!(step_elevation_m("-495", 0.0, -1, StepPrecision::Normal), -500.0);
+        assert_eq!(
+            step_elevation_m("115", 0.0, 1, StepPrecision::Normal),
+            125.0
+        );
+        assert_eq!(
+            step_elevation_m("115", 0.0, 1, StepPrecision::Coarse),
+            215.0
+        );
+        assert_eq!(
+            step_elevation_m("8950", 0.0, 1, StepPrecision::Coarse),
+            9000.0
+        );
+        assert_eq!(
+            step_elevation_m("-495", 0.0, -1, StepPrecision::Normal),
+            -500.0
+        );
 
-        assert_eq!(step_time_total_minutes("09:29", (0, 0), 1, StepPrecision::Fine), 570);
-        assert_eq!(step_time_total_minutes("09:29", (0, 0), 1, StepPrecision::Normal), 579);
-        assert_eq!(step_time_total_minutes("09:29", (0, 0), 1, StepPrecision::Coarse), 629);
-        assert_eq!(step_time_total_minutes("00:05", (0, 0), -1, StepPrecision::Normal), -5);
-        assert_eq!(step_time_total_minutes("23:55", (0, 0), 1, StepPrecision::Normal), 1445);
+        assert_eq!(
+            step_time_total_minutes("09:29", (0, 0), 1, StepPrecision::Fine),
+            570
+        );
+        assert_eq!(
+            step_time_total_minutes("09:29", (0, 0), 1, StepPrecision::Normal),
+            579
+        );
+        assert_eq!(
+            step_time_total_minutes("09:29", (0, 0), 1, StepPrecision::Coarse),
+            629
+        );
+        assert_eq!(
+            step_time_total_minutes("00:05", (0, 0), -1, StepPrecision::Normal),
+            -5
+        );
+        assert_eq!(
+            step_time_total_minutes("23:55", (0, 0), 1, StepPrecision::Normal),
+            1445
+        );
 
-        let (dms_fine, dms_fine_str) =
-            step_coordinate_value("48°18'30\" N", 0.0, CoordinateAxis::Latitude, 1, StepPrecision::Fine);
+        let (dms_fine, dms_fine_str) = step_coordinate_value(
+            "48°18'30\" N",
+            0.0,
+            CoordinateAxis::Latitude,
+            1,
+            StepPrecision::Fine,
+        );
         assert!((dms_fine - (48.0 + 19.5 / 60.0)).abs() < 1e-6);
         assert_eq!(dms_fine_str, "48°19'30\" N");
-        let (_, dms_norm_str) =
-            step_coordinate_value("48°18'30\" N", 0.0, CoordinateAxis::Latitude, 1, StepPrecision::Normal);
+        let (_, dms_norm_str) = step_coordinate_value(
+            "48°18'30\" N",
+            0.0,
+            CoordinateAxis::Latitude,
+            1,
+            StepPrecision::Normal,
+        );
         assert_eq!(dms_norm_str, "49°18'30\" N");
-        let (_, dms_coarse_str) =
-            step_coordinate_value("85°00'00\" N", 0.0, CoordinateAxis::Latitude, 1, StepPrecision::Coarse);
+        let (_, dms_coarse_str) = step_coordinate_value(
+            "85°00'00\" N",
+            0.0,
+            CoordinateAxis::Latitude,
+            1,
+            StepPrecision::Coarse,
+        );
         assert_eq!(dms_coarse_str, "90°00'00\" N");
 
         let (dec_fine, dec_fine_str) =
             step_coordinate_value("48", 0.0, CoordinateAxis::Latitude, 1, StepPrecision::Fine);
         assert!((dec_fine - 48.1).abs() < 1e-9);
         assert_eq!(dec_fine_str, "48.1");
-        let (_, dec_norm_str) =
-            step_coordinate_value("48.50", 0.0, CoordinateAxis::Latitude, -1, StepPrecision::Normal);
+        let (_, dec_norm_str) = step_coordinate_value(
+            "48.50",
+            0.0,
+            CoordinateAxis::Latitude,
+            -1,
+            StepPrecision::Normal,
+        );
         assert_eq!(dec_norm_str, "47.50");
-        let (_, dec_zero_str) =
-            step_coordinate_value("-0.1", 0.0, CoordinateAxis::Latitude, 1, StepPrecision::Fine);
+        let (_, dec_zero_str) = step_coordinate_value(
+            "-0.1",
+            0.0,
+            CoordinateAxis::Latitude,
+            1,
+            StepPrecision::Fine,
+        );
         assert_eq!(dec_zero_str, "0.0");
 
         assert_eq!(step_utc_offset_mins("+1", 0, 1, StepPrecision::Fine), 90);
         assert_eq!(step_utc_offset_mins("+1", 0, 1, StepPrecision::Normal), 120);
         assert_eq!(step_utc_offset_mins("+1", 0, 1, StepPrecision::Coarse), 240);
-        assert_eq!(step_utc_offset_mins("+13", 0, 1, StepPrecision::Coarse), 840);
-        assert_eq!(step_utc_offset_mins("-11", 0, -1, StepPrecision::Coarse), -720);
+        assert_eq!(
+            step_utc_offset_mins("+13", 0, 1, StepPrecision::Coarse),
+            840
+        );
+        assert_eq!(
+            step_utc_offset_mins("-11", 0, -1, StepPrecision::Coarse),
+            -720
+        );
+    }
+
+    struct TestThemeSettingsProvider {
+        ui_font: gpui::Font,
+        buffer_font: gpui::Font,
+    }
+
+    impl Default for TestThemeSettingsProvider {
+        fn default() -> Self {
+            Self {
+                ui_font: gpui::font(".ZedSans"),
+                buffer_font: gpui::font(".ZedMono"),
+            }
+        }
+    }
+
+    impl theme::ThemeSettingsProvider for TestThemeSettingsProvider {
+        fn ui_font<'a>(&'a self, _cx: &'a App) -> &'a gpui::Font {
+            &self.ui_font
+        }
+        fn buffer_font<'a>(&'a self, _cx: &'a App) -> &'a gpui::Font {
+            &self.buffer_font
+        }
+        fn ui_font_size(&self, _cx: &App) -> Pixels {
+            px(14.0)
+        }
+        fn buffer_font_size(&self, _cx: &App) -> Pixels {
+            px(14.0)
+        }
+        fn ui_density(&self, _cx: &App) -> theme::UiDensity {
+            theme::UiDensity::Default
+        }
+    }
+
+    struct TestPopoverHost {
+        popover: Entity<ObserverPopover>,
+        dismissed: bool,
+    }
+
+    impl Render for TestPopoverHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::TopRight)
+                        .position(gpui::point(px(900.0), px(40.0)))
+                        .snap_to_window_with_margin(px(8.0))
+                        .child(div().occlude().child(self.popover.clone())),
+                )
+                .with_priority(1),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn horizon_dropdown_is_opaque_and_manage_row_opens_manager(cx: &mut gpui::TestAppContext) {
+        let store = persistence::DocumentStore::in_memory();
+        let store_h = store.clone();
+        let store_o = store;
+
+        cx.update(|cx| {
+            theme::set_theme_settings_provider(Box::new(TestThemeSettingsProvider::default()), cx);
+            theme::init(theme::LoadThemes::JustBase, cx);
+            horizon::init_with_store(store_h, cx);
+            crate::state::init_with_store(store_o, cx);
+            let horizons = cx.global::<horizon::GlobalHorizons>().0.clone();
+            horizons.update(cx, |m, cx| {
+                m.create_blank("Ridge Test", cx);
+            });
+        });
+
+        let (host, visual_cx) = cx.add_window_view(|window, cx| {
+            let popover = cx.new(|cx| ObserverPopover::new(window, cx));
+            cx.subscribe(
+                &popover,
+                move |this: &mut TestPopoverHost, _, _: &DismissEvent, _| {
+                    this.dismissed = true;
+                },
+            )
+            .detach();
+            TestPopoverHost {
+                popover,
+                dismissed: false,
+            }
+        });
+
+        visual_cx.run_until_parked();
+        let popover = host.read_with(visual_cx, |h, _| h.popover.clone());
+        popover.update(visual_cx, |p, cx| {
+            p.horizon_dropdown_open = true;
+            cx.notify();
+        });
+        visual_cx.run_until_parked();
+        // Second pass so bounds measured during the first open frame are consumed.
+        popover.update(visual_cx, |_, cx| cx.notify());
+        visual_cx.run_until_parked();
+
+        let panel = visual_cx
+            .debug_bounds("horizon_dropdown_panel")
+            .expect("dropdown panel rendered");
+        let manage = visual_cx
+            .debug_bounds("horizon_dropdown_manage_row")
+            .expect("manage row rendered");
+
+        // The measured dropdown bounds must cover the panel, otherwise clicks inside it
+        // are treated as "outside" clicks and dismiss the popover before the click lands.
+        let measured = popover
+            .read_with(visual_cx, |p, _| *p.horizon_dropdown_bounds.lock().unwrap())
+            .expect("dropdown bounds measured");
+        assert!(
+            measured.size.height > px(1.0),
+            "dropdown bounds must not be empty"
+        );
+        assert!(measured.contains(&manage.center()));
+
+        // The panel must be painted with an opaque background.
+        let scale = visual_cx.update(|window, _| window.scale_factor());
+        let quads = visual_cx.update(|window, _| window.painted_quads());
+        let opaque_panel_bg = quads.iter().any(|q| {
+            let bounds_match = (q.bounds.origin.x.0 / scale - f32::from(panel.origin.x)).abs()
+                < 1.0
+                && (q.bounds.origin.y.0 / scale - f32::from(panel.origin.y)).abs() < 1.0
+                && (q.bounds.size.width.0 / scale - f32::from(panel.size.width)).abs() < 1.0
+                && (q.bounds.size.height.0 / scale - f32::from(panel.size.height)).abs() < 1.0;
+            bounds_match && format!("{:?}", q.background).ends_with("a: 1.0 })")
+        });
+        assert!(
+            opaque_panel_bg,
+            "dropdown panel must paint an opaque background quad"
+        );
+
+        visual_cx.simulate_mouse_down(
+            manage.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.run_until_parked();
+        assert!(
+            !host.read_with(visual_cx, |h, _| h.dismissed),
+            "mouse down inside the dropdown must not dismiss the popover"
+        );
+        let windows_before = visual_cx.read(|cx| cx.windows().len());
+        visual_cx.simulate_mouse_up(
+            manage.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.run_until_parked();
+        assert!(host.read_with(visual_cx, |h, _| h.dismissed));
+        let windows_after = visual_cx.read(|cx| cx.windows().len());
+        assert_eq!(
+            windows_after,
+            windows_before + 1,
+            "manager window should open"
+        );
     }
 }

@@ -10,8 +10,12 @@ theme.workspace = true
 persistence.workspace = true
 celestial.workspace = true
 components.workspace = true
+horizon.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

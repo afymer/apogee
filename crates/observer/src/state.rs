@@ -2,15 +2,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use celestial::coords::geodetic::GeodeticPosition;
 use celestial::observer::ObservationContext;
-use celestial::solar::{DailySolarEvents, SkyPhase, find_sky_events, sample_day_solar_profile, solar_altitude_deg};
+use celestial::solar::{
+    DailySolarEvents, SkyPhase, find_sky_events, sample_day_solar_profile, solar_altitude_deg,
+};
 use chrono::{
     DateTime, Datelike, Days, FixedOffset, Local, NaiveDate, NaiveTime, Offset, TimeDelta,
     TimeZone, Timelike, Utc,
 };
 use gpui::{App, AppContext, Context, Entity, Global};
 use persistence::{
-    DocumentStore, GeoLocation, MergeOutcome, ObservatoryIcon, ObservatoryProfile,
-    ObserverCatalog, TimezoneConfig, TimezoneMode,
+    DocumentStore, GeoLocation, MergeOutcome, ObservatoryIcon, ObservatoryProfile, ObserverCatalog,
+    TimezoneConfig, TimezoneMode,
 };
 
 /// Observation time synchronization mode.
@@ -111,6 +113,11 @@ impl ObserverModel {
         self.catalog.active_profile().location
     }
 
+    /// Returns the active profile's linked custom horizon background ID, if any.
+    pub fn active_horizon_id(&self) -> Option<&str> {
+        self.catalog.active_profile().horizon_id.as_deref()
+    }
+
     /// Converts the active location into a celestial [`GeodeticPosition`].
     pub fn geodetic_position(&self) -> GeodeticPosition {
         let loc = self.active_location();
@@ -129,7 +136,8 @@ impl ObserverModel {
 
     /// Returns the active timestamp converted to the active site's configured timezone + DST.
     pub fn effective_local_datetime(&self) -> DateTime<FixedOffset> {
-        unix_seconds_to_utc(self.effective_unix_seconds()).with_timezone(&self.effective_fixed_offset())
+        unix_seconds_to_utc(self.effective_unix_seconds())
+            .with_timezone(&self.effective_fixed_offset())
     }
 
     /// Returns the active site's configured timezone basis (`SiteLocal` or `Utc`).
@@ -173,7 +181,11 @@ impl ObserverModel {
     /// Returns total effective UTC offset in seconds (standard offset + DST if active).
     pub fn effective_utc_offset_secs(&self) -> i32 {
         let base_secs = self.effective_standard_utc_offset_minutes() * 60;
-        let dst_secs = if self.effective_dst_enabled() { 3600 } else { 0 };
+        let dst_secs = if self.effective_dst_enabled() {
+            3600
+        } else {
+            0
+        };
         (base_secs + dst_secs).clamp(-18 * 3600, 18 * 3600)
     }
 
@@ -386,7 +398,8 @@ impl ObserverModel {
     pub fn step_days(&mut self, delta_days: i64, cx: &mut Context<Self>) {
         let dt = self.effective_local_datetime();
         let next_date = if delta_days >= 0 {
-            dt.date_naive().checked_add_days(Days::new(delta_days as u64))
+            dt.date_naive()
+                .checked_add_days(Days::new(delta_days as u64))
         } else {
             dt.date_naive()
                 .checked_sub_days(Days::new(delta_days.unsigned_abs()))
@@ -425,7 +438,10 @@ impl ObserverModel {
         } else {
             let offset = self.effective_fixed_offset();
             let today = Utc::now().with_timezone(&offset).date_naive();
-            if let Some(resolved) = offset.from_local_datetime(&today.and_time(dt.time())).single() {
+            if let Some(resolved) = offset
+                .from_local_datetime(&today.and_time(dt.time()))
+                .single()
+            {
                 self.set_manual_unix_seconds(resolved.timestamp() as f64, cx);
             }
         }
@@ -509,8 +525,23 @@ impl ObserverModel {
     pub fn reset_dst_auto(&mut self, cx: &mut Context<Self>) {
         let active_id = self.catalog.active_profile_id.clone();
         let mut tz = self.active_profile().timezone;
-        if tz.dst_enabled.take().is_some()
-            && self.catalog.update_timezone(&active_id, tz).is_ok()
+        if tz.dst_enabled.take().is_some() && self.catalog.update_timezone(&active_id, tz).is_ok() {
+            self.persist();
+            cx.notify();
+        }
+    }
+
+    /// Links or clears the custom horizon background assigned to the active observatory profile.
+    pub fn set_active_horizon(&mut self, horizon_id: Option<&str>, cx: &mut Context<Self>) {
+        let active_id = self.catalog.active_profile_id.clone();
+        let normalized = horizon_id.map(str::trim).filter(|s| !s.is_empty());
+        if self.active_profile().horizon_id.as_deref() == normalized {
+            return;
+        }
+        if self
+            .catalog
+            .set_horizon(&active_id, normalized.map(ToString::to_string))
+            .is_ok()
         {
             self.persist();
             cx.notify();
@@ -659,12 +690,21 @@ mod tests {
             parse_coordinate("1°21'07\" E", CoordinateAxis::Longitude).unwrap(),
             150.0,
         );
-        assert_eq!(compute_effective_offset_secs(site_tz, southern_france, 60, false), 3600);
-        assert_eq!(compute_effective_offset_secs(site_tz, southern_france, 60, true), 7200);
+        assert_eq!(
+            compute_effective_offset_secs(site_tz, southern_france, 60, false),
+            3600
+        );
+        assert_eq!(
+            compute_effective_offset_secs(site_tz, southern_france, 60, true),
+            7200
+        );
 
         // Tokyo (35.6762° N, 139.6503° E => +9h = +540m) does NOT inherit host DST when host is UTC+1.
         let tokyo = GeoLocation::new(35.6762, 139.6503, 40.0);
-        assert_eq!(compute_effective_offset_secs(site_tz, tokyo, 60, true), 9 * 3600);
+        assert_eq!(
+            compute_effective_offset_secs(site_tz, tokyo, 60, true),
+            9 * 3600
+        );
 
         // London (51.5074° N, 0.1278° W => UTC+0) does NOT inherit host DST when host is UTC+1.
         let london = GeoLocation::new(51.5074, -0.1278, 11.0);

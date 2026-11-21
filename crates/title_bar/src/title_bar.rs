@@ -57,6 +57,9 @@ impl TitleBar {
                     menu.entry("Settings", None, |_window, cx| {
                         settings::open_settings_window(cx);
                     })
+                    .entry("Horizon Backgrounds", None, |_window, cx| {
+                        horizon::open_horizon_manager_window(None, cx);
+                    })
                     .separator()
                     .entry("Exit", None, |_window, cx| cx.quit())
                 }))
