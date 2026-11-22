@@ -147,22 +147,30 @@ impl ObserverModel {
 
     /// Returns the active site's standard (non-DST) UTC offset in minutes.
     pub fn effective_standard_utc_offset_minutes(&self) -> i32 {
+        self.standard_utc_offset_minutes_at(self.effective_unix_seconds())
+    }
+
+    fn standard_utc_offset_minutes_at(&self, unix_seconds: f64) -> i32 {
         let tz = self.active_profile().timezone;
         let host_std_mins = match tz.mode {
             TimezoneMode::SiteLocal => 0,
             TimezoneMode::Utc if tz.utc_offset_minutes.is_some() => 0,
-            TimezoneMode::Utc => host_standard_offset_and_dst(self.effective_unix_seconds()).0,
+            TimezoneMode::Utc => host_standard_offset_and_dst(unix_seconds).0,
         };
         resolve_standard_utc_offset_minutes(tz, self.active_location(), host_std_mins)
     }
 
     /// Returns whether Daylight Saving Time (+1h) is currently active for the site/date.
     pub fn effective_dst_enabled(&self) -> bool {
+        self.dst_enabled_at(self.effective_unix_seconds())
+    }
+
+    fn dst_enabled_at(&self, unix_seconds: f64) -> bool {
         let tz = self.active_profile().timezone;
         if let Some(dst) = tz.dst_enabled {
             return dst;
         }
-        let (host_std_mins, host_dst) = host_standard_offset_and_dst(self.effective_unix_seconds());
+        let (host_std_mins, host_dst) = host_standard_offset_and_dst(unix_seconds);
         let effective_std_mins =
             resolve_standard_utc_offset_minutes(tz, self.active_location(), host_std_mins);
         resolve_dst_enabled(tz, effective_std_mins, host_std_mins, host_dst)
@@ -180,8 +188,12 @@ impl ObserverModel {
 
     /// Returns total effective UTC offset in seconds (standard offset + DST if active).
     pub fn effective_utc_offset_secs(&self) -> i32 {
-        let base_secs = self.effective_standard_utc_offset_minutes() * 60;
-        let dst_secs = if self.effective_dst_enabled() {
+        self.utc_offset_secs_at(self.effective_unix_seconds())
+    }
+
+    fn utc_offset_secs_at(&self, unix_seconds: f64) -> i32 {
+        let base_secs = self.standard_utc_offset_minutes_at(unix_seconds) * 60;
+        let dst_secs = if self.dst_enabled_at(unix_seconds) {
             3600
         } else {
             0
@@ -191,7 +203,11 @@ impl ObserverModel {
 
     /// Builds the [`FixedOffset`] corresponding to the active site's timezone + DST.
     pub fn effective_fixed_offset(&self) -> FixedOffset {
-        FixedOffset::east_opt(self.effective_utc_offset_secs()).unwrap_or_else(|| Utc.fix())
+        self.fixed_offset_at(self.effective_unix_seconds())
+    }
+
+    fn fixed_offset_at(&self, unix_seconds: f64) -> FixedOffset {
+        FixedOffset::east_opt(self.utc_offset_secs_at(unix_seconds)).unwrap_or_else(|| Utc.fix())
     }
 
     /// Returns the Unix timestamp for local `00:00:00` of the active local calendar date.
@@ -424,27 +440,49 @@ impl ObserverModel {
         self.set_manual_unix_seconds(target_secs, cx);
     }
 
-    /// Jumps to today's local date while keeping the currently scrubbed local time of day.
-    pub fn jump_to_today_keep_time(&mut self, cx: &mut Context<Self>) {
-        let dt = self.effective_local_datetime();
+    /// Returns today's calendar date in the active site's effective timezone.
+    pub fn today_local_date(&self) -> NaiveDate {
         let full_host_auto = self.timezone_mode() == TimezoneMode::Utc
             && self.is_utc_offset_auto()
             && self.is_dst_auto();
         if full_host_auto {
-            let today = Local::now().date_naive();
-            if let Some(resolved) = resolve_local_date_time(today, dt.time()) {
-                self.set_manual_unix_seconds(resolved.timestamp() as f64, cx);
-            }
+            Local::now().date_naive()
         } else {
-            let offset = self.effective_fixed_offset();
-            let today = Utc::now().with_timezone(&offset).date_naive();
-            if let Some(resolved) = offset
-                .from_local_datetime(&today.and_time(dt.time()))
-                .single()
-            {
-                self.set_manual_unix_seconds(resolved.timestamp() as f64, cx);
-            }
+            let offset = self.fixed_offset_at(now_unix_seconds());
+            Utc::now().with_timezone(&offset).date_naive()
         }
+    }
+
+    /// Pins observation time to a specific local calendar `date` while keeping the current local time of day.
+    pub fn set_local_date(&mut self, date: NaiveDate, cx: &mut Context<Self>) {
+        let dt = self.effective_local_datetime();
+        let full_host_auto = self.timezone_mode() == TimezoneMode::Utc
+            && self.is_utc_offset_auto()
+            && self.is_dst_auto();
+        let resolved_secs = if full_host_auto {
+            resolve_local_date_time(date, dt.time()).map(|r| r.timestamp() as f64)
+        } else {
+            let initial_offset = self.effective_fixed_offset();
+            initial_offset
+                .from_local_datetime(&date.and_time(dt.time()))
+                .single()
+                .and_then(|est| {
+                    let target_offset = self.fixed_offset_at(est.timestamp() as f64);
+                    target_offset
+                        .from_local_datetime(&date.and_time(dt.time()))
+                        .single()
+                })
+                .map(|r| r.timestamp() as f64)
+        };
+        if let Some(secs) = resolved_secs {
+            self.set_manual_unix_seconds(secs, cx);
+        }
+    }
+
+    /// Jumps to today's local date while keeping the currently scrubbed local time of day.
+    pub fn jump_to_today_keep_time(&mut self, cx: &mut Context<Self>) {
+        let today = self.today_local_date();
+        self.set_local_date(today, cx);
     }
 
     /// Sets the active site's timezone basis (`SiteLocal` or `Utc`).

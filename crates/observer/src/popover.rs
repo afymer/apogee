@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use celestial::HorizonProfile;
-use chrono::Timelike;
+use chrono::{Datelike, Days, NaiveDate, Timelike};
 use components::{Slider, SliderEvent, StepPrecision, TextField, TextFieldEvent};
 use gpui::{
     App, Bounds, Context, CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
@@ -60,6 +60,10 @@ pub struct ObserverPopover {
     horizon_dropdown_open: bool,
     horizon_trigger_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     horizon_dropdown_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    calendar_open: bool,
+    calendar_view_year: i32,
+    calendar_view_month: u32,
+    calendar_dropdown_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     last_synced_profile_id: String,
 }
 
@@ -76,7 +80,17 @@ impl ObserverPopover {
         let focus_handle = cx.focus_handle();
         let observer_entity = cx.global::<GlobalObserver>().0.clone();
 
-        let (profile_id, loc, hour_of_day, is_live, solar_profile, time_str, std_utc_mins) = {
+        let (
+            profile_id,
+            loc,
+            hour_of_day,
+            is_live,
+            solar_profile,
+            time_str,
+            std_utc_mins,
+            initial_year,
+            initial_month,
+        ) = {
             let model = observer_entity.read(cx);
             let dt = model.effective_local_datetime();
             (
@@ -87,6 +101,8 @@ impl ObserverPopover {
                 model.solar_day_profile(97),
                 format!("{:02}:{:02}", dt.hour(), dt.minute()),
                 model.effective_standard_utc_offset_minutes(),
+                dt.year(),
+                dt.month(),
             )
         };
 
@@ -199,6 +215,10 @@ impl ObserverPopover {
             horizon_dropdown_open: false,
             horizon_trigger_bounds: Arc::new(Mutex::new(None)),
             horizon_dropdown_bounds: Arc::new(Mutex::new(None)),
+            calendar_open: false,
+            calendar_view_year: initial_year,
+            calendar_view_month: initial_month,
+            calendar_dropdown_bounds: Arc::new(Mutex::new(None)),
             last_synced_profile_id: profile_id,
         }
     }
@@ -209,6 +229,20 @@ impl ObserverPopover {
             .ok()
             .and_then(|g| *g)
             .is_some_and(|b| b.contains(&pos))
+    }
+
+    fn calendar_dropdown_contains(&self, pos: Point<Pixels>) -> bool {
+        self.calendar_dropdown_bounds
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some_and(|b| b.contains(&pos))
+    }
+
+    fn step_calendar_month(&mut self, delta_months: i32, cx: &mut Context<Self>) {
+        (self.calendar_view_year, self.calendar_view_month) =
+            step_year_month(self.calendar_view_year, self.calendar_view_month, delta_months);
+        cx.notify();
     }
 
     fn wire_location_slider(slider: &Entity<Slider>, axis: CoordinateAxis, cx: &mut Context<Self>) {
@@ -680,6 +714,7 @@ impl ObserverPopover {
             self.editing_lon = false;
             self.utc_editing = false;
             self.horizon_dropdown_open = false;
+            self.calendar_open = false;
             self.utc_reset_task = None;
             self.utc_pre_reset = None;
         }
@@ -1014,6 +1049,7 @@ impl ObserverPopover {
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.profile_editor = None;
                         this.horizon_dropdown_open = false;
+                        this.calendar_open = false;
                         this.editing_lat = false;
                         this.editing_lon = false;
                         this.utc_editing = false;
@@ -1256,16 +1292,23 @@ impl ObserverPopover {
         let colors = cx.theme().colors();
         let status = cx.theme().status();
         let cyan: Hsla = rgb(0x42b3c2).into();
-        let (is_live, dt, events, std_offset_mins, dst_enabled) = {
+        let (is_live, dt, today_date, events, std_offset_mins, dst_enabled) = {
             let observer = cx.global::<GlobalObserver>().0.read(cx);
             (
                 observer.clock().is_live(),
                 observer.effective_local_datetime(),
+                observer.today_local_date(),
                 observer.daily_solar_events(),
                 observer.effective_standard_utc_offset_minutes(),
                 observer.effective_dst_enabled(),
             )
         };
+        let selected_date = dt.date_naive();
+        if !self.calendar_open {
+            if let Ok(mut guard) = self.calendar_dropdown_bounds.lock() {
+                *guard = None;
+            }
+        }
         let utc_badge = format_utc_offset(std_offset_mins * 60);
         let date_label = dt.format("%b %d, %Y").to_string();
         let seconds_str = format!(":{:02}", dt.second());
@@ -1524,40 +1567,95 @@ impl ObserverPopover {
                             .child(dst_pill),
                     )
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap_0p5()
+                        div()
+                            .relative()
                             .child(
-                                IconButton::new("prev_day_btn", IconName::ChevronLeft)
-                                    .shape(IconButtonShape::Square)
-                                    .icon_size(IconSize::XSmall)
-                                    .style(ButtonStyle::Subtle)
-                                    .on_click(|_, _, cx| {
-                                        let observer = cx.global::<GlobalObserver>().0.clone();
-                                        observer.update(cx, |model, cx| model.step_days(-1, cx));
-                                    }),
+                                h_flex()
+                                    .items_center()
+                                    .gap_0p5()
+                                    .child(
+                                        IconButton::new("prev_day_btn", IconName::ChevronLeft)
+                                            .shape(IconButtonShape::Square)
+                                            .icon_size(IconSize::XSmall)
+                                            .style(ButtonStyle::Subtle)
+                                            .on_click(|_, _, cx| {
+                                                let observer = cx.global::<GlobalObserver>().0.clone();
+                                                observer.update(cx, |model, cx| {
+                                                    model.step_days(-1, cx);
+                                                });
+                                            }),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .id("jump_today_btn")
+                                            .debug_selector(|| "jump_today_btn".to_string())
+                                            .h(px(22.0))
+                                            .px_1p5()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .border_1()
+                                            .when(self.calendar_open, |el| {
+                                                el.border_color(cyan.opacity(0.75))
+                                                    .bg(cyan.opacity(0.14))
+                                                    .text_color(rgb(0x7be0ec))
+                                            })
+                                            .when(!self.calendar_open, |el| {
+                                                el.border_color(gpui::transparent_black())
+                                                    .bg(gpui::transparent_black())
+                                                    .text_color(colors.text)
+                                                    .hover(|s| s.bg(colors.element_hover))
+                                            })
+                                            .text_size(px(12.0))
+                                            .whitespace_nowrap()
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                                this.calendar_open = !this.calendar_open;
+                                                if this.calendar_open {
+                                                    this.horizon_dropdown_open = false;
+                                                    this.calendar_view_year = selected_date.year();
+                                                    this.calendar_view_month = selected_date.month();
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .on_mouse_down(
+                                                MouseButton::Right,
+                                                cx.listener(|this, _event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.calendar_open = false;
+                                                    let observer =
+                                                        cx.global::<GlobalObserver>().0.clone();
+                                                    observer.update(cx, |model, cx| {
+                                                        model.jump_to_today_keep_time(cx);
+                                                    });
+                                                    cx.notify();
+                                                }),
+                                            )
+                                            .child(date_label),
+                                    )
+                                    .child(
+                                        IconButton::new("next_day_btn", IconName::ChevronRight)
+                                            .shape(IconButtonShape::Square)
+                                            .icon_size(IconSize::XSmall)
+                                            .style(ButtonStyle::Subtle)
+                                            .on_click(|_, _, cx| {
+                                                let observer = cx.global::<GlobalObserver>().0.clone();
+                                                observer.update(cx, |model, cx| {
+                                                    model.step_days(1, cx);
+                                                });
+                                            }),
+                                    ),
                             )
-                            .child(
-                                Button::new("jump_today_btn", date_label)
-                                    .style(ButtonStyle::Subtle)
-                                    .label_size(LabelSize::Small)
-                                    .on_click(|_, _, cx| {
-                                        let observer = cx.global::<GlobalObserver>().0.clone();
-                                        observer.update(cx, |model, cx| {
-                                            model.jump_to_today_keep_time(cx);
-                                        });
-                                    }),
-                            )
-                            .child(
-                                IconButton::new("next_day_btn", IconName::ChevronRight)
-                                    .shape(IconButtonShape::Square)
-                                    .icon_size(IconSize::XSmall)
-                                    .style(ButtonStyle::Subtle)
-                                    .on_click(|_, _, cx| {
-                                        let observer = cx.global::<GlobalObserver>().0.clone();
-                                        observer.update(cx, |model, cx| model.step_days(1, cx));
-                                    }),
-                            ),
+                            .when(self.calendar_open, |el| {
+                                el.child(self.render_calendar_popover(
+                                    selected_date,
+                                    today_date,
+                                    cx,
+                                ))
+                            }),
                     ),
             )
             .child(self.sky_slider.clone())
@@ -1602,6 +1700,201 @@ impl ObserverPopover {
                         )),
                 )
             })
+    }
+
+    fn render_calendar_popover(
+        &self,
+        selected_date: NaiveDate,
+        today_date: NaiveDate,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let cyan: Hsla = rgb(0x42b3c2).into();
+        let dropdown_bounds_store = self.calendar_dropdown_bounds.clone();
+        let grid = calendar_month_grid(self.calendar_view_year, self.calendar_view_month);
+        let view_year = self.calendar_view_year;
+        let view_month = self.calendar_view_month;
+
+        gpui::deferred(
+            v_flex()
+                .id("calendar_dropdown_panel")
+                .debug_selector(|| "calendar_dropdown_panel".to_string())
+                .absolute()
+                .right_0()
+                .top(px(26.0))
+                .w(px(236.0))
+                .occlude()
+                .shadow_lg()
+                .p_2()
+                .gap_1p5()
+                .rounded_lg()
+                .bg(colors.elevated_surface_background.alpha(1.0))
+                .border_1()
+                .border_color(colors.border)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                    let dy = match event.delta {
+                        ScrollDelta::Lines(pt) => pt.y,
+                        ScrollDelta::Pixels(pt) => f32::from(pt.y),
+                    };
+                    if dy.abs() > 1e-4 {
+                        let step = if event.modifiers.shift { 12 } else { 1 };
+                        let delta = if dy > 0.0 { -step } else { step };
+                        this.step_calendar_month(delta, cx);
+                    }
+                    cx.stop_propagation();
+                }))
+                .child(
+                    div().absolute().inset_0().child(
+                        canvas(
+                            move |bounds, _window, _cx| {
+                                if let Ok(mut guard) = dropdown_bounds_store.lock() {
+                                    *guard = Some(bounds);
+                                }
+                            },
+                            |_, (), _, _| {},
+                        )
+                        .size_full(),
+                    ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            IconButton::new("calendar_prev_month_btn", IconName::ChevronLeft)
+                                .shape(IconButtonShape::Square)
+                                .icon_size(IconSize::XSmall)
+                                .style(ButtonStyle::Subtle)
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.step_calendar_month(-1, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("calendar_month_year_label")
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(colors.element_hover))
+                                .text_size(px(11.5))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(colors.text)
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.calendar_view_year = today_date.year();
+                                        this.calendar_view_month = today_date.month();
+                                        cx.notify();
+                                    }),
+                                )
+                                .child(format!("{} {}", month_name(view_month), view_year)),
+                        )
+                        .child(
+                            IconButton::new("calendar_next_month_btn", IconName::ChevronRight)
+                                .shape(IconButtonShape::Square)
+                                .icon_size(IconSize::XSmall)
+                                .style(ButtonStyle::Subtle)
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.step_calendar_month(1, cx);
+                                })),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_0p5()
+                        .children(["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().map(
+                            |&dow| {
+                                h_flex()
+                                    .flex_1()
+                                    .h(px(18.0))
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(9.5))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(colors.text_muted)
+                                    .child(dow)
+                            },
+                        )),
+                )
+                .when_some(grid, |el, days| {
+                    el.child(
+                        v_flex()
+                            .w_full()
+                            .gap_0p5()
+                            .children(days.as_chunks::<7>().0.iter().map(|week| {
+                                h_flex().w_full().gap_0p5().children(week.iter().map(
+                                    |&cell_date| {
+                                        let is_current_month = cell_date.year() == view_year
+                                            && cell_date.month() == view_month;
+                                        let is_selected = cell_date == selected_date;
+                                        let is_today = cell_date == today_date;
+                                        let day_id =
+                                            format!("calendar_day_{}", cell_date.format("%Y-%m-%d"));
+                                        let debug_id = day_id.clone();
+
+                                        h_flex()
+                                            .id(day_id)
+                                            .debug_selector(move || debug_id.clone())
+                                            .flex_1()
+                                            .h(px(24.0))
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .font_buffer(cx)
+                                            .text_size(px(11.0))
+                                            .when(is_selected, |el| {
+                                                el.bg(cyan.opacity(0.22))
+                                                    .border_1()
+                                                    .border_color(cyan.opacity(0.85))
+                                                    .text_color(rgb(0x7be0ec))
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            })
+                                            .when(!is_selected && is_today, |el| {
+                                                el.border_1()
+                                                    .border_color(cyan.opacity(0.45))
+                                                    .text_color(rgb(0x7be0ec))
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                            })
+                                            .when(!is_selected && !is_today, |el| {
+                                                el.text_color(if is_current_month {
+                                                    colors.text
+                                                } else {
+                                                    colors.text_muted.opacity(0.45)
+                                                })
+                                            })
+                                            .hover(|s| {
+                                                s.bg(if is_selected {
+                                                    cyan.opacity(0.30)
+                                                } else {
+                                                    colors.element_hover
+                                                })
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    let observer =
+                                                        cx.global::<GlobalObserver>().0.clone();
+                                                    observer.update(cx, |model, cx| {
+                                                        model.set_local_date(cell_date, cx);
+                                                    });
+                                                    this.calendar_open = false;
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child(format!("{}", cell_date.day()))
+                                    },
+                                ))
+                            })),
+                    )
+                }),
+        )
+        .with_priority(10)
     }
 
     fn utc_step_button(
@@ -1802,6 +2095,9 @@ impl ObserverPopover {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.horizon_dropdown_open = !this.horizon_dropdown_open;
+                                if this.horizon_dropdown_open {
+                                    this.calendar_open = false;
+                                }
                                 cx.notify();
                             }))
                             .child(
@@ -2011,8 +2307,9 @@ impl Render for ObserverPopover {
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
-                    if this.horizon_dropdown_open {
+                    if this.horizon_dropdown_open || this.calendar_open {
                         this.horizon_dropdown_open = false;
+                        this.calendar_open = false;
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -2021,6 +2318,9 @@ impl Render for ObserverPopover {
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                 if this.horizon_dropdown_open && this.horizon_dropdown_contains(event.position) {
+                    return;
+                }
+                if this.calendar_open && this.calendar_dropdown_contains(event.position) {
                     return;
                 }
                 this.dismiss(cx);
@@ -2044,6 +2344,9 @@ impl Render for ObserverPopover {
                         cx.notify();
                     } else if this.horizon_dropdown_open {
                         this.horizon_dropdown_open = false;
+                        cx.notify();
+                    } else if this.calendar_open {
+                        this.calendar_open = false;
                         cx.notify();
                     } else {
                         this.dismiss(cx);
@@ -2271,6 +2574,46 @@ pub(crate) fn slider_to_elev(t: f32) -> f64 {
     (-100.0 + 5100.0 * clamped * clamped)
         .round()
         .clamp(GeoLocation::MIN_ELEV_M, GeoLocation::MAX_ELEV_M)
+}
+
+pub(crate) fn step_year_month(year: i32, month: u32, delta_months: i32) -> (i32, u32) {
+    let clamped_month = month.clamp(1, 12) as i32;
+    let total = year * 12 + (clamped_month - 1) + delta_months;
+    let min_total = 1970 * 12;
+    let max_total = 2100 * 12 + 11;
+    let bounded = total.clamp(min_total, max_total);
+    let next_year = bounded.div_euclid(12);
+    let next_month = (bounded.rem_euclid(12) + 1) as u32;
+    (next_year, next_month)
+}
+
+pub(crate) fn calendar_month_grid(year: i32, month: u32) -> Option<[NaiveDate; 42]> {
+    let first_of_month = NaiveDate::from_ymd_opt(year, month, 1)?;
+    let leading_days = u64::from(first_of_month.weekday().num_days_from_monday());
+    let grid_start = first_of_month.checked_sub_days(Days::new(leading_days))?;
+    let mut days = [first_of_month; 42];
+    for (idx, slot) in days.iter_mut().enumerate() {
+        *slot = grid_start.checked_add_days(Days::new(idx as u64))?;
+    }
+    Some(days)
+}
+
+pub(crate) fn month_name(month: u32) -> &'static str {
+    match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "",
+    }
 }
 
 pub(crate) fn format_hour_hm(hour_f: f64) -> String {
@@ -2725,10 +3068,209 @@ mod tests {
         visual_cx.run_until_parked();
         assert!(host.read_with(visual_cx, |h, _| h.dismissed));
         let windows_after = visual_cx.read(|cx| cx.windows().len());
-        assert_eq!(
-            windows_after,
-            windows_before + 1,
-            "manager window should open"
+        assert_eq!(windows_after, windows_before + 1, "manager window should open");
+    }
+
+    #[test]
+    fn calendar_helpers_and_grid_alignment() {
+        assert_eq!(step_year_month(2026, 1, -1), (2025, 12));
+        assert_eq!(step_year_month(2025, 12, 1), (2026, 1));
+        assert_eq!(step_year_month(2026, 5, -12), (2025, 5));
+        assert_eq!(step_year_month(1970, 1, -1), (1970, 1));
+        assert_eq!(step_year_month(2100, 12, 1), (2100, 12));
+        assert_eq!(month_name(1), "January");
+        assert_eq!(month_name(11), "November");
+        assert_eq!(month_name(12), "December");
+
+        // Nov 1, 2026 is a Sunday -> Monday-first grid starts Oct 26, 2026.
+        let grid = calendar_month_grid(2026, 11).expect("valid month grid");
+        assert_eq!(grid[0], NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
+        assert_eq!(grid[0].weekday(), chrono::Weekday::Mon);
+        assert_eq!(grid[6], NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+        assert_eq!(grid[35], NaiveDate::from_ymd_opt(2026, 11, 30).unwrap());
+        assert_eq!(grid[41], NaiveDate::from_ymd_opt(2026, 12, 6).unwrap());
+        for pair in grid.windows(2) {
+            assert_eq!(pair[1].signed_duration_since(pair[0]).num_days(), 1);
+        }
+
+        // May 1, 2026 is a Friday -> Monday-first grid starts Apr 27, 2026.
+        let may_grid = calendar_month_grid(2026, 5).expect("valid May grid");
+        assert_eq!(may_grid[0], NaiveDate::from_ymd_opt(2026, 4, 27).unwrap());
+        assert_eq!(may_grid[4], NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
+    }
+
+    #[gpui::test]
+    fn date_picker_left_click_opens_calendar_and_right_click_resets_to_today(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = persistence::DocumentStore::in_memory();
+        let store_h = store.clone();
+        let store_o = store;
+
+        cx.update(|cx| {
+            theme::set_theme_settings_provider(Box::new(TestThemeSettingsProvider::default()), cx);
+            theme::init(theme::LoadThemes::JustBase, cx);
+            horizon::init_with_store(store_h, cx);
+            crate::state::init_with_store(store_o, cx);
+        });
+
+        let (host, visual_cx) = cx.add_window_view(|window, cx| {
+            let popover = cx.new(|cx| ObserverPopover::new(window, cx));
+            cx.subscribe(
+                &popover,
+                move |this: &mut TestPopoverHost, _, _: &DismissEvent, _| {
+                    this.dismissed = true;
+                },
+            )
+            .detach();
+            TestPopoverHost {
+                popover,
+                dismissed: false,
+            }
+        });
+
+        let observer = visual_cx.read(|cx| cx.global::<GlobalObserver>().0.clone());
+        let today = observer.read_with(visual_cx, |m, _| m.today_local_date());
+        let (initial_date, picked_date, day_selector) =
+            if today == NaiveDate::from_ymd_opt(2026, 5, 15).unwrap() {
+                (
+                    NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+                    "calendar_day_2026-06-20",
+                )
+            } else {
+                (
+                    NaiveDate::from_ymd_opt(2026, 5, 15).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 5, 20).unwrap(),
+                    "calendar_day_2026-05-20",
+                )
+            };
+
+        observer.update(visual_cx, |m, cx| {
+            m.set_local_date(initial_date, cx);
+            m.set_local_hm(22, 30, cx);
+        });
+        visual_cx.run_until_parked();
+
+        let popover = host.read_with(visual_cx, |h, _| h.popover.clone());
+        let jump_btn = visual_cx
+            .debug_bounds("jump_today_btn")
+            .expect("date button rendered");
+
+        // Left-click opens the calendar picker without dismissing the popover.
+        visual_cx.simulate_mouse_down(
+            jump_btn.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
         );
+        visual_cx.simulate_mouse_up(
+            jump_btn.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.run_until_parked();
+
+        assert!(
+            popover.read_with(visual_cx, |p, _| p.calendar_open),
+            "left-clicking the date button should open the calendar"
+        );
+        assert!(!host.read_with(visual_cx, |h, _| h.dismissed));
+
+        let panel = visual_cx
+            .debug_bounds("calendar_dropdown_panel")
+            .expect("calendar panel rendered");
+        let day_btn = visual_cx
+            .debug_bounds(day_selector)
+            .expect("day cell rendered");
+
+        let measured = popover
+            .read_with(visual_cx, |p, _| *p.calendar_dropdown_bounds.lock().unwrap())
+            .expect("calendar dropdown bounds measured");
+        assert!(measured.size.height > px(1.0));
+        assert!(measured.contains(&day_btn.center()));
+
+        let scale = visual_cx.update(|window, _| window.scale_factor());
+        let quads = visual_cx.update(|window, _| window.painted_quads());
+        let opaque_panel_bg = quads.iter().any(|q| {
+            let bounds_match = (q.bounds.origin.x.0 / scale - f32::from(panel.origin.x)).abs()
+                < 1.0
+                && (q.bounds.origin.y.0 / scale - f32::from(panel.origin.y)).abs() < 1.0
+                && (q.bounds.size.width.0 / scale - f32::from(panel.size.width)).abs() < 1.0
+                && (q.bounds.size.height.0 / scale - f32::from(panel.size.height)).abs() < 1.0;
+            bounds_match && format!("{:?}", q.background).ends_with("a: 1.0 })")
+        });
+        assert!(
+            opaque_panel_bg,
+            "calendar panel must paint an opaque background quad"
+        );
+
+        // Clicking a day cell selects that date, preserves local HH:MM, closes calendar, and keeps popover open.
+        visual_cx.simulate_mouse_down(
+            day_btn.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.run_until_parked();
+        assert!(
+            !host.read_with(visual_cx, |h, _| h.dismissed),
+            "mouse down inside calendar must not dismiss the popover"
+        );
+        visual_cx.simulate_mouse_up(
+            day_btn.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.run_until_parked();
+
+        assert!(
+            !popover.read_with(visual_cx, |p, _| p.calendar_open),
+            "calendar should close after selecting a date"
+        );
+        assert!(!host.read_with(visual_cx, |h, _| h.dismissed));
+        let after_pick = observer.read_with(visual_cx, |m, _| {
+            let dt = m.effective_local_datetime();
+            (dt.date_naive(), dt.hour(), dt.minute())
+        });
+        assert_eq!(after_pick, (picked_date, 22, 30));
+
+        // Left-click opens the calendar again; right-click closes it and resets to today's date keeping HH:MM.
+        let jump_btn = visual_cx
+            .debug_bounds("jump_today_btn")
+            .expect("date button rendered");
+        visual_cx.simulate_mouse_down(
+            jump_btn.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.simulate_mouse_up(
+            jump_btn.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.run_until_parked();
+        assert!(popover.read_with(visual_cx, |p, _| p.calendar_open));
+
+        visual_cx.simulate_mouse_down(
+            jump_btn.center(),
+            MouseButton::Right,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.simulate_mouse_up(
+            jump_btn.center(),
+            MouseButton::Right,
+            gpui::Modifiers::default(),
+        );
+        visual_cx.run_until_parked();
+
+        assert!(
+            !popover.read_with(visual_cx, |p, _| p.calendar_open),
+            "right-clicking the date button should close the calendar"
+        );
+        assert!(!host.read_with(visual_cx, |h, _| h.dismissed));
+        let after_reset = observer.read_with(visual_cx, |m, _| {
+            let dt = m.effective_local_datetime();
+            (dt.date_naive(), dt.hour(), dt.minute())
+        });
+        assert_eq!(after_reset, (today, 22, 30));
     }
 }
