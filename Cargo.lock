@@ -284,6 +284,7 @@ dependencies = [
  "glam",
  "gpui",
  "gpui_platform",
+ "hifitime",
  "horizon",
  "image",
  "observer",

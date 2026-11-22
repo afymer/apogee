@@ -276,6 +276,19 @@ impl StarSpatialIndex {
             .map(|pos| &self.metadata[pos].1)
     }
 
+    /// Iterates over every star in the index as `(catalog_index, StarRecord, Option<&StarMetadata>)`.
+    pub fn iter_stars(
+        &self,
+    ) -> impl Iterator<Item = (u32, StarRecord, Option<&StarMetadata>)> + '_ {
+        self.entries.iter().map(|entry| {
+            (
+                entry.catalog_index,
+                entry.record,
+                self.metadata_for(entry.catalog_index),
+            )
+        })
+    }
+
     /// Picks the highest-priority star under `cursor_ndc`, prioritizing brighter/larger stars.
     #[allow(clippy::too_many_arguments)]
     pub fn pick(

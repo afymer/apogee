@@ -1,4 +1,5 @@
 mod bevy_viewport;
+mod sky_search;
 mod star_details;
 mod theme_loader;
 mod theme_provider;
@@ -87,6 +88,10 @@ fn main() {
         {
             let _span = ::tracing::info_span!("star_details_init").entered();
             star_details::init(cx);
+        }
+        {
+            let _span = ::tracing::info_span!("sky_search_init").entered();
+            sky_search::init(cx);
         }
         {
             let _span = ::tracing::info_span!("bevy_viewport_init").entered();

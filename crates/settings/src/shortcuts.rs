@@ -29,6 +29,8 @@ actions!(
         OpenSettings,
         /// Opens the Keyboard Shortcuts window.
         OpenKeyboardShortcuts,
+        /// Opens the Sky Object Search palette.
+        OpenSkySearch,
     ]
 );
 
@@ -62,6 +64,14 @@ pub fn shortcut_specs() -> Vec<ShortcutSpec> {
             description: "Open the Keyboard Shortcuts window.",
             default_binding: None,
             make_binding: |binding| KeyBinding::new(binding, OpenKeyboardShortcuts, None),
+        },
+        ShortcutSpec {
+            id: "apogee::OpenSkySearch",
+            title: "Search Sky Objects",
+            category: "Planetarium",
+            description: "Search for stars and solar-system objects in the sky.",
+            default_binding: Some("secondary-f"),
+            make_binding: |binding| KeyBinding::new(binding, OpenSkySearch, None),
         },
     ]
 }

@@ -453,6 +453,216 @@ pub fn compute_solar_system_daily_trajectory(
     })
 }
 
+/// Builds a continuous topocentric [`DailyTrajectory`] for a [`SolarSystemBody`] over an arbitrary
+/// window `[start_unix_secs .. start_unix_secs + duration_hours * 3600]` (for example a 12-hour
+/// `[-6h .. +6h]` arc centered on the current time).
+///
+/// Sample and event `hour` values are offsets in `[0.0 ..= duration_hours]` from `start_unix_secs`.
+/// Only Rise, Set, Transit, and LowerTransit events that genuinely occur within the window are emitted.
+pub fn compute_solar_system_window_trajectory(
+    location: GeodeticPosition,
+    start_unix_secs: f64,
+    duration_hours: f64,
+    body: SolarSystemBody,
+    horizon: Option<&HorizonProfile>,
+    base_samples: usize,
+) -> DailyTrajectory {
+    let duration = duration_hours.max(1.0);
+    let az_alt_at_epoch = |epoch: Epoch| solar_system_az_alt_deg(location, epoch, body);
+    let count = base_samples.max(25);
+    let step_hours = duration / (count - 1) as f64;
+
+    let mut raw_alt = Vec::with_capacity(count);
+    let mut raw_clear = Vec::with_capacity(count);
+    for i in 0..count {
+        let h = i as f64 * step_hours;
+        let (az, alt) = az_alt_at_epoch(Epoch::from_unix_seconds(start_unix_secs + h * 3600.0));
+        let h_alt = horizon.map_or(0.0, |prof| prof.altitude_at_azimuth_deg(az));
+        raw_alt.push(alt);
+        raw_clear.push(alt - h_alt);
+    }
+
+    let mut rise_hours = Vec::new();
+    let mut set_hours = Vec::new();
+    let mut transit_hour_opt = None;
+    let mut lower_transit_hour_opt = None;
+
+    let mut max_idx = 0usize;
+    let mut min_idx = 0usize;
+    for i in 0..count {
+        if raw_alt[i] > raw_alt[max_idx] {
+            max_idx = i;
+        }
+        if raw_alt[i] < raw_alt[min_idx] {
+            min_idx = i;
+        }
+        if i > 0 {
+            let prev = raw_clear[i - 1];
+            let curr = raw_clear[i];
+            let h0 = (i - 1) as f64 * step_hours;
+            let h1 = i as f64 * step_hours;
+            if prev < 0.0 && curr >= 0.0 {
+                rise_hours.push(refine_clearance_crossing_with(
+                    start_unix_secs,
+                    horizon,
+                    h0,
+                    h1,
+                    true,
+                    &az_alt_at_epoch,
+                ));
+            } else if prev >= 0.0 && curr < 0.0 {
+                set_hours.push(refine_clearance_crossing_with(
+                    start_unix_secs,
+                    horizon,
+                    h0,
+                    h1,
+                    false,
+                    &az_alt_at_epoch,
+                ));
+            }
+        }
+    }
+
+    let mut max_altitude_deg = raw_alt[max_idx];
+    let mut min_altitude_deg = raw_alt[min_idx];
+    let mut best_transit_hour = max_idx as f64 * step_hours;
+    let mut best_lower_hour = min_idx as f64 * step_hours;
+
+    // Only emit a Transit / LowerTransit event if the extremum is strictly interior to the window.
+    if max_idx > 0 && max_idx + 1 < count {
+        let (h, alt) = refine_extremum_with(
+            start_unix_secs,
+            (max_idx - 1) as f64 * step_hours,
+            (max_idx + 1) as f64 * step_hours,
+            true,
+            &az_alt_at_epoch,
+        );
+        best_transit_hour = h;
+        max_altitude_deg = alt;
+        transit_hour_opt = Some(h);
+    }
+    if min_idx > 0 && min_idx + 1 < count {
+        let (h, alt) = refine_extremum_with(
+            start_unix_secs,
+            (min_idx - 1) as f64 * step_hours,
+            (min_idx + 1) as f64 * step_hours,
+            false,
+            &az_alt_at_epoch,
+        );
+        best_lower_hour = h;
+        min_altitude_deg = alt;
+        lower_transit_hour_opt = Some(h);
+    }
+
+    let mut hours: Vec<f64> = (0..count).map(|i| i as f64 * step_hours).collect();
+    for event_h in rise_hours
+        .iter()
+        .copied()
+        .chain(set_hours.iter().copied())
+        .chain(transit_hour_opt)
+        .chain(lower_transit_hour_opt)
+    {
+        let h = event_h.clamp(0.0, duration);
+        if hours.iter().all(|&existing| (existing - h).abs() > 1e-4) {
+            hours.push(h);
+        }
+    }
+    hours.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let sample_at_hour = |hour: f64, force_above: bool| -> TrajectorySample {
+        let (az_deg, alt_deg) =
+            az_alt_at_epoch(Epoch::from_unix_seconds(start_unix_secs + hour * 3600.0));
+        let topo_enu = topocentric_spherical_to_enu(
+            Angle::from_degrees(az_deg),
+            Angle::from_degrees(alt_deg),
+        )
+        .normalize_or_zero();
+        let h_alt = horizon.map_or(0.0, |prof| prof.altitude_at_azimuth_deg(az_deg));
+        let above_horizon = force_above || alt_deg >= h_alt - 1e-3;
+        TrajectorySample {
+            hour,
+            az_deg,
+            alt_deg,
+            topo_enu,
+            above_horizon,
+        }
+    };
+
+    let samples: Vec<TrajectorySample> = hours
+        .into_iter()
+        .map(|h| {
+            let is_crossing = rise_hours.iter().any(|&r| (r - h).abs() < 1e-4)
+                || set_hours.iter().any(|&s| (s - h).abs() < 1e-4);
+            sample_at_hour(h, is_crossing)
+        })
+        .collect();
+
+    let mut events = Vec::with_capacity(4);
+    for &rise_h in &rise_hours {
+        let s = sample_at_hour(rise_h, true);
+        events.push(TrajectoryEventPoint {
+            kind: TrajectoryPointKind::Rise,
+            hour: s.hour,
+            az_deg: s.az_deg,
+            alt_deg: s.alt_deg,
+            topo_enu: s.topo_enu,
+            above_horizon: true,
+        });
+    }
+    if let Some(transit_h) = transit_hour_opt {
+        let s = sample_at_hour(transit_h, false);
+        events.push(TrajectoryEventPoint {
+            kind: TrajectoryPointKind::Transit,
+            hour: s.hour,
+            az_deg: s.az_deg,
+            alt_deg: s.alt_deg,
+            topo_enu: s.topo_enu,
+            above_horizon: s.above_horizon,
+        });
+    }
+    for &set_h in &set_hours {
+        let s = sample_at_hour(set_h, true);
+        events.push(TrajectoryEventPoint {
+            kind: TrajectoryPointKind::Set,
+            hour: s.hour,
+            az_deg: s.az_deg,
+            alt_deg: s.alt_deg,
+            topo_enu: s.topo_enu,
+            above_horizon: true,
+        });
+    }
+    if let Some(lower_h) = lower_transit_hour_opt {
+        let s = sample_at_hour(lower_h, false);
+        events.push(TrajectoryEventPoint {
+            kind: TrajectoryPointKind::LowerTransit,
+            hour: s.hour,
+            az_deg: s.az_deg,
+            alt_deg: s.alt_deg,
+            topo_enu: s.topo_enu,
+            above_horizon: s.above_horizon,
+        });
+    }
+
+    let all_above = raw_clear.iter().all(|&c| c >= 0.0);
+    let all_below = raw_clear.iter().all(|&c| c < 0.0);
+    let visibility = DailyTargetVisibility {
+        rise_hour: rise_hours.first().copied(),
+        transit_hour: best_transit_hour,
+        lower_transit_hour: best_lower_hour,
+        max_altitude_deg,
+        min_altitude_deg,
+        set_hour: set_hours.first().copied(),
+        circumpolar: all_above,
+        never_rises: all_below,
+    };
+
+    DailyTrajectory {
+        samples,
+        events,
+        visibility,
+    }
+}
+
 fn compute_daily_trajectory_with(
     local_midnight_unix_secs: f64,
     horizon: Option<&HorizonProfile>,

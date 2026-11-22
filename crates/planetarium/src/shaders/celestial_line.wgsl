@@ -30,7 +30,11 @@ fn vertex(input: VertexInput) -> VertexOutput {
 
     out.clip_position = project_celestial(v_cam, uniforms.projection);
     out.alpha = 1.0;
-    out.tier_alpha = mix(1.0, uniforms.minor_alpha, input.line_tier);
+    out.tier_alpha = select(
+        mix(1.0, uniforms.minor_alpha, input.line_tier),
+        clamp(-1.0 - input.line_tier, 0.0, 1.0),
+        input.line_tier < -0.5,
+    );
     out.cam_z = select(0.0, v_cam.z / v_len, v_len > 1e-6);
     return out;
 }

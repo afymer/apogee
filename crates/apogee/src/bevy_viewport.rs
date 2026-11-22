@@ -5,8 +5,8 @@ use std::{
 };
 
 use celestial::{
-    DailyTrajectory, HorizonProfile, TrajectoryPointKind,
-    compute_equatorial_daily_trajectory, compute_solar_system_daily_trajectory,
+    DailyTrajectory, HorizonProfile, TrajectoryPointKind, compute_equatorial_daily_trajectory,
+    compute_solar_system_window_trajectory,
     coords::{Angle, geodetic::GeodeticPosition},
 };
 use components::{Slider, SliderEvent};
@@ -38,6 +38,7 @@ use workspace::{
     workbench::Workbench,
 };
 
+use crate::sky_search;
 use crate::star_details::{
     GlobalStarSelection, SelectedObject, SelectedObjectId, TargetDayCacheKey, format_local_hour_hm,
     lerp_rgba, paint_disc,
@@ -45,6 +46,24 @@ use crate::star_details::{
 
 const HOVER_PREVIEW_DELAY: Duration = Duration::from_millis(280);
 const CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
+const SOLAR_SYSTEM_TRAJ_HALF_WINDOW_HOURS: f64 = 6.0;
+const SOLAR_SYSTEM_TRAJ_DURATION_HOURS: f64 = SOLAR_SYSTEM_TRAJ_HALF_WINDOW_HOURS * 2.0;
+const TRAJ_EDGE_FADE_FRAC: f32 = 0.22;
+
+#[inline]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0).max(1e-6)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[inline]
+fn trajectory_edge_fade(offset_hour: f64, duration_hours: f64, faded: bool) -> f32 {
+    if !faded || duration_hours <= 0.0 {
+        return 1.0;
+    }
+    let u = (offset_hour / duration_hours).clamp(0.0, 1.0) as f32;
+    smoothstep(0.0, TRAJ_EDGE_FADE_FRAC, u) * smoothstep(0.0, TRAJ_EDGE_FADE_FRAC, 1.0 - u)
+}
 
 const ICON_COORDS_HORIZONTAL: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
   <path d="M2.5 18H21.5" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
@@ -391,6 +410,10 @@ pub struct PlanetariumPanel {
     last_synced_selection_nonce: Option<u64>,
     trajectory_cache_key: Option<TargetDayCacheKey>,
     cached_trajectory: Option<Arc<DailyTrajectory>>,
+    trajectory_window_start_secs: f64,
+    trajectory_start_local_hour: f64,
+    trajectory_duration_hours: f64,
+    trajectory_is_faded: bool,
     last_synced_trajectory: Option<(TargetDayCacheKey, bool)>,
     last_scale_factor: f64,
     active_opacity_layer: Option<QuickLayer>,
@@ -675,6 +698,9 @@ impl PlanetariumPanel {
 
             let initial_view_info = bridge.view_info();
             let initial_star_index = bridge.star_index();
+            if let Some(index) = initial_star_index.as_ref() {
+                sky_search::publish_star_index(index.clone(), cx);
+            }
             let initial_scale_factor = f64::from(window.scale_factor());
 
             let initial_selection_nonce =
@@ -750,6 +776,10 @@ impl PlanetariumPanel {
                 last_synced_selection_nonce: initial_selection_nonce,
                 trajectory_cache_key: None,
                 cached_trajectory: None,
+                trajectory_window_start_secs: 0.0,
+                trajectory_start_local_hour: 0.0,
+                trajectory_duration_hours: 24.0,
+                trajectory_is_faded: false,
                 last_synced_trajectory: None,
                 last_scale_factor: initial_scale_factor,
                 active_opacity_layer: None,
@@ -949,7 +979,17 @@ impl PlanetariumPanel {
             .unwrap_or((true, true, true, true))
     }
 
-    fn pick_object_at_cursor(&mut self, cx: &App) -> Option<HoveredObject> {
+    fn ensure_star_index(&mut self, cx: &mut App) -> Option<&Arc<StarSpatialIndex>> {
+        if self.star_index.is_none() {
+            if let Some(index) = self.bridge.star_index() {
+                sky_search::publish_star_index(index.clone(), cx);
+                self.star_index = Some(index);
+            }
+        }
+        self.star_index.as_ref()
+    }
+
+    fn pick_object_at_cursor(&mut self, cx: &mut App) -> Option<HoveredObject> {
         let (ndc, bounds) = (
             self.cursor_ndc()?,
             self.viewport_bounds.lock().ok().and_then(|g| *g)?,
@@ -980,19 +1020,23 @@ impl PlanetariumPanel {
         if !stars_visible {
             return None;
         }
-        if self.star_index.is_none() {
-            self.star_index = self.bridge.star_index();
-        }
-        let index = self.star_index.as_ref()?;
+        let view_info = self.latest_view_info;
+        let scale_factor = self.last_scale_factor;
+        let index = self.ensure_star_index(cx)?.clone();
+        let star_horizon_occluder = if occlude_custom_horizon {
+            self.active_horizon_profile.as_ref()
+        } else {
+            None
+        };
         index
             .pick(
-                &self.latest_view_info,
+                &view_info,
                 ndc,
                 (w, h),
-                self.last_scale_factor,
+                scale_factor,
                 &StarRenderParams::default(),
                 occlude_ground,
-                horizon_occluder,
+                star_horizon_occluder,
             )
             .map(HoveredObject::Star)
     }
@@ -1078,25 +1122,44 @@ impl PlanetariumPanel {
             return None;
         };
 
-        let (loc, midnight) = cx
+        let (loc, midnight, epoch_secs) = cx
             .try_global::<GlobalObserver>()
             .map(|g| {
                 let m = g.0.read(cx);
-                (m.geodetic_position(), m.local_midnight_unix_seconds())
+                (
+                    m.geodetic_position(),
+                    m.local_midnight_unix_seconds(),
+                    m.observation_context().epoch_unix_seconds(),
+                )
             })
             .unwrap_or_else(|| {
                 let obs = self.latest_view_info.observer;
                 let secs = obs.epoch_unix_seconds();
                 let midnight = (secs / 86_400.0).floor() * 86_400.0;
-                (obs.location, midnight)
+                (obs.location, midnight, secs)
             });
+
+        let (window_start_secs, duration_hours, is_faded, cache_time_bucket) = match selected {
+            SelectedObject::Star(_) => (midnight, 24.0, false, midnight.round() as i64),
+            SelectedObject::SolarSystem(_) => {
+                let start = epoch_secs - SOLAR_SYSTEM_TRAJ_HALF_WINDOW_HOURS * 3600.0;
+                // Quantize to 1-minute steps so the [-6h..+6h] arc tracks smoothly without per-frame rebuilds.
+                let bucket = (start / 60.0).round() as i64;
+                (
+                    bucket as f64 * 60.0,
+                    SOLAR_SYSTEM_TRAJ_DURATION_HOURS,
+                    true,
+                    bucket,
+                )
+            }
+        };
 
         let next_key = TargetDayCacheKey {
             target_id: selected.id(),
             lat_bits: loc.latitude_deg().to_bits(),
             lon_bits: loc.longitude_deg().to_bits(),
             elev_bits: loc.elevation_m().to_bits(),
-            local_midnight_secs: midnight.round() as i64,
+            local_midnight_secs: cache_time_bucket,
             horizon_key: self.last_synced_horizon_key.clone(),
         };
 
@@ -1104,36 +1167,44 @@ impl PlanetariumPanel {
             let traj = match selected {
                 SelectedObject::Star(star) => compute_equatorial_daily_trajectory(
                     loc,
-                    midnight,
+                    window_start_secs,
                     Angle::from_degrees(star.ra_deg),
                     Angle::from_degrees(star.dec_deg),
                     self.active_horizon_profile.as_ref(),
                     145,
                 ),
-                SelectedObject::SolarSystem(body) => compute_solar_system_daily_trajectory(
+                SelectedObject::SolarSystem(body) => compute_solar_system_window_trajectory(
                     loc,
-                    midnight,
+                    window_start_secs,
+                    duration_hours,
                     *body,
                     self.active_horizon_profile.as_ref(),
-                    145,
+                    121,
                 ),
             };
             self.cached_trajectory = Some(Arc::new(traj));
             self.trajectory_cache_key = Some(next_key);
+            self.trajectory_window_start_secs = window_start_secs;
+            self.trajectory_start_local_hour =
+                ((window_start_secs - midnight) / 3600.0).rem_euclid(24.0);
+            self.trajectory_duration_hours = duration_hours;
+            self.trajectory_is_faded = is_faded;
         }
 
         self.cached_trajectory.clone()
     }
 
-    fn jump_to_hour(&self, hour: f64, cx: &mut Context<Self>) {
+    fn jump_to_trajectory_offset_hour(&self, offset_hour: f64, cx: &mut Context<Self>) {
+        let target_unix_secs = self.trajectory_window_start_secs + offset_hour * 3600.0;
         if let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.clone()) {
             observer.update(cx, |model, cx| {
-                model.set_local_hour_of_day(hour, cx);
+                model.set_manual_unix_seconds(target_unix_secs, cx);
             });
         }
     }
 
     fn on_bevy_frame(&mut self, cx: &mut Context<Self>) {
+        let _ = self.ensure_star_index(cx);
         self.latest_view_info = self.bridge.view_info();
         self.sync_status_bar(cx);
         let _ = self.compute_hovered_star(cx);
@@ -1434,14 +1505,18 @@ impl Render for PlanetariumPanel {
                 let sync_key = (key.clone(), occlude_ground);
                 if self.last_synced_trajectory.as_ref() != Some(&sync_key) {
                     self.last_synced_trajectory = Some(sync_key);
+                    let duration_hours = self.trajectory_duration_hours;
+                    let is_faded = self.trajectory_is_faded;
                     self.bridge.set_trajectory(Some(TrajectoryRenderData {
                         points: traj_arc
                             .samples
                             .iter()
                             .map(|s| {
+                                let fade = trajectory_edge_fade(s.hour, duration_hours, is_faded);
                                 (
                                     [s.topo_enu.x as f32, s.topo_enu.y as f32, s.topo_enu.z as f32],
                                     s.above_horizon,
+                                    fade,
                                 )
                             })
                             .collect(),
@@ -1549,7 +1624,17 @@ impl Render for PlanetariumPanel {
                     event_badges.push((*event, sx, sy));
                 }
 
-                Some((srgb, trajectory, view_info, (bw, bh), occlude_ground, event_badges))
+                Some((
+                    srgb,
+                    trajectory,
+                    view_info,
+                    (bw, bh),
+                    occlude_ground,
+                    event_badges,
+                    self.trajectory_start_local_hour,
+                    self.trajectory_duration_hours,
+                    self.trajectory_is_faded,
+                ))
             });
 
         let hovered_overlay = self
@@ -1735,7 +1820,18 @@ impl Render for PlanetariumPanel {
             )
             .when_some(
                 trajectory_overlay,
-                |el, (srgb, trajectory, view_info, proj_dims, occlude_ground, event_badges)| {
+                |el,
+                 (
+                     srgb,
+                     trajectory,
+                     view_info,
+                     proj_dims,
+                     occlude_ground,
+                     event_badges,
+                     start_local_hour,
+                     duration_hours,
+                     is_faded,
+                 )| {
                     let obj_rgb = Rgba {
                         r: srgb[0],
                         g: srgb[1],
@@ -1761,6 +1857,9 @@ impl Render for PlanetariumPanel {
                                     &badges_for_canvas,
                                     obj_rgb,
                                     occlude_ground,
+                                    start_local_hour,
+                                    duration_hours,
+                                    is_faded,
                                     window,
                                 );
                             },
@@ -1770,34 +1869,35 @@ impl Render for PlanetariumPanel {
                         .top_0()
                         .left_0(),
                     )
-                    .children(event_badges.into_iter().map(
-                        |(event, sx, sy)| {
+                    .children(event_badges.into_iter().enumerate().map(
+                        |(idx, (event, sx, sy))| {
+                            let display_hour = (start_local_hour + event.hour).rem_euclid(24.0);
                             let (icon_glyph, kind_label, detail_text) = match event.kind {
                                 TrajectoryPointKind::Transit => (
                                     "▲",
                                     "Transit",
                                     format!(
                                         "{} ({:+.0}°)",
-                                        format_local_hour_hm(event.hour),
+                                        format_local_hour_hm(display_hour),
                                         event.alt_deg
                                     ),
                                 ),
                                 TrajectoryPointKind::Rise => (
                                     "↗",
                                     "Rise",
-                                    format_local_hour_hm(event.hour),
+                                    format_local_hour_hm(display_hour),
                                 ),
                                 TrajectoryPointKind::Set => (
                                     "↘",
                                     "Set",
-                                    format_local_hour_hm(event.hour),
+                                    format_local_hour_hm(display_hour),
                                 ),
                                 TrajectoryPointKind::LowerTransit => (
                                     "▼",
                                     "Low",
                                     format!(
                                         "{} ({:+.0}°)",
-                                        format_local_hour_hm(event.hour),
+                                        format_local_hour_hm(display_hour),
                                         event.alt_deg
                                     ),
                                 ),
@@ -1811,17 +1911,17 @@ impl Render for PlanetariumPanel {
                                 }
                             };
                             let pill_x = (sx + 10.0).clamp(10.0, (bw - 148.0).max(10.0));
-                            let jump_hour = event.hour;
+                            let jump_offset_hour = event.hour;
                             let tip_text = format!(
                                 "{} at {} (Az {:.0}°, Alt {:+.1}°) — Click to jump",
                                 event.kind.label(),
-                                format_local_hour_hm(event.hour),
+                                format_local_hour_hm(display_hour),
                                 event.az_deg,
                                 event.alt_deg
                             );
 
                             h_flex()
-                                .id(("trajectory_event_badge", event.kind as usize))
+                                .id(("trajectory_event_badge", idx))
                                 .absolute()
                                 .left(px(pill_x as f32))
                                 .top(px(pill_y as f32))
@@ -1841,7 +1941,7 @@ impl Render for PlanetariumPanel {
                                     cx.stop_propagation();
                                 })
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.jump_to_hour(jump_hour, cx);
+                                    this.jump_to_trajectory_offset_hour(jump_offset_hour, cx);
                                 }))
                                 .child(
                                     div()
@@ -2161,6 +2261,7 @@ impl Focusable for PlanetariumPanel {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_planetarium_trajectory(
     bounds: Bounds<Pixels>,
     trajectory: &DailyTrajectory,
@@ -2168,6 +2269,9 @@ fn paint_planetarium_trajectory(
     event_badges: &[(celestial::TrajectoryEventPoint, f64, f64)],
     obj_rgb: Rgba,
     occlude_ground: bool,
+    start_local_hour: f64,
+    duration_hours: f64,
+    is_faded: bool,
     window: &mut Window,
 ) {
     let width = f32::from(bounds.size.width);
@@ -2182,14 +2286,21 @@ fn paint_planetarium_trajectory(
     let bh = f64::from(height);
     let crisp_color = lerp_rgba(obj_rgb, rgb(0xffffff), 0.22).alpha(0.88);
 
-    // 1. Hourly time tick marks along visible trajectory segments (single GPU quad per tick)
-    let tick_halo = rgb(0x050811).alpha(0.75);
+    // 1. Hourly time tick marks along visible trajectory segments (faded near window ends when faded)
     for sample in &trajectory.samples {
         if !sample.above_horizon && occlude_ground {
             continue;
         }
-        let nearest_hour = sample.hour.round();
-        if (sample.hour - nearest_hour).abs() > 1e-3 || nearest_hour >= 24.0 {
+        let fade = trajectory_edge_fade(sample.hour, duration_hours, is_faded);
+        if fade <= 0.08 {
+            continue;
+        }
+        let clock_h = start_local_hour + sample.hour;
+        let nearest_hour = clock_h.round();
+        if (clock_h - nearest_hour).abs() > 0.045 {
+            continue;
+        }
+        if !is_faded && sample.hour >= duration_hours - 1e-3 {
             continue;
         }
         let Some((nx, ny)) = view_info.project_topo_to_ndc(sample.topo_enu) else {
@@ -2202,13 +2313,18 @@ fn paint_planetarium_trajectory(
             px(origin_x + ((nx * 0.5 + 0.5) * bw) as f32),
             px(origin_y + ((0.5 - ny * 0.5) * bh) as f32),
         );
-        let h_int = nearest_hour as u32;
+        let h_int = (nearest_hour.rem_euclid(24.0)).round() as u32 % 24;
         let r = if h_int.is_multiple_of(6) { 2.7 } else { 1.8 };
-        let fill_color = if sample.above_horizon {
+        let base_fill = if sample.above_horizon {
             crisp_color
         } else {
             obj_rgb.alpha(0.35)
         };
+        let fill_color = Rgba {
+            a: base_fill.a * fade,
+            ..base_fill
+        };
+        let tick_halo = rgb(0x050811).alpha(0.75 * fade);
         paint_disc(window, pt, r, fill_color, 0.9, tick_halo);
     }
 

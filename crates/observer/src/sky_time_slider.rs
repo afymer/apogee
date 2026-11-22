@@ -174,8 +174,14 @@ pub fn sample_day_profile(profile: &[f64], hour_of_day: f64) -> f64 {
     profile[idx] * (1.0 - t) + profile[idx + 1] * t
 }
 
-/// Paints the 24-hour twilight atmospheric sky gradient and subtle darkness starfield specks.
-pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], window: &mut Window) {
+/// Paints only the continuous 24-hour twilight atmospheric sky gradient (without starfield specks),
+/// starting at `start_hour` on the left edge (e.g. `0.0` for noon-centered, `12.0` for midnight-centered).
+pub fn paint_twilight_gradient_with_start_hour(
+    bounds: Bounds<Pixels>,
+    solar_profile: &[f64],
+    start_hour: f64,
+    window: &mut Window,
+) {
     let width = f32::from(bounds.size.width);
     let height = f32::from(bounds.size.height);
     if width <= 2.0 || height <= 2.0 {
@@ -185,7 +191,7 @@ pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], wi
     let origin_x = f32::from(bounds.origin.x);
     let origin_y = f32::from(bounds.origin.y);
 
-    // 1. Continuous per-pixel atmospheric twilight sky gradient across 32 piecewise linear spans.
+    // Continuous per-pixel atmospheric twilight sky gradient across 32 piecewise linear spans.
     window.paint_quad(fill(bounds, rgb(0x070b16)));
     const RIBBON_SLICES: usize = 32;
     for i in 0..RIBBON_SLICES {
@@ -196,10 +202,10 @@ pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], wi
         if x1 <= x0 {
             continue;
         }
-        let c0 =
-            solar_altitude_to_sky_color(sample_day_profile(solar_profile, f64::from(t0) * 24.0));
-        let c1 =
-            solar_altitude_to_sky_color(sample_day_profile(solar_profile, f64::from(t1) * 24.0));
+        let h0 = (start_hour + f64::from(t0) * 24.0).rem_euclid(24.0);
+        let h1 = (start_hour + f64::from(t1) * 24.0).rem_euclid(24.0);
+        let c0 = solar_altitude_to_sky_color(sample_day_profile(solar_profile, h0));
+        let c1 = solar_altitude_to_sky_color(sample_day_profile(solar_profile, h1));
         let strip_bounds = Bounds::new(
             point(px(x0), px(origin_y)),
             Size::new(px(x1 - x0), px(height)),
@@ -213,6 +219,31 @@ pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], wi
             ),
         ));
     }
+}
+
+/// Paints only the continuous 24-hour twilight atmospheric sky gradient (without starfield specks).
+pub fn paint_twilight_gradient(bounds: Bounds<Pixels>, solar_profile: &[f64], window: &mut Window) {
+    paint_twilight_gradient_with_start_hour(bounds, solar_profile, 0.0, window);
+}
+
+/// Paints the 24-hour twilight atmospheric sky gradient and subtle darkness starfield specks,
+/// starting at `start_hour` on the left edge.
+pub fn paint_twilight_backdrop_with_start_hour(
+    bounds: Bounds<Pixels>,
+    solar_profile: &[f64],
+    start_hour: f64,
+    window: &mut Window,
+) {
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    if width <= 2.0 || height <= 2.0 {
+        return;
+    }
+
+    let origin_x = f32::from(bounds.origin.x);
+    let origin_y = f32::from(bounds.origin.y);
+
+    paint_twilight_gradient_with_start_hour(bounds, solar_profile, start_hour, window);
 
     // 2. Subtle starfield specks that emerge during astronomical twilight and darkness.
     const STARS: &[(f32, f32, f32)] = &[
@@ -231,7 +262,8 @@ pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], wi
         (0.96, 0.20, 1.5),
     ];
     for &(xf, yf, sz) in STARS {
-        let alt = sample_day_profile(solar_profile, f64::from(xf) * 24.0);
+        let h = (start_hour + f64::from(xf) * 24.0).rem_euclid(24.0);
+        let alt = sample_day_profile(solar_profile, h);
         if alt < -9.0 {
             let fade = (((-9.0 - alt) / 9.0).clamp(0.0, 1.0) * 0.75) as f32;
             let star_bounds = Bounds::new(
@@ -241,6 +273,11 @@ pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], wi
             window.paint_quad(fill(star_bounds, rgb(0xe8f1ff).alpha(fade)));
         }
     }
+}
+
+/// Paints the 24-hour twilight atmospheric sky gradient and subtle darkness starfield specks.
+pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], window: &mut Window) {
+    paint_twilight_backdrop_with_start_hour(bounds, solar_profile, 0.0, window);
 }
 
 fn paint_sky_canvas(

@@ -1,5 +1,8 @@
 use gpui::{Action, App, Context, IntoElement, Render, WeakEntity, Window, prelude::*};
-use ui::{Button, ButtonStyle, ContextMenu, LabelSize, PopoverMenu, prelude::*};
+use ui::{
+    Button, ButtonStyle, ContextMenu, IconButton, IconName, IconSize, LabelSize, PopoverMenu,
+    Tooltip, prelude::*,
+};
 use workspace::{WorkspaceKind, workbench::Workbench};
 
 pub fn init(cx: &mut App) {
@@ -176,6 +179,19 @@ impl Render for TitleBar {
             .border_color(cx.theme().colors().border)
             .child(self.render_app_menus())
             .child(self.render_workspace_switcher(cx))
-            .child(observer::observer_menu(cx))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        IconButton::new("title_bar_sky_search_btn", IconName::MagnifyingGlass)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Search Sky Objects (Ctrl+F)"))
+                            .on_click(|_event, window, cx| {
+                                window.dispatch_action(settings::OpenSkySearch.boxed_clone(), cx);
+                            }),
+                    )
+                    .child(observer::observer_menu(cx)),
+            )
     }
 }

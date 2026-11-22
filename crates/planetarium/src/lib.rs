@@ -21,7 +21,10 @@ pub use solar_system::{
     PickedSolarSystemBody, SolarSystemRenderSettings, pick_solar_system_body,
     rendered_solar_system_disc_radius_px,
 };
-pub use stars::{PickedStar, StarRenderParams, StarSettings, StarSpatialIndex};
+pub use stars::{
+    PickedStar, StarRenderParams, StarSettings, StarSpatialIndex, bp_rp_to_srgb,
+    estimate_teff_kelvin, spectral_class_from_bp_rp,
+};
 
 use std::{
     sync::{Arc, Condvar, Mutex, PoisonError},
@@ -384,17 +387,19 @@ struct CelestialHandles {
     star_entity: Option<Entity>,
 }
 
-fn create_trajectory_mesh(points: &[([f32; 3], bool)]) -> Mesh {
+fn create_trajectory_mesh(points: &[([f32; 3], bool, f32)], minor_alpha: f32) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(points.len().saturating_sub(1) * 2);
     let mut line_tiers: Vec<f32> = Vec::with_capacity(points.len().saturating_sub(1) * 2);
     for pair in points.windows(2) {
-        let (p0, a0) = pair[0];
-        let (p1, a1) = pair[1];
-        let tier = if a0 && a1 { 0.0_f32 } else { 1.0_f32 };
+        let (p0, a0, f0) = pair[0];
+        let (p1, a1, f1) = pair[1];
+        let base_alpha = if a0 && a1 { 1.0_f32 } else { minor_alpha };
+        let alpha0 = (base_alpha * f0.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let alpha1 = (base_alpha * f1.clamp(0.0, 1.0)).clamp(0.0, 1.0);
         positions.push(p0);
         positions.push(p1);
-        line_tiers.push(tier);
-        line_tiers.push(tier);
+        line_tiers.push(-1.0 - alpha0);
+        line_tiers.push(-1.0 - alpha1);
     }
     let mut mesh = Mesh::new(bevy::mesh::PrimitiveTopology::LineList, default());
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -942,7 +947,8 @@ fn process_viewport_commands(
                 if let Some(handles) = handles {
                     match maybe_traj {
                         Some(data) => {
-                            let new_mesh = create_trajectory_mesh(&data.points);
+                            let minor_alpha = if data.occlude_ground { 0.08 } else { 0.24 };
+                            let new_mesh = create_trajectory_mesh(&data.points, minor_alpha);
                             if let Some(mut mesh) = app
                                 .world_mut()
                                 .resource_mut::<Assets<Mesh>>()
@@ -1241,7 +1247,7 @@ impl PlanetariumRenderer {
                 let trajectory_mesh_handle = app
                     .world_mut()
                     .resource_mut::<Assets<Mesh>>()
-                    .add(create_trajectory_mesh(&[]));
+                    .add(create_trajectory_mesh(&[], 0.22));
                 let trajectory_material = CelestialLineMaterial {
                     uniforms: CelestialLineUniforms {
                         transform: glam::DMat4::from_mat3(initial_topo_to_cam).as_mat4(),

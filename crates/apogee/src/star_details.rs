@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use celestial::{
-    DailyTargetVisibility, HorizonProfile, ObservationContext, SolarSystemBody, StarMetadata,
+    DailyTargetVisibility, HorizonProfile, SolarSystemBody, StarMetadata,
     compute_solar_system_visibility_with_horizon, compute_target_visibility_with_horizon,
     coords::{Angle, canonical_spherical_to_cartesian},
     sample_day_equatorial_track, sample_day_solar_system_track,
@@ -44,6 +44,110 @@ const ICON_CENTER_TARGET: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 
   <circle cx="12" cy="12" r="1.4" fill="black"/>
   <path d="M12 3V6.5M12 17.5V21M3 12H6.5M17.5 12H21" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
 </svg>"##;
+
+pub(crate) const ICON_GRAPH_CENTER_NOON: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="12" cy="12" r="4.2" stroke="black" stroke-width="1.65"/>
+  <path d="M12 3V5.2M12 18.8V21M3 12H5.2M18.8 12H21M5.6 5.6L7.2 7.2M16.8 16.8L18.4 18.4M18.4 5.6L16.8 7.2M7.2 16.8L5.6 18.4" stroke="black" stroke-width="1.55" stroke-linecap="round"/>
+</svg>"##;
+
+pub(crate) const ICON_GRAPH_CENTER_MIDNIGHT: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M18.5 14.5A6.8 6.8 0 0 1 9.5 5.5A7.2 7.2 0 1 0 18.5 14.5Z" stroke="black" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"##;
+
+/// Global horizontal centering mode shared by all 24-hour visibility graphs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VisibilityGraphCenter {
+    /// Noon in the middle (`00h` – `12h` – `24h`).
+    #[default]
+    Noon,
+    /// Midnight in the middle (`12h` – `00h` – `12h`).
+    Midnight,
+}
+
+impl VisibilityGraphCenter {
+    pub fn start_hour(self) -> f64 {
+        match self {
+            Self::Noon => 0.0,
+            Self::Midnight => 12.0,
+        }
+    }
+
+    /// Computes the continuous 24-hour window start timestamp (Unix seconds) containing
+    /// the observer's active local time.
+    /// - `Noon`: `[00:00 today .. 24:00 today]`
+    /// - `Midnight`: `[12:00 today .. 12:00 tomorrow]` when `local_hour_of_day >= 12.0`,
+    ///   or `[12:00 yesterday .. 12:00 today]` when `local_hour_of_day < 12.0`.
+    pub fn window_start_unix_seconds(
+        self,
+        local_midnight_unix_secs: f64,
+        local_hour_of_day: f64,
+    ) -> f64 {
+        match self {
+            Self::Noon => local_midnight_unix_secs,
+            Self::Midnight => {
+                if local_hour_of_day >= 12.0 {
+                    local_midnight_unix_secs + 12.0 * 3600.0
+                } else {
+                    local_midnight_unix_secs - 12.0 * 3600.0
+                }
+            }
+        }
+    }
+
+    /// Converts a window-relative hour offset `[0..24]` into local clock hour `[0..24)`.
+    pub fn clock_hour(self, offset_hour: f64) -> f64 {
+        (offset_hour + self.start_hour()).rem_euclid(24.0)
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Noon => Self::Midnight,
+            Self::Midnight => Self::Noon,
+        }
+    }
+
+    pub fn axis_labels(self) -> [&'static str; 5] {
+        match self {
+            Self::Noon => ["00h", "06h", "12h", "18h", "24h"],
+            Self::Midnight => ["12h", "18h", "00h", "06h", "12h"],
+        }
+    }
+
+    pub fn icon(self) -> &'static [u8] {
+        match self {
+            Self::Noon => ICON_GRAPH_CENTER_NOON,
+            Self::Midnight => ICON_GRAPH_CENTER_MIDNIGHT,
+        }
+    }
+
+    pub fn tooltip_text(self) -> &'static str {
+        match self {
+            Self::Noon => "Centered on noon (00h–24h) · Click to center on midnight",
+            Self::Midnight => "Centered on midnight (12h–12h) · Click to center on noon",
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct VisibilityGraphPrefsModel {
+    center: VisibilityGraphCenter,
+}
+
+impl VisibilityGraphPrefsModel {
+    pub fn center(&self) -> VisibilityGraphCenter {
+        self.center
+    }
+
+    pub fn toggle_center(&mut self, cx: &mut Context<Self>) {
+        self.center = self.center.toggle();
+        cx.notify();
+    }
+}
+
+#[derive(Clone)]
+pub struct GlobalVisibilityGraphPrefs(pub Entity<VisibilityGraphPrefsModel>);
+
+impl gpui::Global for GlobalVisibilityGraphPrefs {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SelectedObjectId {
@@ -200,6 +304,9 @@ pub fn init(cx: &mut App) {
     let selection = cx.new(|_| StarSelectionModel::default());
     cx.set_global(GlobalStarSelection(selection));
 
+    let graph_prefs = cx.new(|_| VisibilityGraphPrefsModel::default());
+    cx.set_global(GlobalVisibilityGraphPrefs(graph_prefs));
+
     cx.bind_keys([KeyBinding::new("escape", ClearSelection, None)]);
     cx.on_action(|_: &ClearSelection, cx| {
         if let Some(selection) = cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone()) {
@@ -257,6 +364,7 @@ pub struct StarDetailsPanel {
     cached_visibility: Option<DailyTargetVisibility>,
     cached_has_custom_horizon: bool,
     cached_active_horizon: Option<HorizonProfile>,
+    cached_window_start_secs: f64,
     show_horizon_overlay: bool,
     graph_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     cached_graph_image: Arc<Mutex<Option<CachedGraphImage>>>,
@@ -309,6 +417,17 @@ impl StarDetailsPanel {
                 .detach();
             }
 
+            if let Some(prefs_entity) = cx
+                .try_global::<GlobalVisibilityGraphPrefs>()
+                .map(|g| g.0.clone())
+            {
+                cx.observe(&prefs_entity, |this: &mut Self, _model, cx| {
+                    this.ensure_profiles_fresh(cx);
+                    cx.notify();
+                })
+                .detach();
+            }
+
             let mut panel = Self {
                 focus_handle: cx.focus_handle(),
                 last_activation_nonce: initial_nonce,
@@ -320,6 +439,7 @@ impl StarDetailsPanel {
                 cached_visibility: None,
                 cached_has_custom_horizon: false,
                 cached_active_horizon: None,
+                cached_window_start_secs: 0.0,
                 show_horizon_overlay: true,
                 graph_bounds: Arc::new(Mutex::new(None)),
                 cached_graph_image: Arc::new(Mutex::new(None)),
@@ -359,14 +479,21 @@ impl StarDetailsPanel {
         let horizon_key = horizon_info.as_ref().map(|(k, _)| k.clone());
         let active_profile = horizon_info.map(|(_, p)| p);
 
+        let graph_center = cx
+            .try_global::<GlobalVisibilityGraphPrefs>()
+            .map(|g| g.0.read(cx).center())
+            .unwrap_or_default();
         let loc = observer.geodetic_position();
-        let midnight = observer.local_midnight_unix_seconds();
+        let window_start = graph_center.window_start_unix_seconds(
+            observer.local_midnight_unix_seconds(),
+            observer.local_hour_of_day(),
+        );
         let next_key = TargetDayCacheKey {
             target_id: selected.id(),
             lat_bits: loc.latitude_deg().to_bits(),
             lon_bits: loc.longitude_deg().to_bits(),
             elev_bits: loc.elevation_m().to_bits(),
-            local_midnight_secs: midnight.round() as i64,
+            local_midnight_secs: window_start.round() as i64,
             horizon_key,
         };
 
@@ -374,15 +501,19 @@ impl StarDetailsPanel {
             return;
         }
 
-        self.cached_solar_profile = Arc::new(observer.solar_day_profile(97));
+        self.cached_solar_profile = Arc::new(celestial::solar::sample_day_solar_profile(
+            loc,
+            window_start,
+            97,
+        ));
         let (track, visibility) = match &selected {
             SelectedObject::Star(star) => {
                 let ra = Angle::from_degrees(star.ra_deg);
                 let dec = Angle::from_degrees(star.dec_deg);
-                let track = sample_day_equatorial_track(loc, midnight, ra, dec, 97);
+                let track = sample_day_equatorial_track(loc, window_start, ra, dec, 97);
                 let vis = compute_target_visibility_with_horizon(
                     loc,
-                    midnight,
+                    window_start,
                     ra,
                     dec,
                     active_profile.as_ref(),
@@ -390,10 +521,10 @@ impl StarDetailsPanel {
                 (track, vis)
             }
             SelectedObject::SolarSystem(body) => {
-                let track = sample_day_solar_system_track(loc, midnight, *body, 97);
+                let track = sample_day_solar_system_track(loc, window_start, *body, 97);
                 let vis = compute_solar_system_visibility_with_horizon(
                     loc,
-                    midnight,
+                    window_start,
                     *body,
                     active_profile.as_ref(),
                 );
@@ -413,6 +544,7 @@ impl StarDetailsPanel {
         self.cached_visibility = Some(visibility);
         self.cached_has_custom_horizon = active_profile.is_some();
         self.cached_active_horizon = active_profile;
+        self.cached_window_start_secs = window_start;
         self.cache_key = Some(next_key);
         self.profile_gen = self.profile_gen.wrapping_add(1);
     }
@@ -431,19 +563,21 @@ impl StarDetailsPanel {
         let t = ((f32::from(pos.x) - f32::from(bounds.origin.x)) / width).clamp(0.0, 1.0) as f64;
         let step_mins = if shift_held { 15.0 } else { 1.0 };
         let total_mins = (t * 24.0 * 60.0 / step_mins).round() * step_mins;
-        let snapped_hour = (total_mins / 60.0).clamp(0.0, 23.0 + 59.0 / 60.0);
+        let snapped_offset_hour = (total_mins / 60.0).clamp(0.0, 23.0 + 59.0 / 60.0);
+        let target_unix_secs = self.cached_window_start_secs + snapped_offset_hour * 3600.0;
 
         if let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.clone()) {
             observer.update(cx, |model, cx| {
-                model.set_local_hour_of_day(snapped_hour, cx);
+                model.set_manual_unix_seconds(target_unix_secs, cx);
             });
         }
     }
 
-    fn jump_to_hour(&self, hour: f64, cx: &mut Context<Self>) {
+    fn jump_to_window_offset_hour(&self, offset_hour: f64, cx: &mut Context<Self>) {
+        let target_unix_secs = self.cached_window_start_secs + offset_hour.clamp(0.0, 24.0) * 3600.0;
         if let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.clone()) {
             observer.update(cx, |model, cx| {
-                model.set_local_hour_of_day(hour, cx);
+                model.set_manual_unix_seconds(target_unix_secs, cx);
             });
         }
     }
@@ -465,7 +599,7 @@ pub(crate) fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
 }
 
 #[inline]
-fn alt_to_y_fraction(alt_deg: f64, pad_y: f32, height: f32) -> f32 {
+pub(crate) fn alt_to_y_fraction(alt_deg: f64, pad_y: f32, height: f32) -> f32 {
     let usable_h = (height - 2.0 * pad_y).max(4.0);
     let norm =
         ((alt_deg - GRAPH_MIN_ALT_DEG) / (GRAPH_MAX_ALT_DEG - GRAPH_MIN_ALT_DEG)).clamp(0.0, 1.0)
@@ -589,11 +723,36 @@ fn rasterize_graph_overlay(
     horizon_profile: &[f64],
     star_rgb: Rgba,
 ) -> Arc<RenderImage> {
+    rasterize_graph_overlay_with_options(
+        phys_w,
+        phys_h,
+        scale,
+        GRAPH_PAD_Y,
+        1.0,
+        star_profile,
+        horizon_profile,
+        star_rgb,
+    )
+}
+
+/// Rasterizes a horizon silhouette and elevation curve into a BGRA `RenderImage` with configurable padding and stroke scale.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rasterize_graph_overlay_with_options(
+    phys_w: u32,
+    phys_h: u32,
+    scale: f32,
+    pad_y_logical: f32,
+    stroke_scale: f32,
+    star_profile: &[f64],
+    horizon_profile: &[f64],
+    star_rgb: Rgba,
+) -> Arc<RenderImage> {
     let w = phys_w.max(2);
     let h = phys_h.max(2);
     let wf = w as f32;
     let hf = h as f32;
-    let pad_y = GRAPH_PAD_Y * scale;
+    let pad_y = pad_y_logical * scale;
+    let stroke = scale * stroke_scale;
     let mut buf = vec![0u8; (w * h * 4) as usize];
 
     let y_of = |alt: f64| alt_to_y_fraction(alt, pad_y, hf);
@@ -625,7 +784,7 @@ fn rasterize_graph_overlay(
             w,
             h,
             &h_segs,
-            0.55 * scale,
+            0.55 * stroke,
             rgb(0xffffff).alpha(0.28),
         );
     }
@@ -663,17 +822,103 @@ fn rasterize_graph_overlay(
         }
 
         let crisp_color = lerp_rgba(star_rgb, rgb(0xffffff), 0.25).alpha(0.96);
-        rasterize_aa_polyline(&mut buf, w, h, &all_segs, 0.75 * scale, star_rgb.alpha(0.38));
+        rasterize_aa_polyline(&mut buf, w, h, &all_segs, 0.75 * stroke, star_rgb.alpha(0.38));
         if !above_segs.is_empty() {
             rasterize_aa_polyline(
                 &mut buf,
                 w,
                 h,
                 &above_segs,
-                1.9 * scale,
+                1.9 * stroke,
                 rgb(0x060a14).alpha(0.55),
             );
-            rasterize_aa_polyline(&mut buf, w, h, &above_segs, 1.1 * scale, crisp_color);
+            rasterize_aa_polyline(&mut buf, w, h, &above_segs, 1.1 * stroke, crisp_color);
+        }
+    }
+
+    let img = image::RgbaImage::from_raw(w, h, buf).expect("buffer dimensions match w * h * 4");
+    Arc::new(RenderImage::new(vec![image::Frame::new(img)]))
+}
+
+/// Rasterizes only a target elevation curve (without drawing any horizon silhouette):
+/// segments below the effective horizon are drawn muted gray, while visible segments use `star_rgb`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rasterize_visibility_curve_only(
+    phys_w: u32,
+    phys_h: u32,
+    scale: f32,
+    pad_y_logical: f32,
+    stroke_scale: f32,
+    star_profile: &[f64],
+    horizon_profile: &[f64],
+    star_rgb: Rgba,
+) -> Arc<RenderImage> {
+    let w = phys_w.max(2);
+    let h = phys_h.max(2);
+    let wf = w as f32;
+    let hf = h as f32;
+    let pad_y = pad_y_logical * scale;
+    let stroke = scale * stroke_scale;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+
+    let y_of = |alt: f64| alt_to_y_fraction(alt, pad_y, hf);
+
+    if star_profile.len() >= 2 {
+        let denom = (star_profile.len() - 1) as f32;
+        let mut hidden_segs = Vec::with_capacity(star_profile.len() - 1);
+        let mut visible_segs = Vec::with_capacity(star_profile.len() - 1);
+
+        for i in 1..star_profile.len() {
+            let a0 = star_profile[i - 1];
+            let a1 = star_profile[i];
+            let x0 = (i - 1) as f32 / denom * wf;
+            let x1 = i as f32 / denom * wf;
+            let p0 = (x0, y_of(a0));
+            let p1 = (x1, y_of(a1));
+
+            let h0 = horizon_profile.get(i - 1).copied().unwrap_or(0.0);
+            let h1 = horizon_profile.get(i).copied().unwrap_or(0.0);
+            let c0 = a0 - h0;
+            let c1 = a1 - h1;
+
+            if c0 >= 0.0 && c1 >= 0.0 {
+                visible_segs.push((p0, p1));
+            } else if c0 < 0.0 && c1 < 0.0 {
+                hidden_segs.push((p0, p1));
+            } else if c0 < 0.0 && c1 >= 0.0 {
+                let frac = ((-c0) / (c1 - c0).max(1e-6)).clamp(0.0, 1.0) as f32;
+                let cross = (x0 + (x1 - x0) * frac, y_of(a0 + (a1 - a0) * f64::from(frac)));
+                hidden_segs.push((p0, cross));
+                visible_segs.push((cross, p1));
+            } else {
+                let frac = (c0 / (c0 - c1).max(1e-6)).clamp(0.0, 1.0) as f32;
+                let cross = (x0 + (x1 - x0) * frac, y_of(a0 + (a1 - a0) * f64::from(frac)));
+                visible_segs.push((p0, cross));
+                hidden_segs.push((cross, p1));
+            }
+        }
+
+        if !hidden_segs.is_empty() {
+            rasterize_aa_polyline(
+                &mut buf,
+                w,
+                h,
+                &hidden_segs,
+                0.85 * stroke,
+                rgb(0x8a94a8).alpha(0.55),
+            );
+        }
+        if !visible_segs.is_empty() {
+            let crisp_color = lerp_rgba(star_rgb, rgb(0xffffff), 0.25).alpha(0.96);
+            rasterize_aa_polyline(
+                &mut buf,
+                w,
+                h,
+                &visible_segs,
+                1.75 * stroke,
+                rgb(0x060a14).alpha(0.45),
+            );
+            rasterize_aa_polyline(&mut buf, w, h, &visible_segs, 1.05 * stroke, crisp_color);
         }
     }
 
@@ -684,7 +929,7 @@ fn rasterize_graph_overlay(
 #[allow(clippy::too_many_arguments)]
 fn paint_visibility_graph(
     bounds: Bounds<Pixels>,
-    hour_of_day: f64,
+    window_offset_hour: f64,
     solar_profile: &[f64],
     star_profile: &[f64],
     horizon_profile: &[f64],
@@ -703,7 +948,7 @@ fn paint_visibility_graph(
     let origin_x = f32::from(bounds.origin.x);
     let origin_y = f32::from(bounds.origin.y);
 
-    // 1. Twilight sky backdrop identical to observer's dropdown.
+    // 1. Continuous 24-hour twilight sky backdrop across the active window.
     paint_twilight_backdrop(bounds, solar_profile, window);
 
     // 2. Darker shading below the 0° horizon.
@@ -793,9 +1038,9 @@ fn paint_visibility_graph(
     }
 
     // 5. Playhead beam and bordered orb at active time (pure GPU quads).
-    let t = (hour_of_day / 24.0).clamp(0.0, 1.0) as f32;
+    let t = (window_offset_hour / 24.0).clamp(0.0, 1.0) as f32;
     let playhead_x = origin_x + t * width;
-    let current_alt = sample_day_profile(star_profile, hour_of_day);
+    let current_alt = sample_day_profile(star_profile, window_offset_hour);
     let handle_y = alt_to_y(current_alt, bounds);
     let handle_pt = point(px(playhead_x), px(handle_y));
 
@@ -885,13 +1130,13 @@ impl Render for StarDetailsPanel {
         };
         let star_color: Hsla = star_rgb.into();
 
-        let (obs_ctx, hour_of_day) = cx
+        let obs_ctx = cx
             .try_global::<GlobalObserver>()
             .map(|g| {
                 let model: &ObserverModel = g.0.read(cx);
-                (model.observation_context(), model.local_hour_of_day())
+                model.observation_context()
             })
-            .unwrap_or_else(|| (ObservationContext::default(), 0.0));
+            .unwrap_or_default();
 
         let category_badge = selected_obj.category_badge();
         let is_solar_system = matches!(selected_obj, SelectedObject::SolarSystem(_));
@@ -948,6 +1193,15 @@ impl Render for StarDetailsPanel {
         let bounds_store = self.graph_bounds.clone();
         let entity = cx.entity().clone();
 
+        let graph_center = cx
+            .try_global::<GlobalVisibilityGraphPrefs>()
+            .map(|g| g.0.read(cx).center())
+            .unwrap_or_default();
+        let axis_labels = graph_center.axis_labels();
+        let window_offset_hour = ((obs_ctx.epoch_unix_seconds() - self.cached_window_start_secs)
+            / 3600.0)
+            .clamp(0.0, 24.0);
+
         let visibility_canvas = gpui::canvas(
             move |bounds, _window, _cx| {
                 if let Ok(mut guard) = bounds_store.lock() {
@@ -957,7 +1211,7 @@ impl Render for StarDetailsPanel {
             move |bounds, (), window, _cx| {
                 paint_visibility_graph(
                     bounds,
-                    hour_of_day,
+                    window_offset_hour,
                     &solar_profile,
                     &star_profile,
                     &horizon_profile,
@@ -1056,15 +1310,15 @@ impl Render for StarDetailsPanel {
                 .bg(colors.element_background.opacity(0.65))
                 .border_1()
                 .border_color(colors.border_variant)
-                .when_some(jump_hour, |el, hour| {
+                .when_some(jump_hour, |el, offset_hour| {
                     el.cursor_pointer()
                         .hover(|s| s.bg(colors.element_hover))
                         .tooltip(Tooltip::text(format!(
                             "Jump to {}",
-                            format_local_hour_hm(hour)
+                            format_local_hour_hm(graph_center.clock_hour(offset_hour))
                         )))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.jump_to_hour(hour, cx);
+                            this.jump_to_window_offset_hour(offset_hour, cx);
                         }))
                 })
                 .child(
@@ -1093,7 +1347,7 @@ impl Render for StarDetailsPanel {
             if let Some(vis) = visibility {
                 let transit_val = format!(
                     "{} ({:+.0}°)",
-                    format_local_hour_hm(vis.transit_hour),
+                    format_local_hour_hm(graph_center.clock_hour(vis.transit_hour)),
                     vis.max_altitude_deg
                 );
                 if vis.circumpolar {
@@ -1122,11 +1376,17 @@ impl Render for StarDetailsPanel {
                     )
                 } else {
                     (
-                        vis.rise_hour.map_or_else(|| "—".to_string(), format_local_hour_hm),
+                        vis.rise_hour.map_or_else(
+                            || "—".to_string(),
+                            |h| format_local_hour_hm(graph_center.clock_hour(h)),
+                        ),
                         vis.rise_hour,
                         transit_val,
                         Some(vis.transit_hour),
-                        vis.set_hour.map_or_else(|| "—".to_string(), format_local_hour_hm),
+                        vis.set_hour.map_or_else(
+                            || "—".to_string(),
+                            |h| format_local_hour_hm(graph_center.clock_hour(h)),
+                        ),
                         vis.set_hour,
                     )
                 }
@@ -1421,6 +1681,43 @@ impl Render for StarDetailsPanel {
                             .child(ref_label(60.0, "60°"))
                             .child(ref_label(30.0, "30°"))
                             .child(ref_label(0.0, "0°"))
+                            .child(
+                                div()
+                                    .id("star_visibility_center_toggle")
+                                    .absolute()
+                                    .top(px(4.0))
+                                    .left(px(4.0))
+                                    .w(px(20.0))
+                                    .h(px(20.0))
+                                    .rounded_sm()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .bg(hsla(0.0, 0.0, 0.0, 0.28))
+                                    .hover(|h| h.bg(hsla(0.0, 0.0, 0.0, 0.52)))
+                                    .tooltip(Tooltip::text(graph_center.tooltip_text()))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(|_, _, cx| {
+                                        if let Some(prefs) = cx
+                                            .try_global::<GlobalVisibilityGraphPrefs>()
+                                            .map(|g| g.0.clone())
+                                        {
+                                            prefs.update(cx, |model, cx| {
+                                                model.toggle_center(cx);
+                                            });
+                                        }
+                                    })
+                                    .child(
+                                        svg()
+                                            .data(graph_center.icon())
+                                            .size(px(12.5))
+                                            .flex_none()
+                                            .text_color(hsla(0.0, 0.0, 1.0, 0.78)),
+                                    ),
+                            )
                             .when(self.cached_has_custom_horizon, |el| {
                                 let active = self.show_horizon_overlay;
                                 el.child(
@@ -1473,11 +1770,11 @@ impl Render for StarDetailsPanel {
                             .font_buffer(cx)
                             .text_size(px(9.5))
                             .text_color(colors.text_muted)
-                            .child("00h")
-                            .child("06h")
-                            .child("12h")
-                            .child("18h")
-                            .child("24h"),
+                            .child(axis_labels[0])
+                            .child(axis_labels[1])
+                            .child(axis_labels[2])
+                            .child(axis_labels[3])
+                            .child(axis_labels[4]),
                     )
                     .child(
                         h_flex()

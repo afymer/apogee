@@ -16,8 +16,8 @@ pub struct ObserverUpdate {
 /// Topocentric trajectory polyline uploaded to the GPU line pipeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectoryRenderData {
-    /// Ordered `(topocentric_enu, above_horizon)` samples along the 24-hour path.
-    pub points: Vec<([f32; 3], bool)>,
+    /// Ordered `(topocentric_enu, above_horizon, edge_fade)` samples along the path (`edge_fade ∈ [0, 1]`).
+    pub points: Vec<([f32; 3], bool, f32)>,
     /// Representative sRGB tint for the trajectory curve.
     pub srgb: [f32; 3],
     /// Whether ground occlusion dims the below-horizon continuation more strongly.

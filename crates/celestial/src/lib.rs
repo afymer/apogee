@@ -23,9 +23,9 @@ pub use solar::{
 pub use visibility::{
     DailyTargetVisibility, DailyTrajectory, TrajectoryEventPoint, TrajectoryPointKind,
     TrajectorySample, compute_equatorial_daily_trajectory, compute_solar_system_daily_trajectory,
-    compute_solar_system_visibility_with_horizon, compute_target_visibility,
-    compute_target_visibility_with_horizon, equatorial_altitude_deg, equatorial_az_alt_deg,
-    sample_day_equatorial_altitude, sample_day_equatorial_track, sample_day_solar_system_track,
-    solar_system_az_alt_deg,
+    compute_solar_system_visibility_with_horizon, compute_solar_system_window_trajectory,
+    compute_target_visibility, compute_target_visibility_with_horizon, equatorial_altitude_deg,
+    equatorial_az_alt_deg, sample_day_equatorial_altitude, sample_day_equatorial_track,
+    sample_day_solar_system_track, solar_system_az_alt_deg,
 };
 
