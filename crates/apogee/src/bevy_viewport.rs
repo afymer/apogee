@@ -1140,6 +1140,7 @@ impl Render for PlanetariumPanel {
         self.last_scale_factor = f64::from(window.scale_factor());
         let bridge = self.bridge.clone();
         let last_size = snapshot.last_size;
+        let texture_size = snapshot.texture_size;
         let view_mode = self.latest_view_info.view_mode;
         let viewport_bounds = self.viewport_bounds.clone();
         let bounds_snapshot = viewport_bounds.lock().ok().and_then(|g| *g);
@@ -1302,6 +1303,7 @@ impl Render for PlanetariumPanel {
         div()
             .id("planetarium_viewport")
             .size_full()
+            .overflow_hidden()
             .bg(rgb(0x000000))
             .relative()
             .cursor(CursorStyle::Arrow)
@@ -1359,7 +1361,23 @@ impl Render for PlanetariumPanel {
             .children(
                 self.cached_texture
                     .as_ref()
-                    .map(|view| gpui::surface(view.clone()).size_full()),
+                    .map(|view| {
+                        // Draw at the texture's native size (top-left anchored) so a
+                        // resize snaps instead of stretching the stale frame.
+                        let surface = gpui::surface(view.clone());
+                        match texture_size {
+                            Some((tw, th)) => {
+                                let sc = scale_factor as f32;
+                                surface
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .w(px(tw as f32 / sc))
+                                    .h(px(th as f32 / sc))
+                            }
+                            None => surface.size_full(),
+                        }
+                    }),
             )
             .when_some(
                 selected_overlay,

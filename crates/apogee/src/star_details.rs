@@ -117,6 +117,7 @@ impl StarSelectionModel {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         if self.selected.take().is_some() {
             cx.notify();
@@ -343,9 +344,7 @@ impl StarDetailsPanel {
     }
 
     fn close_panel(&self, cx: &mut Context<Self>) {
-        if let Some(selection) = cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone()) {
-            selection.update(cx, |model, cx| model.clear(cx));
-        }
+        cx.emit(PanelEvent::Close);
     }
 }
 
@@ -511,16 +510,16 @@ fn paint_visibility_graph(
         poly.line_to(point(px(origin_x + width), px(bottom_y)));
         poly.close();
         if let Ok(path) = poly.build() {
-            window.paint_path(path, rgb(0x0b1624).alpha(0.62));
+            window.paint_path(path, rgb(0x02040a).alpha(0.5));
         }
 
-        let mut line = PathBuilder::stroke(px(1.5));
+        let mut line = PathBuilder::stroke(px(1.0));
         line.move_to(h_pt(0));
         for i in 1..horizon_profile.len() {
             line.line_to(h_pt(i));
         }
         if let Ok(path) = line.build() {
-            window.paint_path(path, rgb(0x22b8cf).alpha(0.85));
+            window.paint_path(path, hsla(0.0, 0.0, 1.0, 0.28));
         }
     }
 
@@ -665,34 +664,22 @@ impl Render for StarDetailsPanel {
                 Angle::from_degrees(star.ra_deg),
                 Angle::from_degrees(star.dec_deg),
             );
-            let dt = model.effective_local_datetime();
             (
                 model.local_hour_of_day(),
-                dt.format("%b %d, %Y").to_string(),
                 az.degrees(),
                 alt.degrees(),
             )
         });
 
-        let (hour_of_day, date_label, az_deg, alt_deg) =
-            observer_snapshot.unwrap_or_else(|| (0.0, String::new(), 0.0, 0.0));
+        let (hour_of_day, az_deg, alt_deg) =
+            observer_snapshot.unwrap_or_else(|| (0.0, 0.0, 0.0));
 
         let local_horizon_alt = self
             .cached_active_horizon
             .as_ref()
             .map(|h| h.altitude_at_azimuth_deg(az_deg));
         let is_visible_now = local_horizon_alt.map_or(alt_deg >= 0.0, |h| alt_deg >= h);
-        let alt_readout = if is_visible_now {
-            format!("{alt_deg:+.1}°")
-        } else if alt_deg >= 0.0 {
-            if let Some(h) = local_horizon_alt {
-                format!("{alt_deg:+.1}° · Obstructed ({h:+.0}°)")
-            } else {
-                format!("{alt_deg:+.1}° · Below horizon")
-            }
-        } else {
-            format!("{alt_deg:+.1}° · Below horizon")
-        };
+        let alt_readout = format!("{alt_deg:+.1}°");
 
         let solar_profile = self.cached_solar_profile.clone();
         let star_profile = self.cached_star_profile.clone();
@@ -985,49 +972,6 @@ impl Render for StarDetailsPanel {
                                             .text_color(colors.text)
                                             .child("Visibility"),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.5))
-                                            .text_color(colors.text_muted)
-                                            .child(date_label),
-                                    )
-                                    .when(self.cached_has_custom_horizon, |row| {
-                                        let active = self.show_horizon_overlay;
-                                        row.child(
-                                            div()
-                                                .id("star_visibility_horizon_toggle")
-                                                .w(px(20.0))
-                                                .h(px(20.0))
-                                                .rounded_sm()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .when(active, |el| el.bg(rgb(0x22b8cf).alpha(0.16)))
-                                                .hover(|h| h.bg(colors.element_hover))
-                                                .tooltip(Tooltip::text(if active {
-                                                    "Hide horizon line"
-                                                } else {
-                                                    "Show horizon line"
-                                                }))
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.show_horizon_overlay =
-                                                        !this.show_horizon_overlay;
-                                                    cx.notify();
-                                                }))
-                                                .child(
-                                                    svg()
-                                                        .data(ICON_HORIZON_OVERLAY)
-                                                        .size(px(13.0))
-                                                        .flex_none()
-                                                        .text_color(if active {
-                                                            rgb(0x22b8cf).into()
-                                                        } else {
-                                                            colors.text_muted
-                                                        }),
-                                                ),
-                                        )
-                                    }),
                             )
                             .child(
                                 div()
@@ -1071,7 +1015,50 @@ impl Render for StarDetailsPanel {
                             .child(visibility_canvas)
                             .child(ref_label(60.0, "60°"))
                             .child(ref_label(30.0, "30°"))
-                            .child(ref_label(0.0, "0°")),
+                            .child(ref_label(0.0, "0°"))
+                            .when(self.cached_has_custom_horizon, |el| {
+                                let active = self.show_horizon_overlay;
+                                el.child(
+                                    div()
+                                        .id("star_visibility_horizon_toggle")
+                                        .absolute()
+                                        .top(px(4.0))
+                                        .right(px(4.0))
+                                        .w(px(20.0))
+                                        .h(px(20.0))
+                                        .rounded_sm()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .bg(hsla(0.0, 0.0, 0.0, if active { 0.38 } else { 0.18 }))
+                                        .hover(|h| h.bg(hsla(0.0, 0.0, 0.0, 0.55)))
+                                        .tooltip(Tooltip::text(if active {
+                                            "Hide horizon line"
+                                        } else {
+                                            "Show horizon line"
+                                        }))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_horizon_overlay = !this.show_horizon_overlay;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            svg()
+                                                .data(ICON_HORIZON_OVERLAY)
+                                                .size(px(13.0))
+                                                .flex_none()
+                                                .text_color(hsla(
+                                                    0.0,
+                                                    0.0,
+                                                    1.0,
+                                                    if active { 0.85 } else { 0.45 },
+                                                )),
+                                        ),
+                                )
+                            }),
                     )
                     .child(
                         h_flex()

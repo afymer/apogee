@@ -58,6 +58,7 @@ pub struct PlanetariumRenderer;
 pub struct BridgeSnapshot {
     pub texture_view: Option<Arc<wgpu::TextureView>>,
     pub last_size: Option<(u32, u32)>,
+    pub texture_size: Option<(u32, u32)>,
     pub view_info: PlanetariumViewInfo,
 }
 
@@ -68,6 +69,7 @@ pub struct BevyBridgeState {
     pub shutdown: bool,
     pub latest_texture: Option<Arc<wgpu::TextureView>>,
     pub last_size: Option<(u32, u32)>,
+    pub texture_size: Option<(u32, u32)>,
     pub view_info: PlanetariumViewInfo,
     pub star_index: Option<Arc<StarSpatialIndex>>,
     pub pending_commands: Vec<ViewportCommand>,
@@ -100,6 +102,7 @@ impl BevyBridge {
                     shutdown: false,
                     latest_texture: None,
                     last_size: None,
+                    texture_size: None,
                     view_info: PlanetariumViewInfo::default(),
                     star_index: None,
                     pending_commands: Vec::new(),
@@ -119,6 +122,7 @@ impl BevyBridge {
         BridgeSnapshot {
             texture_view: guard.latest_texture.clone(),
             last_size: guard.last_size,
+            texture_size: guard.texture_size,
             view_info: guard.view_info,
         }
     }
@@ -1467,6 +1471,7 @@ impl PlanetariumRenderer {
                         }
                         if let Some(texture) = new_texture_view {
                             guard.latest_texture = Some(texture);
+                            guard.texture_size = last_view_size;
                         }
                         guard.view_info = view_info;
                         if is_interpolating || needs_frame_dirty {
@@ -1491,6 +1496,7 @@ impl PlanetariumRenderer {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 guard.latest_texture = None;
+                guard.texture_size = None;
             })
     }
 }
