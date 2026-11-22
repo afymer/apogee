@@ -39,28 +39,40 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 
 /// Computes linear-RGB sky dome, dusk arch, and solar forward-scatter colors from solar altitude.
 pub fn compute_sky_palette(sun_alt_deg: f32) -> SkyPalette {
-    let day_env = smoothstep(-4.0, 8.0, sun_alt_deg);
+    let day_env = smoothstep(-4.5, 7.0, sun_alt_deg);
     let sun_mu = sun_alt_deg.to_radians().sin().max(0.0);
-    let sun_airmass = 1.0 / (sun_mu + 0.055);
-    let optical_k = sun_airmass * 0.38;
-    let sun_trans = Vec3::new(
+
+    // High-altitude zenith optical depth stays clearer than the low-altitude horizon beam so
+    // the midday zenith remains a vivid Rayleigh sky blue.
+    let zenith_airmass = 1.0 / (sun_mu + 0.18);
+    let zenith_k = (zenith_airmass - 0.85).max(0.0) * 0.22;
+    let zenith_trans = Vec3::new(
+        (-0.058 * zenith_k).exp(),
+        (-0.135 * zenith_k).exp(),
+        (-0.331 * zenith_k).exp(),
+    );
+
+    let sun_airmass = 1.0 / (sun_mu + 0.06);
+    let optical_k = sun_airmass * 0.30;
+    let horizon_trans = Vec3::new(
         (-0.058 * optical_k).exp(),
         (-0.135 * optical_k).exp(),
         (-0.331 * optical_k).exp(),
     );
 
-    let day_zenith = Vec3::new(0.10, 0.27, 0.78) * sun_trans * day_env;
-    let day_horizon = Vec3::new(0.95, 1.55, 2.50) * sun_trans * day_env;
+    let day_zenith = Vec3::new(0.20, 0.56, 1.48) * zenith_trans * day_env;
+    let day_horizon = Vec3::new(1.10, 1.78, 2.85) * horizon_trans * day_env;
 
-    let sun_glow_weight = smoothstep(-3.0, 6.0, sun_alt_deg);
-    let sun_glow_color = sun_trans * (0.45 + 0.35 * smoothstep(-1.0, 4.0, sun_alt_deg));
+    let sun_glow_weight = smoothstep(-3.5, 6.0, sun_alt_deg);
+    let sun_glow_color =
+        Vec3::new(1.0, 0.96, 0.90) * horizon_trans * (0.55 + 0.45 * smoothstep(-1.0, 6.0, sun_alt_deg));
 
     let twilight_rise = smoothstep(-18.0, -1.5, sun_alt_deg);
     let twilight_fade_day = 1.0 - smoothstep(0.0, 10.0, sun_alt_deg);
     let dome_weight = twilight_rise.powf(2.3) * twilight_fade_day;
 
-    let twilight_zenith = Vec3::new(0.015, 0.045, 0.17) * dome_weight;
-    let twilight_horizon = Vec3::new(0.06, 0.115, 0.28) * dome_weight;
+    let twilight_zenith = Vec3::new(0.022, 0.068, 0.24) * dome_weight;
+    let twilight_horizon = Vec3::new(0.08, 0.15, 0.36) * dome_weight;
 
     let warm_weight = smoothstep(-15.0, -2.5, sun_alt_deg).powf(1.8)
         * (1.0 - smoothstep(2.0, 12.0, sun_alt_deg));
@@ -73,6 +85,57 @@ pub fn compute_sky_palette(sun_alt_deg: f32) -> SkyPalette {
         sun_glow_color,
         sun_glow_weight,
     }
+}
+
+/// Computes the effective stellar limiting magnitude given solar altitude, camera vertical FOV,
+/// atmosphere strength (`[0.0, 1.0]`), and dark-sky baseline limiting magnitude.
+pub fn compute_sky_limiting_magnitude(
+    sun_alt_deg: f32,
+    fov_y_rad: f32,
+    atmosphere_strength: f32,
+    base_limiting_mag: f32,
+) -> f32 {
+    let atmo_lim = if sun_alt_deg <= -18.0 {
+        base_limiting_mag
+    } else if sun_alt_deg <= -12.0 {
+        let t = smoothstep(-18.0, -12.0, sun_alt_deg);
+        base_limiting_mag + (6.0 - base_limiting_mag) * t
+    } else if sun_alt_deg <= -6.0 {
+        let t = smoothstep(-12.0, -6.0, sun_alt_deg);
+        6.0 + (3.2 - 6.0) * t
+    } else if sun_alt_deg <= 0.0 {
+        let t = smoothstep(-6.0, 0.0, sun_alt_deg);
+        3.2 + (-2.4 - 3.2) * t
+    } else {
+        let t = smoothstep(0.0, 5.0, sun_alt_deg);
+        -2.4 + (-4.5 - (-2.4)) * t
+    };
+
+    // Modest telescopic zoom gain when zoomed in, suppressed in daylight so plain daytime
+    // never reveals catalog stars.
+    let fov = fov_y_rad.max(1e-4);
+    let zoom_t = 1.0 - smoothstep(0.02, 1.047, fov);
+    let zoom_day_suppress = 1.0 - smoothstep(-1.5, 1.5, sun_alt_deg);
+    let zoom_gain = 1.8 * zoom_t * zoom_day_suppress;
+
+    let effective_atmo_lim = atmo_lim + zoom_gain;
+    let s = if atmosphere_strength.is_finite() {
+        atmosphere_strength.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    base_limiting_mag + (effective_atmo_lim - base_limiting_mag) * s.powf(1.35)
+}
+
+/// Computes deep-sky (HiPS survey) visibility multiplier `[0.0, 1.0]` adapted to sky brightness.
+pub fn compute_hips_atmosphere_visibility(sun_alt_deg: f32, atmosphere_strength: f32) -> f32 {
+    let night_vis = 1.0 - smoothstep(-16.0, -7.0, sun_alt_deg);
+    let s = if atmosphere_strength.is_finite() {
+        atmosphere_strength.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    1.0 - s * (1.0 - night_vis)
 }
 
 #[cfg(test)]
@@ -216,5 +279,43 @@ mod tests {
 
         let night = compute_sky_palette(-20.0);
         assert_eq!(night.max_intensity(), 0.0);
+    }
+
+    #[test]
+    fn sky_limiting_magnitude_scales_from_night_through_twilight_to_day() {
+        let base = 10.5_f32;
+        let wide_fov = std::f32::consts::PI;
+
+        let night = compute_sky_limiting_magnitude(-20.0, wide_fov, 1.0, base);
+        let astro_tw = compute_sky_limiting_magnitude(-15.0, wide_fov, 1.0, base);
+        let naut_tw = compute_sky_limiting_magnitude(-9.0, wide_fov, 1.0, base);
+        let civil_tw = compute_sky_limiting_magnitude(-3.0, wide_fov, 1.0, base);
+        let day_low = compute_sky_limiting_magnitude(10.0, wide_fov, 1.0, base);
+        let day_high = compute_sky_limiting_magnitude(45.0, wide_fov, 1.0, base);
+
+        assert!((night - base).abs() < 1e-5);
+        assert!(astro_tw < night && astro_tw > 7.0);
+        assert!(naut_tw < astro_tw && naut_tw > 3.5 && naut_tw < 6.0);
+        assert!(civil_tw < naut_tw && civil_tw > -1.0 && civil_tw < 3.0);
+        assert!(day_low < -2.0);
+        assert!(day_high < -2.0);
+
+        // Even zoomed in during plain daytime (>= 1.5°), limiting magnitude stays brighter than Sirius (-1.46).
+        let day_zoomed = compute_sky_limiting_magnitude(1.5, 0.01, 1.0, base);
+        assert!(day_zoomed <= -2.4, "expected <= -2.4, got {day_zoomed}");
+
+        // Disabling atmosphere restores full dark-sky limiting magnitude even at noon.
+        let atmo_off = compute_sky_limiting_magnitude(45.0, wide_fov, 0.0, base);
+        assert!((atmo_off - base).abs() < 1e-5);
+    }
+
+    #[test]
+    fn hips_visibility_fades_out_before_civil_twilight_and_daytime() {
+        assert!((compute_hips_atmosphere_visibility(-20.0, 1.0) - 1.0).abs() < 1e-5);
+        let mid_tw = compute_hips_atmosphere_visibility(-11.5, 1.0);
+        assert!(mid_tw > 0.1 && mid_tw < 0.9);
+        assert_eq!(compute_hips_atmosphere_visibility(-3.0, 1.0), 0.0);
+        assert_eq!(compute_hips_atmosphere_visibility(30.0, 1.0), 0.0);
+        assert!((compute_hips_atmosphere_visibility(30.0, 0.0) - 1.0).abs() < 1e-5);
     }
 }

@@ -462,6 +462,7 @@ pub(crate) fn hips_survey_system(
     dims: Res<ViewportDimensions>,
     grid_settings: Res<HipsGridSettings>,
     settings: Res<HipsSurveySettings>,
+    atmo_settings: Res<crate::atmosphere::AtmosphereSettings>,
     mut active_survey_tiles: ResMut<HipsActiveSurveyTiles>,
     mut mesh_cache: ResMut<HipsSurfaceMeshCache>,
     mut image_cache: ResMut<HipsImageCache>,
@@ -551,6 +552,11 @@ pub(crate) fn hips_survey_system(
     let aspect = dims.width as f32 / dims.height as f32;
     let proj_params = camera.projection_params(aspect);
     let transform = camera.icrs_to_camera_mat4();
+    let sun_alt_deg =
+        celestial::solar::solar_altitude_deg(camera.observer.location, camera.observer.epoch)
+            as f32;
+    let effective_alpha = settings.alpha
+        * crate::atmosphere::compute_hips_atmosphere_visibility(sun_alt_deg, atmo_settings.strength);
 
     let mut target_depth = HipsGrid::target_depth(
         camera.fov_y,
@@ -636,7 +642,7 @@ pub(crate) fn hips_survey_system(
             uniforms: CelestialTileUniforms {
                 transform,
                 projection: proj_params.into(),
-                alpha: settings.alpha,
+                alpha: effective_alpha,
             },
             image: image_handle,
             depth,
@@ -657,7 +663,7 @@ pub(crate) fn hips_survey_system(
         if let Ok(mut mat) = tile_materials.get_mut(entity) {
             mat.uniforms.transform = transform;
             mat.uniforms.projection = proj_params.into();
-            mat.uniforms.alpha = settings.alpha;
+            mat.uniforms.alpha = effective_alpha;
         }
     }
 

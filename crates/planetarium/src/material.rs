@@ -738,21 +738,34 @@ fn draw_celestial(
     }
 
     if let Some(binding) = uniforms.solar_system.binding() {
-        let bind_group = ctx.render_device().create_bind_group(
-            "celestial_solar_system_bind_group",
-            &pipeline_cache.get_bind_group_layout(&pipelines.solar_system.layout),
-            &BindGroupEntries::sequential((binding,)),
-        );
         for (draw, uniform_index, pipeline_id) in &queries.solar_system {
-            let (Some(pipeline), Some((vertex_buffer, geometry))) = (
+            let (
+                Some(pipeline),
+                Some((vertex_buffer, geometry)),
+                Some(albedo_img),
+                Some(normal_img),
+            ) = (
                 pipeline_cache.get_render_pipeline(pipeline_id.0),
                 locate_mesh(draw.mesh, &meshes, &allocator),
-            ) else {
+                images.get(draw.moon_albedo),
+                images.get(draw.moon_normal),
+            )
+            else {
                 continue;
             };
+            let bind_group = ctx.render_device().create_bind_group(
+                "celestial_solar_system_bind_group",
+                &pipeline_cache.get_bind_group_layout(&pipelines.solar_system.layout),
+                &BindGroupEntries::sequential((
+                    binding.clone(),
+                    &albedo_img.texture_view,
+                    &normal_img.texture_view,
+                    &albedo_img.sampler,
+                )),
+            );
             items.push(DrawItem {
                 pipeline,
-                bind_group: bind_group.clone(),
+                bind_group,
                 uniform_offset: uniform_index.index(),
                 vertex_buffer: Some(vertex_buffer),
                 geometry,

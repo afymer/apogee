@@ -53,7 +53,7 @@ impl SolarSystemBody {
     }
 }
 
-/// Illumination, phase angle, elongation, and synodic age of the Moon.
+/// Illumination, phase angle, elongation, synodic age, and optical libration of the Moon.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LunarPhaseInfo {
     /// Sun-Moon-Observer phase angle in degrees (`0°` = Full, `180°` = New).
@@ -66,6 +66,12 @@ pub struct LunarPhaseInfo {
     pub waxing: bool,
     /// Approximate lunar age in days within the 29.53059-day synodic month.
     pub age_days: f64,
+    /// Optical libration in selenographic longitude `l' ∈ [-180°, 180°)` (sub-Earth longitude).
+    pub libration_lon_deg: f64,
+    /// Optical libration in selenographic latitude `b' ∈ [-90°, 90°]` (sub-Earth latitude).
+    pub libration_lat_deg: f64,
+    /// Unit ICRS direction of the Moon's North rotation axis from Cassini's laws.
+    pub north_pole_icrs: DVec3,
 }
 
 impl LunarPhaseInfo {
@@ -445,12 +451,69 @@ pub fn lunar_ephemeris(location: GeodeticPosition, epoch: Epoch) -> SolarSystemE
         + 4.0e-9 * alpha.powi(4)
         + 5.0 * (topo_dist_km / MEAN_LUNAR_DIST_KM).max(0.1).log10();
 
+    // Meeus Ch. 53: optical libration (l', b') and Cassini-law lunar North rotation axis
+    let t = (epoch.to_jde_tt_days() - 2451545.0) / 36525.0;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let t4 = t3 * t;
+    let f_deg = (93.272_095_0 + 483_202.017_523_3 * t - 0.003_653_9 * t2 - t3 / 3_526_000.0
+        + t4 / 863_310_000.0)
+        .rem_euclid(360.0);
+    let omega_deg = (125.044_547_9 - 1_934.136_289_1 * t + 0.002_075_4 * t2 + t3 / 467_441.0
+        - t4 / 60_616_000.0)
+        .rem_euclid(360.0);
+    let eps_rad = (23.439_291_1 - 0.013_004_2 * t).to_radians();
+    let (sin_eps, cos_eps) = eps_rad.sin_cos();
+
+    let (sin_ra_t, cos_ra_t) = ra_date.sin_cos();
+    let (sin_dec_t, cos_dec_t) = dec_date.sin_cos();
+    let ecl_x = cos_dec_t * cos_ra_t;
+    let ecl_y = cos_dec_t * sin_ra_t * cos_eps + sin_dec_t * sin_eps;
+    let ecl_z = -cos_dec_t * sin_ra_t * sin_eps + sin_dec_t * cos_eps;
+    let lambda_topo_rad = ecl_y.atan2(ecl_x);
+    let beta_topo_rad = ecl_z.clamp(-1.0, 1.0).asin();
+
+    const LUNAR_INCLINATION_DEG: f64 = 1.542_42;
+    let (sin_i, cos_i) = LUNAR_INCLINATION_DEG.to_radians().sin_cos();
+    let omega_rad = omega_deg.to_radians();
+    let w_rad = lambda_topo_rad - omega_rad;
+    let (sin_w, cos_w) = w_rad.sin_cos();
+    let (sin_beta, cos_beta) = beta_topo_rad.sin_cos();
+
+    let a_rad = (sin_w * cos_beta * cos_i - sin_beta * sin_i).atan2(cos_w * cos_beta);
+    let mut libration_lon_deg = (a_rad.to_degrees() - f_deg).rem_euclid(360.0);
+    if libration_lon_deg >= 180.0 {
+        libration_lon_deg -= 360.0;
+    }
+    let libration_lat_deg = (-sin_w * cos_beta * sin_i - sin_beta * cos_i)
+        .clamp(-1.0, 1.0)
+        .asin()
+        .to_degrees();
+
+    // Cassini's 3rd law: Moon North pole at ecliptic (lon = Ω + 90°, lat = 90° - I)
+    let (sin_om, cos_om) = omega_rad.sin_cos();
+    let pole_ecl_x = -sin_i * sin_om;
+    let pole_ecl_y = sin_i * cos_om;
+    let pole_ecl_z = cos_i;
+    let pole_eq_x = pole_ecl_x;
+    let pole_eq_y = cos_eps * pole_ecl_y - sin_eps * pole_ecl_z;
+    let pole_eq_z = sin_eps * pole_ecl_y + cos_eps * pole_ecl_z;
+    let pole_ra_date = Angle::from_radians_normalized(pole_eq_y.atan2(pole_eq_x));
+    let pole_dec_date = Angle::from_radians(pole_eq_z.clamp(-1.0, 1.0).asin());
+    let pole_enu = equatorial_of_date_to_enu(location, lst, pole_ra_date, pole_dec_date);
+    let north_pole_icrs = obs_ctx
+        .topocentric_to_equatorial_dir(pole_enu)
+        .normalize_or_zero();
+
     let lunar_phase = LunarPhaseInfo {
         phase_angle_deg,
         elongation_deg,
         illuminated_fraction,
         waxing,
         age_days,
+        libration_lon_deg,
+        libration_lat_deg,
+        north_pole_icrs,
     };
 
     SolarSystemEphemeris {
@@ -763,5 +826,41 @@ mod tests {
         assert!(max_illum > 0.95, "expected near-1 illumination at Full Moon, got {max_illum}");
         assert!(saw_crescent);
         assert!(saw_full);
+    }
+
+    #[test]
+    fn lunar_libration_and_north_pole_within_physical_bounds() {
+        let paris = GeodeticPosition::default();
+        let base = Epoch::from_gregorian_utc(2026, 1, 1, 0, 0, 0, 0);
+        let mut max_abs_lon = 0.0_f64;
+        let mut max_abs_lat = 0.0_f64;
+
+        for day in 0..30 {
+            let ep = Epoch::from_unix_seconds(base.to_unix_seconds() + f64::from(day) * 86_400.0);
+            let moon = lunar_ephemeris(paris, ep);
+            let phase = moon.lunar_phase.expect("Moon has phase");
+            assert!(
+                phase.libration_lon_deg.abs() < 10.0,
+                "libration_lon_deg out of range: {}",
+                phase.libration_lon_deg
+            );
+            assert!(
+                phase.libration_lat_deg.abs() < 8.0,
+                "libration_lat_deg out of range: {}",
+                phase.libration_lat_deg
+            );
+            assert!((phase.north_pole_icrs.length() - 1.0).abs() < 1e-12);
+            // Moon's axis is within ~25° of celestial North (+Z ICRS), so dot > 0.88.
+            assert!(
+                phase.north_pole_icrs.z > 0.88,
+                "unexpected lunar north_pole_icrs.z: {}",
+                phase.north_pole_icrs.z
+            );
+            max_abs_lon = max_abs_lon.max(phase.libration_lon_deg.abs());
+            max_abs_lat = max_abs_lat.max(phase.libration_lat_deg.abs());
+        }
+
+        assert!(max_abs_lon > 1.0);
+        assert!(max_abs_lat > 1.0);
     }
 }

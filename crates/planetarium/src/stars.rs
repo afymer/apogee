@@ -57,6 +57,34 @@ impl Default for StarRenderParams {
 }
 
 impl StarRenderParams {
+    /// Adapts stellar limiting magnitude and twilight fade range to solar altitude, FOV, and atmosphere strength.
+    pub fn for_sky(sun_alt_deg: f32, fov_y_rad: f32, atmosphere_strength: f32) -> Self {
+        let base = Self::default();
+        let limiting_mag = crate::atmosphere::compute_sky_limiting_magnitude(
+            sun_alt_deg,
+            fov_y_rad,
+            atmosphere_strength,
+            base.limiting_mag,
+        );
+        let s = if atmosphere_strength.is_finite() {
+            atmosphere_strength.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let t_rise = ((sun_alt_deg + 18.0) / 12.0).clamp(0.0, 1.0);
+        let smooth_rise = t_rise * t_rise * (3.0 - 2.0 * t_rise);
+        let t_fall = ((sun_alt_deg + 1.5) / 3.0).clamp(0.0, 1.0);
+        let smooth_fall = 1.0 - t_fall * t_fall * (3.0 - 2.0 * t_fall);
+        let twilight_weight = smooth_rise * smooth_fall;
+        let fade_range = base.fade_range + 1.1 * twilight_weight * s;
+
+        Self {
+            limiting_mag,
+            fade_range,
+            ..base
+        }
+    }
+
     /// Mirrors the rendered star disc radius (in physical pixels) computed in `celestial_star.wgsl`.
     pub fn rendered_radius_px(&self, mag: f32, fov_y_rad: f32) -> f32 {
         let fov = fov_y_rad.max(0.005);
@@ -497,6 +525,10 @@ pub struct CelestialStarUniforms {
     pub min_radius: f32,
     pub max_radius: f32,
     pub opacity: f32,
+    /// xyz = unit topocentric zenith direction in camera space, w = atmosphere_strength [0..1]
+    pub zenith_and_atmo: Vec4,
+    /// xyz = unit Sun direction in camera space, w = sun_alt_deg
+    pub sun_cam_and_alt: Vec4,
 }
 
 #[derive(Component, Debug, Clone)]
@@ -689,6 +721,8 @@ mod tests {
                 min_radius: 0.8,
                 max_radius: 24.0,
                 opacity: 0.0,
+                zenith_and_atmo: Vec4::new(0.0, 0.0, 1.0, 1.0),
+                sun_cam_and_alt: Vec4::new(0.0, 0.0, -1.0, -25.0),
             },
             stars: Handle::default(),
             star_count: 10,
@@ -1012,5 +1046,19 @@ mod tests {
                 .any(|(_, m)| m.bayer_flamsteed.as_deref() == Some("γ Cas")),
             "Missing Bayer designation for γ Cas"
         );
+    }
+
+    #[test]
+    fn star_render_params_suppresses_daytime_stars_and_preserves_night() {
+        let wide_fov = std::f32::consts::PI;
+        let night = StarRenderParams::for_sky(-20.0, wide_fov, 1.0);
+        assert!((night.limiting_mag - StarRenderParams::default().limiting_mag).abs() < 1e-5);
+
+        let twilight = StarRenderParams::for_sky(-5.0, wide_fov, 1.0);
+        assert!(twilight.fade_range > night.fade_range);
+        assert!(twilight.limiting_mag < night.limiting_mag);
+
+        let day = StarRenderParams::for_sky(20.0, wide_fov, 1.0);
+        assert!(day.limiting_mag + day.fade_range < -1.5);
     }
 }

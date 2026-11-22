@@ -10,6 +10,8 @@ struct CelestialStarUniforms {
     min_radius: f32,
     max_radius: f32,
     opacity: f32,
+    zenith_and_atmo: vec4<f32>,
+    sun_cam_and_alt: vec4<f32>,
 }
 
 struct StarRecord {
@@ -85,8 +87,47 @@ fn vertex(input: VertexInput) -> VertexOutput {
     let alpha_zoom_boost = clamp((zoom_factor - 1.0) * 0.35, 0.0, 0.65);
     let star_alpha = mix(mag_brightness, 1.0, alpha_zoom_boost);
 
+    // Fast-path cull before projection: extinction & solar glare only add >= 0 to mag.
+    if (mag - uniforms.limiting_mag >= uniforms.fade_range) {
+        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+        out.uv = vec2<f32>(0.0, 0.0);
+        out.color = vec3<f32>(0.0, 0.0, 0.0);
+        out.alpha = 0.0;
+        return out;
+    }
+
+    let v_cam = (uniforms.transform * vec4<f32>(star.pos, 0.0)).xyz;
+    let v_len = length(v_cam);
+    let v_dir = select(vec3<f32>(0.0, 0.0, 1.0), v_cam / v_len, v_len > 1e-6);
+    let v_cam_z = select(0.0, v_dir.z, v_len > 1e-6);
+    let min_z = mix(-0.98, 0.02, uniforms.projection.blend_factor);
+
+    if (v_cam_z <= min_z) {
+        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+        out.uv = vec2<f32>(0.0, 0.0);
+        out.color = vec3<f32>(0.0, 0.0, 0.0);
+        out.alpha = 0.0;
+        return out;
+    }
+
+    // Directional horizon extinction + solar twilight/daytime angular proximity glare
+    let atmo_strength = clamp(uniforms.zenith_and_atmo.w, 0.0, 1.0);
+    let sin_alt = dot(v_dir, uniforms.zenith_and_atmo.xyz);
+    let airmass = 1.0 / max(sin_alt + 0.035, 0.035);
+    let ext_mag = 0.16 * max(airmass - 1.0, 0.0) * atmo_strength;
+
+    let cos_sun = dot(v_dir, uniforms.sun_cam_and_alt.xyz);
+    let sun_alt_deg = uniforms.sun_cam_and_alt.w;
+    let tw_glare = smoothstep(-16.0, 0.0, sun_alt_deg) * atmo_strength;
+    let sun_pos = max(cos_sun, 0.0);
+    let sun_pos2 = sun_pos * sun_pos;
+    let sun_pos4 = sun_pos2 * sun_pos2;
+    let sun_pos8 = sun_pos4 * sun_pos4;
+    let glare_mag = tw_glare * (1.1 * sun_pos2 + 2.2 * sun_pos8);
+
+    let effective_mag = mag + ext_mag + glare_mag;
     var mag_cutoff_alpha = 1.0;
-    let mag_diff = mag - uniforms.limiting_mag;
+    let mag_diff = effective_mag - uniforms.limiting_mag;
     if (mag_diff > 0.0) {
         if (mag_diff >= uniforms.fade_range) {
             out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
@@ -97,20 +138,14 @@ fn vertex(input: VertexInput) -> VertexOutput {
         }
         mag_cutoff_alpha = 1.0 - (mag_diff / uniforms.fade_range);
     }
-    let total_alpha = star_alpha * mag_cutoff_alpha * clamp(uniforms.opacity, 0.0, 1.0);
-
-    let v_cam = (uniforms.transform * vec4<f32>(star.pos, 0.0)).xyz;
-    let v_len = length(v_cam);
-    let v_cam_z = select(0.0, v_cam.z / v_len, v_len > 1e-6);
-    let min_z = mix(-0.98, 0.02, uniforms.projection.blend_factor);
-
-    if (v_cam_z <= min_z) {
-        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
-        out.uv = vec2<f32>(0.0, 0.0);
-        out.color = vec3<f32>(0.0, 0.0, 0.0);
-        out.alpha = 0.0;
-        return out;
-    }
+    let contrast_fade = clamp(
+        (uniforms.limiting_mag + uniforms.fade_range - effective_mag)
+            / max(uniforms.fade_range + 1.5 * tw_glare, 0.6),
+        0.0,
+        1.0,
+    );
+    let total_alpha =
+        star_alpha * mag_cutoff_alpha * contrast_fade * clamp(uniforms.opacity, 0.0, 1.0);
 
     let center_clip = project_celestial(v_cam, uniforms.projection);
 

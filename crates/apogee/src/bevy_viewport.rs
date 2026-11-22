@@ -1028,13 +1028,25 @@ impl PlanetariumPanel {
         } else {
             None
         };
+        let atmo_strength = cx
+            .try_global::<GlobalSettings>()
+            .map_or(1.0, |g| g.0.read(cx).effective_atmosphere_strength());
+        let sun_alt_deg = celestial::solar::solar_altitude_deg(
+            view_info.observer.location,
+            view_info.observer.epoch,
+        ) as f32;
+        let star_params = StarRenderParams::for_sky(
+            sun_alt_deg,
+            view_info.projection.fov_y.radians() as f32,
+            atmo_strength,
+        );
         index
             .pick(
                 &view_info,
                 ndc,
                 (w, h),
                 scale_factor,
-                &StarRenderParams::default(),
+                &star_params,
                 occlude_ground,
                 star_horizon_occluder,
             )

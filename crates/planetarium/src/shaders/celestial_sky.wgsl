@@ -60,11 +60,13 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
             let h2 = h * h;
             let h4 = h2 * h2;
             let h8 = h4 * h4;
+            let h_mid = pow(max(h, 1e-5), 1.55);
+            let horizon_blend = clamp(0.34 * h_mid + 0.66 * h4, 0.0, 1.0);
 
             let cos_theta = clamp(dot(dir_enu, uniforms.sun_dir_and_atmo_strength.xyz), -1.0, 1.0);
             let rayleigh_phase = 0.86 + 0.18 * cos_theta * cos_theta;
 
-            var sky = mix(uniforms.zenith_color.rgb, uniforms.horizon_color.rgb, h4) * rayleigh_phase;
+            var sky = mix(uniforms.zenith_color.rgb, uniforms.horizon_color.rgb, horizon_blend) * rayleigh_phase;
 
             // Warm dusk/dawn horizon arch toward solar azimuth
             let sun_half = 0.5 * (cos_theta + 1.0);
@@ -75,18 +77,28 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
             sky += uniforms.dusk_color.rgb
                 * (h8 * (0.35 * sun_wide + 0.85 * sun_core) + h4 * 0.20 * sun_wide);
 
-            // Schlick forward-scattering solar glow
+            // Schlick forward-scattering solar glow (aureole + wide Rayleigh-Mie wrap)
             let inv_mie = 1.0 / max(1.0 - 0.78 * cos_theta, 0.04);
             let mie = (inv_mie * inv_mie) * (0.045 + 0.055 * h4);
-            sky += uniforms.sun_glow_color.rgb * (mie * uniforms.sun_glow_color.w);
+            let aureole = pow(max(sun_pos, 1e-5), 12.0) * 0.65;
+            sky += uniforms.sun_glow_color.rgb * ((mie + aureole) * uniforms.sun_glow_color.w);
 
-            let mapped = sky / (vec3<f32>(1.0) + sky);
+            // Extended Reinhard tonemapping (white point W = 2.35, W^2 = 5.5225) preserves
+            // bright daytime sky luminance and circumsolar sky clarity instead of crushing to grey.
+            let mapped = clamp(
+                (sky * (vec3<f32>(1.0) + sky / 5.5225)) / (vec3<f32>(1.0) + sky),
+                vec3<f32>(0.0),
+                vec3<f32>(1.0),
+            );
             let lum = dot(mapped, vec3<f32>(0.2126, 0.7152, 0.0722));
-            let veil = smoothstep(0.002, 0.24, lum);
+            let sun_z = uniforms.sun_dir_and_atmo_strength.z;
+            let day_veil = smoothstep(-0.02, 0.035, sun_z);
+            let lum_veil = smoothstep(0.002, 0.20, lum);
+            let veil = clamp(mix(lum_veil * 0.82, 1.0, day_veil), 0.0, 1.0);
             let scale = atmo_strength * horizon_mask;
 
             atmo_rgb = mapped * scale;
-            atmo_a = clamp(veil * 0.98, 0.0, 0.98) * scale;
+            atmo_a = veil * scale;
         }
     }
 

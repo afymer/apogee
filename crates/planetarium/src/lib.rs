@@ -491,6 +491,7 @@ fn camera_movement_and_interpolation_system(
     dims: Res<ViewportDimensions>,
     handles: Res<CelestialHandles>,
     star_settings: Res<stars::StarSettings>,
+    atmo_settings: Res<atmosphere::AtmosphereSettings>,
     coord_grid_settings: Res<grids::CoordinateGridSettings>,
     horizon_settings: Res<landscape::HorizonRenderSettings>,
     mut line_materials: Query<&mut CelestialLineMaterial>,
@@ -728,17 +729,10 @@ fn camera_movement_and_interpolation_system(
 
         if let Some(star_entity) = handles.star_entity {
             if let Ok(mut mat) = star_materials.get_mut(star_entity) {
-                let render_params = stars::StarRenderParams::default();
                 mat.uniforms.transform =
                     glam::DMat4::from_mat3(camera.icrs_to_camera_matrix()).as_mat4();
                 mat.uniforms.projection = proj_params.into();
                 mat.uniforms.viewport_size = Vec2::new(dims.width as f32, dims.height as f32);
-                mat.uniforms.limiting_mag = render_params.limiting_mag;
-                mat.uniforms.fade_range = render_params.fade_range;
-                mat.uniforms.base_radius = render_params.base_radius;
-                mat.uniforms.min_radius = render_params.min_radius;
-                mat.uniforms.max_radius = render_params.max_radius;
-                mat.uniforms.opacity = star_settings.opacity;
             }
         }
 
@@ -763,7 +757,37 @@ fn camera_movement_and_interpolation_system(
     }
     if let Some(star_entity) = handles.star_entity {
         if let Ok(mut mat) = star_materials.get_mut(star_entity) {
+            let proj_params = camera.projection_params(aspect);
+            let sun_enu =
+                celestial::solar::solar_topocentric_enu(camera.observer.location, camera.observer.epoch);
+            let sun_alt_deg = sun_enu.z.clamp(-1.0, 1.0).asin().to_degrees() as f32;
+            let render_params = stars::StarRenderParams::for_sky(
+                sun_alt_deg,
+                proj_params.fov_y,
+                atmo_settings.strength,
+            );
+            let topo_to_cam = camera.topocentric_to_camera_matrix();
+            let zenith_cam = topo_to_cam.z_axis.normalize_or_zero();
+            let sun_cam = (topo_to_cam * sun_enu).normalize_or_zero();
+
+            mat.uniforms.limiting_mag = render_params.limiting_mag;
+            mat.uniforms.fade_range = render_params.fade_range;
+            mat.uniforms.base_radius = render_params.base_radius;
+            mat.uniforms.min_radius = render_params.min_radius;
+            mat.uniforms.max_radius = render_params.max_radius;
             mat.uniforms.opacity = star_settings.opacity;
+            mat.uniforms.zenith_and_atmo = Vec4::new(
+                zenith_cam.x as f32,
+                zenith_cam.y as f32,
+                zenith_cam.z as f32,
+                atmo_settings.strength,
+            );
+            mat.uniforms.sun_cam_and_alt = Vec4::new(
+                sun_cam.x as f32,
+                sun_cam.y as f32,
+                sun_cam.z as f32,
+                sun_alt_deg,
+            );
         }
     }
 }
@@ -1299,7 +1323,15 @@ impl PlanetariumRenderer {
 
                     let star_material = {
                         let _span = tracing::info_span!("create_star_material_step").entered();
-                        let render_params = stars::StarRenderParams::default();
+                        let sun_enu = celestial::solar::solar_topocentric_enu(
+                            initial_camera.observer.location,
+                            initial_camera.observer.epoch,
+                        );
+                        let sun_alt_deg = sun_enu.z.clamp(-1.0, 1.0).asin().to_degrees() as f32;
+                        let render_params =
+                            stars::StarRenderParams::for_sky(sun_alt_deg, initial_proj.fov_y, 1.0);
+                        let zenith_cam = initial_topo_to_cam.z_axis.normalize_or_zero();
+                        let sun_cam = (initial_topo_to_cam * sun_enu).normalize_or_zero();
                         stars::CelestialStarMaterial {
                             uniforms: stars::CelestialStarUniforms {
                                 transform: glam::DMat4::from_mat3(initial_eq_to_cam).as_mat4(),
@@ -1311,6 +1343,18 @@ impl PlanetariumRenderer {
                                 min_radius: render_params.min_radius,
                                 max_radius: render_params.max_radius,
                                 opacity: 1.0,
+                                zenith_and_atmo: Vec4::new(
+                                    zenith_cam.x as f32,
+                                    zenith_cam.y as f32,
+                                    zenith_cam.z as f32,
+                                    1.0,
+                                ),
+                                sun_cam_and_alt: Vec4::new(
+                                    sun_cam.x as f32,
+                                    sun_cam.y as f32,
+                                    sun_cam.z as f32,
+                                    sun_alt_deg,
+                                ),
                             },
                             stars: buffer_handle,
                             star_count: star_count as u32,
@@ -1329,6 +1373,12 @@ impl PlanetariumRenderer {
                 app.init_resource::<ground::GroundSettings>();
                 app.init_resource::<stars::StarSettings>();
                 app.init_resource::<solar_system::SolarSystemRenderSettings>();
+                let moon_textures = {
+                    let _span = tracing::info_span!("load_moon_textures").entered();
+                    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+                    solar_system::load_moon_textures(&mut images)
+                };
+                app.insert_resource(moon_textures.clone());
                 app.init_resource::<grids::CoordinateGridSettings>();
                 let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
                 app.insert_resource(tile_loader);
@@ -1415,6 +1465,8 @@ impl PlanetariumRenderer {
                             Vec2::new(width as f32, height as f32),
                             1.0,
                             1.0,
+                            1.0,
+                            &moon_textures,
                         ),
                     ));
                     world.spawn(sky::CelestialSkyMaterial::from_camera(
