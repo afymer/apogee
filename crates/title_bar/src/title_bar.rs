@@ -1,4 +1,4 @@
-use gpui::{App, Context, IntoElement, Render, WeakEntity, Window, prelude::*};
+use gpui::{Action, App, Context, IntoElement, Render, WeakEntity, Window, prelude::*};
 use ui::{Button, ButtonStyle, ContextMenu, LabelSize, PopoverMenu, prelude::*};
 use workspace::{WorkspaceKind, workbench::Workbench};
 
@@ -54,9 +54,13 @@ impl TitleBar {
             )
             .menu(|window, cx| {
                 Some(ContextMenu::build(window, cx, |menu, _window, _cx| {
-                    menu.entry("Settings", None, |_window, cx| {
-                        settings::open_settings_window(cx);
-                    })
+                    menu.entry(
+                        "Settings",
+                        Some(settings::OpenSettings.boxed_clone()),
+                        |_window, cx| {
+                            settings::open_settings_window(cx);
+                        },
+                    )
                     .entry("Horizon Backgrounds", None, |_window, cx| {
                         horizon::open_horizon_manager_window(None, cx);
                     })

@@ -3,7 +3,7 @@ use persistence::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
     DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
     DEFAULT_STARS_OPACITY, DebugSettings, DocumentStore, GridLayerSettings, GroundSettings,
-    HorizonLayerSettings, PlanetariumSettings, StarsSettings, SurveySettings,
+    HorizonLayerSettings, KeymapSettings, PlanetariumSettings, StarsSettings, SurveySettings,
 };
 
 /// Global GPUI entity wrapper for [`SettingsModel`].
@@ -26,6 +26,8 @@ pub fn init(cx: &mut App) {
 /// Initializes [`GlobalSettings`] backed by a specific [`DocumentStore`].
 pub fn init_with_store(store: DocumentStore, cx: &mut App) {
     let settings = store.load_or_default::<AppSettings>();
+    crate::shortcuts::init(cx);
+    crate::shortcuts::sync_keybindings(&settings, cx);
     let model = cx.new(|_cx| SettingsModel { store, settings });
     cx.set_global(GlobalSettings(model));
 }
@@ -379,6 +381,63 @@ impl SettingsModel {
     pub fn toggle_show_hips_grid(&mut self, cx: &mut Context<Self>) {
         let next = !self.settings.debug.show_hips_grid;
         self.set_show_hips_grid(next, cx);
+    }
+
+    /// Returns the persisted keymap override settings.
+    pub fn keymap(&self) -> &KeymapSettings {
+        &self.settings.keymap
+    }
+
+    /// Returns whether any user keybinding overrides are active.
+    pub fn has_keybinding_overrides(&self) -> bool {
+        !self.settings.keymap.overrides.is_empty()
+    }
+
+    /// Sets or clears (`None` = unbound) a user keybinding override, persists it, and updates GPUI's keymap.
+    pub fn set_keybinding_override(
+        &mut self,
+        action_id: impl Into<String>,
+        binding: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let action_id = action_id.into();
+        let canonical = binding.and_then(crate::shortcuts::canonicalize_binding);
+        let default_canonical = crate::shortcuts::default_binding_for_action(&action_id)
+            .and_then(crate::shortcuts::canonicalize_binding);
+
+        self.update(
+            |settings| {
+                if canonical == default_canonical {
+                    settings.keymap.overrides.remove(&action_id);
+                } else {
+                    settings.keymap.overrides.insert(action_id, canonical);
+                }
+            },
+            cx,
+        );
+        crate::shortcuts::sync_keybindings(&self.settings, cx);
+    }
+
+    /// Resets a single action's keybinding back to its built-in default.
+    pub fn reset_keybinding(&mut self, action_id: &str, cx: &mut Context<Self>) {
+        self.update(
+            |settings| {
+                settings.keymap.overrides.remove(action_id);
+            },
+            cx,
+        );
+        crate::shortcuts::sync_keybindings(&self.settings, cx);
+    }
+
+    /// Resets all user keybinding overrides back to built-in defaults.
+    pub fn reset_all_keybindings(&mut self, cx: &mut Context<Self>) {
+        self.update(
+            |settings| {
+                settings.keymap.overrides.clear();
+            },
+            cx,
+        );
+        crate::shortcuts::sync_keybindings(&self.settings, cx);
     }
 
     /// Mutates settings, persists atomically to disk if changed, and notifies observers.

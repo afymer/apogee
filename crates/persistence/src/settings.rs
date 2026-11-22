@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::store::Persistable;
@@ -303,6 +305,17 @@ pub struct DebugSettings {
     pub show_hips_grid: bool,
 }
 
+/// User keyboard shortcut overrides keyed by canonical action ID (e.g. `"apogee::OpenSettings"`).
+///
+/// - Absent entry: use the action's built-in default binding.
+/// - `Some(keystrokes)`: bind the action to the serialized GPUI keystroke sequence (e.g. `"ctrl-,"`).
+/// - `None`: explicitly unbound by the user.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeymapSettings {
+    #[serde(default)]
+    pub overrides: BTreeMap<String, Option<String>>,
+}
+
 /// Persisted application settings document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -312,6 +325,8 @@ pub struct AppSettings {
     pub planetarium: PlanetariumSettings,
     #[serde(default)]
     pub debug: DebugSettings,
+    #[serde(default)]
+    pub keymap: KeymapSettings,
 }
 
 impl Default for AppSettings {
@@ -320,6 +335,7 @@ impl Default for AppSettings {
             schema_version: SETTINGS_SCHEMA_VERSION,
             planetarium: PlanetariumSettings::default(),
             debug: DebugSettings::default(),
+            keymap: KeymapSettings::default(),
         }
     }
 }

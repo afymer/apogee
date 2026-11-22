@@ -25,7 +25,7 @@ pub use settings::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
     DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
     DEFAULT_STARS_OPACITY, DebugSettings, GridLayerSettings, GroundSettings, HorizonLayerSettings,
-    PlanetariumSettings, SETTINGS_SCHEMA_VERSION, StarsSettings, SurveySettings,
+    KeymapSettings, PlanetariumSettings, SETTINGS_SCHEMA_VERSION, StarsSettings, SurveySettings,
 };
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
@@ -393,6 +393,7 @@ mod tests {
             debug: DebugSettings {
                 show_hips_grid: true,
             },
+            keymap: KeymapSettings::default(),
         };
         store.save(&updated).expect("save succeeds");
         let loaded: AppSettings = store.load().expect("load succeeds");

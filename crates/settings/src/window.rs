@@ -10,13 +10,14 @@ use persistence::{
     DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY, DEFAULT_STARS_OPACITY,
 };
 use ui::{
-    ActiveTheme, Color, Divider, DividerColor, Icon, IconButton, IconName, IconSize, Label,
-    LabelCommon, LabelSize, Switch, SwitchColor, ToggleState, Tooltip, TreeViewItem,
-    WithScrollbar, h_flex, prelude::*, v_flex,
+    ActiveTheme, Button, ButtonStyle, Color, Divider, DividerColor, Icon, IconButton, IconName,
+    IconSize, Label, LabelCommon, LabelSize, Switch, SwitchColor, ToggleState, Tooltip,
+    TreeViewItem, WithScrollbar, h_flex, prelude::*, v_flex,
 };
 
 use components::{Slider, SliderEvent, TextField, TextFieldEvent};
 
+use crate::shortcuts::open_shortcuts_window;
 use crate::state::{GlobalSettings, SettingsModel};
 
 const SIDEBAR_WIDTH: Pixels = px(226.0);
@@ -37,6 +38,10 @@ pub enum SettingControl {
         max: f32,
         default: f32,
         format: fn(f32) -> String,
+    },
+    ActionLink {
+        button_text: &'static str,
+        on_click: fn(&mut Window, &mut App),
     },
 }
 
@@ -297,6 +302,21 @@ fn default_categories() -> Vec<SettingsCategory> {
                     ],
                 },
             ],
+        },
+        SettingsCategory {
+            title: "Keymap",
+            sections: vec![SettingsSection {
+                title: "Keybindings",
+                items: vec![SettingItem {
+                    id: "keymap_edit_keybindings",
+                    title: "Edit Keybindings",
+                    description: "Customize keyboard shortcuts in the keyboard shortcuts window.",
+                    control: SettingControl::ActionLink {
+                        button_text: "Open Keymap",
+                        on_click: |_window, cx| open_shortcuts_window(cx),
+                    },
+                }],
+            }],
         },
         SettingsCategory {
             title: "Debug",
@@ -870,6 +890,19 @@ impl SettingsWindow {
                     )
                     .into_any_element();
                 (is_modified, reset_fn, control)
+            }
+            SettingControl::ActionLink {
+                button_text,
+                on_click,
+            } => {
+                let reset_fn = Box::new(|_cx: &mut App| {});
+                let control = Button::new(format!("{}-action", item.id), button_text)
+                    .style(ButtonStyle::Outlined)
+                    .on_click(move |_, window, cx| {
+                        on_click(window, cx);
+                    })
+                    .into_any_element();
+                (false, reset_fn, control)
             }
         };
 
