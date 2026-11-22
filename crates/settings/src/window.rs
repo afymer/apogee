@@ -7,7 +7,8 @@ use gpui::{
 };
 use persistence::{
     AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY, DEFAULT_GROUND_OPACITY,
-    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY, DEFAULT_STARS_OPACITY,
+    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY, DEFAULT_SOLAR_SYSTEM_OPACITY,
+    DEFAULT_STARS_OPACITY,
 };
 use ui::{
     ActiveTheme, Button, ButtonStyle, Color, Divider, DividerColor, Icon, IconButton, IconName,
@@ -233,6 +234,39 @@ fn default_categories() -> Vec<SettingsCategory> {
                                 min: 0.0,
                                 max: 1.0,
                                 default: DEFAULT_STARS_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
+                },
+                SettingsSection {
+                    title: "Solar System",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_solar_system_enabled",
+                            title: "Show Solar System Objects",
+                            description: "Display the Sun and Moon in the planetarium viewport.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.solar_system.enabled,
+                                set: |model, value, cx| model.set_solar_system_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_solar_system_opacity",
+                            title: "Solar System Opacity",
+                            description: "Adjust the opacity of rendered solar-system objects (Sun and Moon).",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.solar_system.opacity,
+                                preview: |model, value, cx| {
+                                    model.preview_solar_system_opacity(value, cx);
+                                },
+                                commit: |model, value, cx| {
+                                    model.commit_solar_system_opacity(value, cx);
+                                },
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_SOLAR_SYSTEM_OPACITY,
                                 format: |v| format!("{:.0}%", v * 100.0),
                             },
                         },

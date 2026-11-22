@@ -8,6 +8,7 @@ pub mod hips;
 pub mod landscape;
 pub mod material;
 pub mod sky;
+pub mod solar_system;
 pub mod stars;
 pub mod viewport;
 
@@ -16,6 +17,10 @@ pub use grids::CoordinateGridSettings;
 pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
 pub use landscape::{HorizonImageData, HorizonLayerData, HorizonRenderSettings};
+pub use solar_system::{
+    PickedSolarSystemBody, SolarSystemRenderSettings, pick_solar_system_body,
+    rendered_solar_system_disc_radius_px,
+};
 pub use stars::{PickedStar, StarRenderParams, StarSettings, StarSpatialIndex};
 
 use std::{
@@ -47,7 +52,9 @@ use celestial::HorizonProfile;
 use grids::{create_altaz_grid_mesh, create_equatorial_grid_mesh, create_horizon_mesh};
 pub use material::{CelestialLineMaterial, CelestialLineUniforms, init_celestial_materials};
 
-pub use crate::viewport::{ObserverClockSpec, ObserverUpdate, ViewportCommand};
+pub use crate::viewport::{
+    ObserverClockSpec, ObserverUpdate, TrajectoryRenderData, ViewportCommand,
+};
 
 #[derive(Default, Component, Clone, Copy)]
 struct PlanetariumCameraMarker;
@@ -223,6 +230,15 @@ impl BevyBridge {
         self.send_command(ViewportCommand::SetStarOpacity(clamped));
     }
 
+    pub fn set_solar_system_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetSolarSystemOpacity(clamped));
+    }
+
     pub fn set_altaz_grid_opacity(&self, opacity: f32) {
         let clamped = if opacity.is_finite() {
             opacity.clamp(0.0, 1.0)
@@ -285,6 +301,10 @@ impl BevyBridge {
 
     pub fn set_horizon_line_visible(&self, visible: bool) {
         self.send_command(ViewportCommand::SetHorizonLineVisible(visible));
+    }
+
+    pub fn set_trajectory(&self, data: Option<TrajectoryRenderData>) {
+        self.send_command(ViewportCommand::SetTrajectory(data));
     }
 
     pub fn resize(&self, width: u32, height: u32) {
@@ -350,10 +370,30 @@ struct CelestialHandles {
     horizon_entity: Entity,
     altaz_entity: Entity,
     eq_entity: Entity,
+    trajectory_entity: Entity,
     horizon_mesh: Handle<Mesh>,
     altaz_mesh: Handle<Mesh>,
     eq_mesh: Handle<Mesh>,
+    trajectory_mesh: Handle<Mesh>,
     star_entity: Option<Entity>,
+}
+
+fn create_trajectory_mesh(points: &[([f32; 3], bool)]) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(points.len().saturating_sub(1) * 2);
+    let mut line_tiers: Vec<f32> = Vec::with_capacity(points.len().saturating_sub(1) * 2);
+    for pair in points.windows(2) {
+        let (p0, a0) = pair[0];
+        let (p1, a1) = pair[1];
+        let tier = if a0 && a1 { 0.0_f32 } else { 1.0_f32 };
+        positions.push(p0);
+        positions.push(p1);
+        line_tiers.push(tier);
+        line_tiers.push(tier);
+    }
+    let mut mesh = Mesh::new(bevy::mesh::PrimitiveTopology::LineList, default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(grids::ATTRIBUTE_LINE_TIER, line_tiers);
+    mesh
 }
 
 #[derive(Resource, Clone, Copy)]
@@ -425,12 +465,12 @@ impl Default for CameraSyncState {
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 /// Alpha of the flat 0° horizon circle; hidden unless the horizon line setting is enabled.
 fn horizon_line_alpha(settings: &landscape::HorizonRenderSettings) -> f32 {
     if settings.show_line { 0.85 } else { 0.0 }
 }
 
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn camera_movement_and_interpolation_system(
     time: Res<Time>,
     mut pending_commands: ResMut<PendingCommands>,
@@ -651,6 +691,11 @@ fn camera_movement_and_interpolation_system(
             mat.uniforms.color.w =
                 grids::EQUATORIAL_GRID_BASE_ALPHA * coord_grid_settings.equatorial_opacity;
         }
+        if let Ok(mut mat) = line_materials.get_mut(handles.trajectory_entity) {
+            mat.uniforms.transform =
+                glam::DMat4::from_mat3(camera.topocentric_to_camera_matrix()).as_mat4();
+            mat.uniforms.projection = proj_params.into();
+        }
 
         if let Some(star_entity) = handles.star_entity {
             if let Ok(mut mat) = star_materials.get_mut(star_entity) {
@@ -781,6 +826,19 @@ fn process_viewport_commands(
                     *frames_remaining = 3;
                 }
             }
+            ViewportCommand::SetSolarSystemOpacity(opacity) => {
+                if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<solar_system::SolarSystemRenderSettings>()
+                {
+                    settings.opacity = if opacity.is_finite() {
+                        opacity.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    *frames_remaining = 3;
+                }
+            }
             ViewportCommand::SetAltAzGridOpacity(opacity) => {
                 if let Some(mut settings) = app
                     .world_mut()
@@ -852,6 +910,43 @@ fn process_viewport_commands(
                     .get_resource_mut::<landscape::HorizonRenderSettings>()
                 {
                     settings.show_line = visible;
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetTrajectory(maybe_traj) => {
+                let handles = app.world().get_resource::<CelestialHandles>().cloned();
+                if let Some(handles) = handles {
+                    match maybe_traj {
+                        Some(data) => {
+                            let new_mesh = create_trajectory_mesh(&data.points);
+                            if let Some(mut mesh) = app
+                                .world_mut()
+                                .resource_mut::<Assets<Mesh>>()
+                                .get_mut(&handles.trajectory_mesh)
+                            {
+                                *mesh = new_mesh;
+                            }
+                            if let Some(mut mat) = app
+                                .world_mut()
+                                .get_mut::<CelestialLineMaterial>(handles.trajectory_entity)
+                            {
+                                let r = data.srgb[0] + (1.0 - data.srgb[0]) * 0.22;
+                                let g = data.srgb[1] + (1.0 - data.srgb[1]) * 0.22;
+                                let b = data.srgb[2] + (1.0 - data.srgb[2]) * 0.22;
+                                mat.uniforms.color = Vec4::new(r, g, b, 0.92);
+                                mat.uniforms.minor_alpha =
+                                    if data.occlude_ground { 0.22 } else { 0.42 };
+                            }
+                        }
+                        None => {
+                            if let Some(mut mat) = app
+                                .world_mut()
+                                .get_mut::<CelestialLineMaterial>(handles.trajectory_entity)
+                            {
+                                mat.uniforms.color.w = 0.0;
+                            }
+                        }
+                    }
                     *frames_remaining = 3;
                 }
             }
@@ -1050,8 +1145,9 @@ impl PlanetariumRenderer {
                         TextureFormat::Bgra8UnormSrgb,
                         RenderAssetUsages::default(),
                     );
-                    render_image.texture_descriptor.usage =
-                        TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
+                    render_image.texture_descriptor.usage = TextureUsages::RENDER_ATTACHMENT
+                        | TextureUsages::TEXTURE_BINDING
+                        | TextureUsages::COPY_SRC;
                     app.world_mut()
                         .resource_mut::<Assets<Image>>()
                         .add(render_image)
@@ -1116,6 +1212,19 @@ impl PlanetariumRenderer {
                     app.world_mut()
                         .resource_mut::<Assets<Mesh>>()
                         .add(create_equatorial_grid_mesh(initial_eq_to_cam))
+                };
+
+                let trajectory_mesh_handle = app
+                    .world_mut()
+                    .resource_mut::<Assets<Mesh>>()
+                    .add(create_trajectory_mesh(&[]));
+                let trajectory_material = CelestialLineMaterial {
+                    uniforms: CelestialLineUniforms {
+                        transform: glam::DMat4::from_mat3(initial_topo_to_cam).as_mat4(),
+                        projection: initial_proj.into(),
+                        color: Vec4::new(1.0, 1.0, 1.0, 0.0),
+                        minor_alpha: 0.22,
+                    },
                 };
 
                 let star_catalog = {
@@ -1189,6 +1298,7 @@ impl PlanetariumRenderer {
                 app.init_resource::<atmosphere::AtmosphereSettings>();
                 app.init_resource::<ground::GroundSettings>();
                 app.init_resource::<stars::StarSettings>();
+                app.init_resource::<solar_system::SolarSystemRenderSettings>();
                 app.init_resource::<grids::CoordinateGridSettings>();
                 let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
                 app.insert_resource(tile_loader);
@@ -1245,7 +1355,12 @@ impl PlanetariumRenderer {
                 };
                 app.insert_resource(initial_horizon_settings.clone());
 
-                let (horizon_entity, altaz_entity, eq_entity, star_entity) = {
+                let solar_system_quad_mesh = app
+                    .world_mut()
+                    .resource_mut::<Assets<Mesh>>()
+                    .add(stars::create_star_quad_mesh());
+
+                let (horizon_entity, altaz_entity, eq_entity, trajectory_entity, star_entity) = {
                     let _span = tracing::info_span!("spawn_celestial_entities").entered();
                     let world = app.world_mut();
                     let horizon = world
@@ -1257,8 +1372,21 @@ impl PlanetariumRenderer {
                     let eq = world
                         .spawn((Mesh3d(eq_mesh_handle.clone()), eq_material))
                         .id();
+                    let trajectory = world
+                        .spawn((Mesh3d(trajectory_mesh_handle.clone()), trajectory_material))
+                        .id();
                     let star = star_setup
                         .map(|(material, mesh)| world.spawn((Mesh3d(mesh), material)).id());
+                    world.spawn((
+                        Mesh3d(solar_system_quad_mesh),
+                        solar_system::CelestialSolarSystemMaterial::from_camera(
+                            &initial_camera,
+                            initial_proj,
+                            Vec2::new(width as f32, height as f32),
+                            1.0,
+                            1.0,
+                        ),
+                    ));
                     world.spawn(sky::CelestialSkyMaterial::from_camera(
                         &initial_camera,
                         initial_proj,
@@ -1270,16 +1398,18 @@ impl PlanetariumRenderer {
                         initial_proj,
                         &initial_horizon_settings,
                     ));
-                    (horizon, altaz, eq, star)
+                    (horizon, altaz, eq, trajectory, star)
                 };
 
                 app.insert_resource(CelestialHandles {
                     horizon_entity,
                     altaz_entity,
                     eq_entity,
+                    trajectory_entity,
                     horizon_mesh: horizon_mesh_handle,
                     altaz_mesh: altaz_mesh_handle,
                     eq_mesh: eq_mesh_handle,
+                    trajectory_mesh: trajectory_mesh_handle,
                     star_entity,
                 });
 
@@ -1303,6 +1433,7 @@ impl PlanetariumRenderer {
                     (
                         camera_movement_and_interpolation_system,
                         sky::sky_system,
+                        solar_system::solar_system_system,
                         landscape::landscape_system,
                         hips::hips_survey_system,
                         hips::hips_grid_system,
@@ -1326,7 +1457,14 @@ impl PlanetariumRenderer {
                     (thread_start - spawn_instant).as_secs_f64() * 1000.0,
                 );
 
-                let mut last_view_size = None;
+                struct PresentSlot {
+                    texture: wgpu::Texture,
+                    view: Arc<wgpu::TextureView>,
+                }
+
+                let mut present_ring: Vec<PresentSlot> = Vec::new();
+                let mut present_size: Option<(u32, u32)> = None;
+                let mut present_index: usize = 0;
                 let mut frames_remaining = 0;
                 let mut current_width = width;
                 let mut current_height = height;
@@ -1409,9 +1547,12 @@ impl PlanetariumRenderer {
                         let _span = tracing::info_span!("bevy_app_update").entered();
                         app.update();
                     }
-                    last_submission = Some(sync_queue.submit(std::iter::empty()));
 
+                    // Copy the rendered frame into an immutable triple-buffered present slot so
+                    // Bevy's next frame cannot overwrite the texture while GPUI is still drawing
+                    // overlays projected from this frame's `view_info`.
                     let mut new_texture_view = None;
+                    let mut submitted_copy = false;
                     {
                         let _span = tracing::info_span!("extract_texture_view").entered();
                         if let Some(render_sub_app) = app.get_sub_app(bevy::render::RenderApp) {
@@ -1425,17 +1566,63 @@ impl PlanetariumRenderer {
                                     let current_size =
                                         (wgpu_texture.width(), wgpu_texture.height());
 
-                                    if current_size == (current_width, current_height)
-                                        && last_view_size != Some(current_size)
-                                    {
-                                        let wgpu_view = wgpu_texture
-                                            .create_view(&wgpu::TextureViewDescriptor::default());
-                                        new_texture_view = Some(Arc::new(wgpu_view));
-                                        last_view_size = Some(current_size);
+                                    if current_size == (current_width, current_height) {
+                                        let copy_extent = wgpu::Extent3d {
+                                            width: current_size.0,
+                                            height: current_size.1,
+                                            depth_or_array_layers: 1,
+                                        };
+                                        if present_size != Some(current_size) {
+                                            present_ring = (0..3)
+                                                .map(|i| {
+                                                    let texture = sync_device.create_texture(
+                                                        &wgpu::TextureDescriptor {
+                                                            label: Some(&format!(
+                                                                "planetarium_present_{i}"
+                                                            )),
+                                                            size: copy_extent,
+                                                            mip_level_count: 1,
+                                                            sample_count: 1,
+                                                            dimension: wgpu::TextureDimension::D2,
+                                                            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                                                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                                                | wgpu::TextureUsages::COPY_DST,
+                                                            view_formats: &[],
+                                                        },
+                                                    );
+                                                    let view = Arc::new(texture.create_view(
+                                                        &wgpu::TextureViewDescriptor::default(),
+                                                    ));
+                                                    PresentSlot { texture, view }
+                                                })
+                                                .collect();
+                                            present_size = Some(current_size);
+                                            present_index = 0;
+                                        }
+
+                                        let slot = &present_ring[present_index % present_ring.len()];
+                                        present_index = present_index.wrapping_add(1);
+                                        let mut encoder = sync_device.create_command_encoder(
+                                            &wgpu::CommandEncoderDescriptor {
+                                                label: Some("planetarium_present_copy"),
+                                            },
+                                        );
+                                        encoder.copy_texture_to_texture(
+                                            wgpu_texture.as_image_copy(),
+                                            slot.texture.as_image_copy(),
+                                            copy_extent,
+                                        );
+                                        last_submission =
+                                            Some(sync_queue.submit(std::iter::once(encoder.finish())));
+                                        submitted_copy = true;
+                                        new_texture_view = Some(slot.view.clone());
                                     }
                                 }
                             }
                         }
+                    }
+                    if !submitted_copy {
+                        last_submission = Some(sync_queue.submit(std::iter::empty()));
                     }
 
                     let mut needs_frame_dirty = false;
@@ -1471,9 +1658,9 @@ impl PlanetariumRenderer {
                         }
                         if let Some(texture) = new_texture_view {
                             guard.latest_texture = Some(texture);
-                            guard.texture_size = last_view_size;
+                            guard.texture_size = present_size;
+                            guard.view_info = view_info;
                         }
-                        guard.view_info = view_info;
                         if is_interpolating || needs_frame_dirty {
                             guard.is_dirty = true;
                         }

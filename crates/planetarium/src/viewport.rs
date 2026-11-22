@@ -13,6 +13,17 @@ pub struct ObserverUpdate {
     pub clock: ObserverClockSpec,
 }
 
+/// Topocentric trajectory polyline uploaded to the GPU line pipeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrajectoryRenderData {
+    /// Ordered `(topocentric_enu, above_horizon)` samples along the 24-hour path.
+    pub points: Vec<([f32; 3], bool)>,
+    /// Representative sRGB tint for the trajectory curve.
+    pub srgb: [f32; 3],
+    /// Whether ground occlusion dims the below-horizon continuation more strongly.
+    pub occlude_ground: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewportCommand {
     Resize(u32, u32),
@@ -27,6 +38,7 @@ pub enum ViewportCommand {
     SetHipsSurvey(hips::HipsSurvey),
     SetHipsSurveyOpacity(f32),
     SetStarOpacity(f32),
+    SetSolarSystemOpacity(f32),
     SetAltAzGridOpacity(f32),
     SetEquatorialGridOpacity(f32),
     SetObserver(ObserverUpdate),
@@ -35,5 +47,6 @@ pub enum ViewportCommand {
     SetHorizon(Option<HorizonLayerData>),
     SetHorizonOpacity(f32),
     SetHorizonLineVisible(bool),
+    SetTrajectory(Option<TrajectoryRenderData>),
 }
 

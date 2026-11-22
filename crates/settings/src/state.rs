@@ -2,8 +2,9 @@ use gpui::{App, AppContext, Context, Entity, Global};
 use persistence::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
     DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
-    DEFAULT_STARS_OPACITY, DebugSettings, DocumentStore, GridLayerSettings, GroundSettings,
-    HorizonLayerSettings, KeymapSettings, PlanetariumSettings, StarsSettings, SurveySettings,
+    DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings, DocumentStore,
+    GridLayerSettings, GroundSettings, HorizonLayerSettings, KeymapSettings, PlanetariumSettings,
+    SolarSystemSettings, StarsSettings, SurveySettings,
 };
 
 /// Global GPUI entity wrapper for [`SettingsModel`].
@@ -265,6 +266,51 @@ impl SettingsModel {
     pub fn commit_stars_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
         let clamped = sanitize_unit(opacity, DEFAULT_STARS_OPACITY);
         self.settings.planetarium.stars.opacity = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns the solar-system bodies (Sun and Moon) layer settings.
+    pub fn solar_system(&self) -> SolarSystemSettings {
+        self.settings.planetarium.solar_system
+    }
+
+    /// Returns whether solar-system objects (Sun and Moon) are enabled.
+    pub fn solar_system_enabled(&self) -> bool {
+        self.settings.planetarium.solar_system.enabled
+    }
+
+    /// Returns the configured solar-system layer opacity in `[0.0, 1.0]`.
+    pub fn solar_system_opacity(&self) -> f32 {
+        self.settings.planetarium.solar_system.opacity
+    }
+
+    /// Returns the effective solar-system layer opacity (`0.0` when disabled).
+    pub fn effective_solar_system_opacity(&self) -> f32 {
+        self.settings.planetarium.solar_system.effective_opacity()
+    }
+
+    /// Sets whether solar-system objects (Sun and Moon) are enabled and persists the change.
+    pub fn set_solar_system_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.solar_system.enabled = enabled,
+            cx,
+        );
+    }
+
+    /// Updates solar-system layer opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_solar_system_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_SOLAR_SYSTEM_OPACITY);
+        if (self.settings.planetarium.solar_system.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.solar_system.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets solar-system layer opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_solar_system_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_SOLAR_SYSTEM_OPACITY);
+        self.settings.planetarium.solar_system.opacity = clamped;
         self.persist();
         cx.notify();
     }

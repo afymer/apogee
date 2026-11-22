@@ -24,8 +24,9 @@ pub use observer::{
 pub use settings::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
     DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
-    DEFAULT_STARS_OPACITY, DebugSettings, GridLayerSettings, GroundSettings, HorizonLayerSettings,
-    KeymapSettings, PlanetariumSettings, SETTINGS_SCHEMA_VERSION, StarsSettings, SurveySettings,
+    DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings, GridLayerSettings,
+    GroundSettings, HorizonLayerSettings, KeymapSettings, PlanetariumSettings,
+    SETTINGS_SCHEMA_VERSION, SolarSystemSettings, StarsSettings, SurveySettings,
 };
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
@@ -380,6 +381,10 @@ mod tests {
                 stars: StarsSettings {
                     enabled: false,
                     opacity: 0.75,
+                },
+                solar_system: SolarSystemSettings {
+                    enabled: false,
+                    opacity: 0.90,
                 },
                 altaz_grid: GridLayerSettings {
                     enabled: false,

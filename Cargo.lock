@@ -285,6 +285,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "horizon",
+ "image",
  "observer",
  "planetarium",
  "raw_viewer",

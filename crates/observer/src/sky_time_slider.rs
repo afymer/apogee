@@ -185,9 +185,9 @@ pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], wi
     let origin_x = f32::from(bounds.origin.x);
     let origin_y = f32::from(bounds.origin.y);
 
-    // 1. Continuous per-pixel atmospheric twilight sky gradient across 96 piecewise linear spans.
+    // 1. Continuous per-pixel atmospheric twilight sky gradient across 32 piecewise linear spans.
     window.paint_quad(fill(bounds, rgb(0x070b16)));
-    const RIBBON_SLICES: usize = 96;
+    const RIBBON_SLICES: usize = 32;
     for i in 0..RIBBON_SLICES {
         let t0 = i as f32 / RIBBON_SLICES as f32;
         let t1 = (i + 1) as f32 / RIBBON_SLICES as f32;

@@ -4,19 +4,25 @@ use std::{
     time::Duration,
 };
 
-use celestial::{HorizonProfile, coords::geodetic::GeodeticPosition};
+use celestial::{
+    DailyTrajectory, HorizonProfile, TrajectoryPointKind,
+    compute_equatorial_daily_trajectory, compute_solar_system_daily_trajectory,
+    coords::{Angle, geodetic::GeodeticPosition},
+};
 use components::{Slider, SliderEvent};
 use futures::StreamExt;
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    Rgba, ScrollDelta, ScrollWheelEvent, Task, Window, div, prelude::*, px, rgb, svg,
+    Rgba, ScrollDelta, ScrollWheelEvent, Task, Window, div, point, prelude::*, px, rgb, svg,
 };
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
 use planetarium::{
-    BevyBridge, HorizonImageData, HorizonLayerData, ObserverClockSpec, PickedStar,
-    PlanetariumRenderer, PlanetariumViewInfo, StarRenderParams, StarSpatialIndex, ViewMode,
+    BevyBridge, HorizonImageData, HorizonLayerData, ObserverClockSpec, PickedSolarSystemBody,
+    PickedStar, PlanetariumRenderer, PlanetariumViewInfo, StarRenderParams, StarSpatialIndex,
+    TrajectoryRenderData, ViewMode, pick_solar_system_body,
+    rendered_solar_system_disc_radius_px,
 };
 use settings::{GlobalSettings, SettingsModel};
 use status_bar::{
@@ -31,7 +37,10 @@ use workspace::{
     workbench::Workbench,
 };
 
-use crate::star_details::{GlobalStarSelection, SelectedStar};
+use crate::star_details::{
+    GlobalStarSelection, SelectedObject, SelectedObjectId, TargetDayCacheKey, format_local_hour_hm,
+    lerp_rgba, paint_disc,
+};
 
 const HOVER_PREVIEW_DELAY: Duration = Duration::from_millis(280);
 const CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
@@ -86,6 +95,11 @@ const ICON_LAYER_STARS: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24
   <circle cx="6" cy="17.5" r="0.95" fill="black"/>
 </svg>"##;
 
+const ICON_LAYER_SOLAR_SYSTEM: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="12" cy="12" r="4.2" stroke="black" stroke-width="1.5"/>
+  <path d="M12 3.2V5.3M12 18.7V20.8M3.2 12H5.3M18.7 12H20.8M5.8 5.8L7.3 7.3M16.7 16.7L18.2 18.2M18.2 5.8L16.7 7.3M7.3 16.7L5.8 18.2" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
+</svg>"##;
+
 const ICON_GRID_ALTAZ: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
   <path d="M5 8.5H19M4 15.5H20" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
   <path d="M12 3.5V20.5" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
@@ -116,17 +130,19 @@ enum QuickLayer {
     Horizon,
     HipsSurvey,
     Stars,
+    SolarSystem,
     AltAzGrid,
     EquatorialGrid,
 }
 
 impl QuickLayer {
-    const SKY_LAYERS: [Self; 5] = [
+    const SKY_LAYERS: [Self; 6] = [
         Self::Atmosphere,
         Self::Ground,
         Self::Horizon,
         Self::HipsSurvey,
         Self::Stars,
+        Self::SolarSystem,
     ];
     const GRID_LAYERS: [Self; 2] = [Self::AltAzGrid, Self::EquatorialGrid];
 
@@ -137,6 +153,7 @@ impl QuickLayer {
             Self::Horizon => "quick_layer_horizon",
             Self::HipsSurvey => "quick_layer_hips",
             Self::Stars => "quick_layer_stars",
+            Self::SolarSystem => "quick_layer_solar_system",
             Self::AltAzGrid => "quick_layer_altaz_grid",
             Self::EquatorialGrid => "quick_layer_eq_grid",
         }
@@ -149,6 +166,7 @@ impl QuickLayer {
             Self::Horizon => "Custom Horizon",
             Self::HipsSurvey => "HiPS Survey",
             Self::Stars => "Stars",
+            Self::SolarSystem => "Solar System",
             Self::AltAzGrid => "Alt/Az Grid",
             Self::EquatorialGrid => "Equatorial Grid",
         }
@@ -161,6 +179,7 @@ impl QuickLayer {
             Self::Horizon => ICON_LAYER_HORIZON,
             Self::HipsSurvey => ICON_LAYER_HIPS,
             Self::Stars => ICON_LAYER_STARS,
+            Self::SolarSystem => ICON_LAYER_SOLAR_SYSTEM,
             Self::AltAzGrid => ICON_GRID_ALTAZ,
             Self::EquatorialGrid => ICON_GRID_EQUATORIAL,
         }
@@ -170,9 +189,12 @@ impl QuickLayer {
         match self {
             Self::AltAzGrid => rgb(0x66b5f5).into(),
             Self::EquatorialGrid => rgb(0xeb9b56).into(),
-            Self::Atmosphere | Self::Ground | Self::Horizon | Self::HipsSurvey | Self::Stars => {
-                default
-            }
+            Self::SolarSystem => rgb(0xf7c957).into(),
+            Self::Atmosphere
+            | Self::Ground
+            | Self::Horizon
+            | Self::HipsSurvey
+            | Self::Stars => default,
         }
     }
 
@@ -183,6 +205,7 @@ impl QuickLayer {
             Self::Horizon => model.horizon_enabled(),
             Self::HipsSurvey => model.hips_survey_enabled(),
             Self::Stars => model.stars_enabled(),
+            Self::SolarSystem => model.solar_system_enabled(),
             Self::AltAzGrid => model.altaz_grid_enabled(),
             Self::EquatorialGrid => model.equatorial_grid_enabled(),
         }
@@ -195,6 +218,7 @@ impl QuickLayer {
             Self::Horizon => model.horizon_opacity(),
             Self::HipsSurvey => model.hips_survey_opacity(),
             Self::Stars => model.stars_opacity(),
+            Self::SolarSystem => model.solar_system_opacity(),
             Self::AltAzGrid => model.altaz_grid_opacity(),
             Self::EquatorialGrid => model.equatorial_grid_opacity(),
         }
@@ -211,6 +235,7 @@ impl QuickLayer {
             Self::Horizon => model.set_horizon_enabled(enabled, cx),
             Self::HipsSurvey => model.set_hips_survey_enabled(enabled, cx),
             Self::Stars => model.set_stars_enabled(enabled, cx),
+            Self::SolarSystem => model.set_solar_system_enabled(enabled, cx),
             Self::AltAzGrid => model.set_altaz_grid_enabled(enabled, cx),
             Self::EquatorialGrid => model.set_equatorial_grid_enabled(enabled, cx),
         }
@@ -237,6 +262,7 @@ impl QuickLayer {
             Self::Horizon => model.preview_horizon_opacity(value, cx),
             Self::HipsSurvey => model.preview_hips_survey_opacity(value, cx),
             Self::Stars => model.preview_stars_opacity(value, cx),
+            Self::SolarSystem => model.preview_solar_system_opacity(value, cx),
             Self::AltAzGrid => model.preview_altaz_grid_opacity(value, cx),
             Self::EquatorialGrid => model.preview_equatorial_grid_opacity(value, cx),
         }
@@ -261,8 +287,71 @@ impl QuickLayer {
             Self::Horizon => model.commit_horizon_opacity(value, cx),
             Self::HipsSurvey => model.commit_hips_survey_opacity(value, cx),
             Self::Stars => model.commit_stars_opacity(value, cx),
+            Self::SolarSystem => model.commit_solar_system_opacity(value, cx),
             Self::AltAzGrid => model.commit_altaz_grid_opacity(value, cx),
             Self::EquatorialGrid => model.commit_equatorial_grid_opacity(value, cx),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum HoveredObject {
+    Star(PickedStar),
+    SolarSystem(PickedSolarSystemBody),
+}
+
+impl HoveredObject {
+    fn id(&self) -> SelectedObjectId {
+        match self {
+            Self::Star(s) => SelectedObjectId::Star(s.catalog_index),
+            Self::SolarSystem(b) => SelectedObjectId::SolarSystem(b.body),
+        }
+    }
+
+    fn screen_ndc(&self) -> [f64; 2] {
+        match self {
+            Self::Star(s) => s.screen_ndc,
+            Self::SolarSystem(b) => b.screen_ndc,
+        }
+    }
+
+    fn rendered_radius_px(&self) -> f32 {
+        match self {
+            Self::Star(s) => s.rendered_radius_px,
+            Self::SolarSystem(b) => b.rendered_radius_px,
+        }
+    }
+
+    fn srgb(&self) -> [f32; 3] {
+        match self {
+            Self::Star(s) => s.srgb,
+            Self::SolarSystem(b) => b.body.srgb(),
+        }
+    }
+
+    fn title_and_badge(&self) -> (String, String) {
+        match self {
+            Self::Star(s) => (
+                s.display_title_and_subtitle().0,
+                format!("G {:.2}", s.mag),
+            ),
+            Self::SolarSystem(b) => match b.ephemeris.lunar_phase {
+                Some(phase) => (
+                    b.body.name().to_string(),
+                    format!("{} ({:.0}%)", phase.phase_name(), phase.illuminated_fraction * 100.0),
+                ),
+                None => (
+                    b.body.name().to_string(),
+                    b.body.category_label().to_string(),
+                ),
+            },
+        }
+    }
+
+    fn to_selected(&self) -> SelectedObject {
+        match self {
+            Self::Star(s) => SelectedObject::from_picked_star(s),
+            Self::SolarSystem(b) => SelectedObject::from_picked_solar_system(b),
         }
     }
 }
@@ -294,10 +383,13 @@ pub struct PlanetariumPanel {
     cursor_position: Option<Point<Pixels>>,
     latest_view_info: PlanetariumViewInfo,
     star_index: Option<Arc<StarSpatialIndex>>,
-    hovered_star: Option<PickedStar>,
+    hovered_object: Option<HoveredObject>,
     hover_preview_visible: bool,
-    hover_preview_star_index: Option<u32>,
+    hover_preview_target_id: Option<SelectedObjectId>,
     hover_preview_task: Option<Task<()>>,
+    trajectory_cache_key: Option<TargetDayCacheKey>,
+    cached_trajectory: Option<Arc<DailyTrajectory>>,
+    last_synced_trajectory: Option<(TargetDayCacheKey, bool)>,
     last_scale_factor: f64,
     active_opacity_layer: Option<QuickLayer>,
     opacity_slider: Entity<Slider>,
@@ -308,6 +400,7 @@ pub struct PlanetariumPanel {
     last_synced_hips_survey_enabled: Option<bool>,
     last_synced_hips_survey_opacity: Option<f32>,
     last_synced_stars_opacity: Option<f32>,
+    last_synced_solar_system_opacity: Option<f32>,
     last_synced_altaz_grid_opacity: Option<f32>,
     last_synced_equatorial_grid_opacity: Option<f32>,
     last_synced_horizon_opacity: Option<f32>,
@@ -387,6 +480,7 @@ impl PlanetariumPanel {
                 initial_hips_survey_enabled,
                 initial_hips_survey_opacity,
                 initial_stars_opacity,
+                initial_solar_system_opacity,
                 initial_altaz_grid_opacity,
                 initial_equatorial_grid_opacity,
             ) = if let Some(entity) = settings_entity.as_ref() {
@@ -399,6 +493,7 @@ impl PlanetariumPanel {
                 let hips_enabled = model.hips_survey_enabled();
                 let hips_opacity = model.hips_survey_opacity();
                 let stars = model.effective_stars_opacity();
+                let solar_system = model.effective_solar_system_opacity();
                 let altaz_grid = model.effective_altaz_grid_opacity();
                 let eq_grid = model.effective_equatorial_grid_opacity();
                 bridge.set_hips_grid_visible(show_grid);
@@ -409,6 +504,7 @@ impl PlanetariumPanel {
                 bridge.set_hips_survey_visible(hips_enabled);
                 bridge.set_hips_survey_opacity(hips_opacity);
                 bridge.set_star_opacity(stars);
+                bridge.set_solar_system_opacity(solar_system);
                 bridge.set_altaz_grid_opacity(altaz_grid);
                 bridge.set_equatorial_grid_opacity(eq_grid);
                 (
@@ -420,11 +516,14 @@ impl PlanetariumPanel {
                     Some(hips_enabled),
                     Some(hips_opacity),
                     Some(stars),
+                    Some(solar_system),
                     Some(altaz_grid),
                     Some(eq_grid),
                 )
             } else {
-                (None, None, None, None, None, None, None, None, None, None)
+                (
+                    None, None, None, None, None, None, None, None, None, None, None,
+                )
             };
 
             let opacity_slider = cx.new(|_cx| Slider::new(1.0).default_value(1.0));
@@ -513,6 +612,14 @@ impl PlanetariumPanel {
                         this.last_synced_stars_opacity = Some(next_stars);
                         this.bridge.set_star_opacity(next_stars);
                     }
+                    let next_solar_system = model_ref.effective_solar_system_opacity();
+                    if this
+                        .last_synced_solar_system_opacity
+                        .map_or(true, |prev| (prev - next_solar_system).abs() > 1e-5)
+                    {
+                        this.last_synced_solar_system_opacity = Some(next_solar_system);
+                        this.bridge.set_solar_system_opacity(next_solar_system);
+                    }
                     let next_altaz_grid = model_ref.effective_altaz_grid_opacity();
                     if this
                         .last_synced_altaz_grid_opacity
@@ -597,10 +704,13 @@ impl PlanetariumPanel {
                 cursor_position: None,
                 latest_view_info: initial_view_info,
                 star_index: initial_star_index,
-                hovered_star: None,
+                hovered_object: None,
                 hover_preview_visible: false,
-                hover_preview_star_index: None,
+                hover_preview_target_id: None,
                 hover_preview_task: None,
+                trajectory_cache_key: None,
+                cached_trajectory: None,
+                last_synced_trajectory: None,
                 last_scale_factor: initial_scale_factor,
                 active_opacity_layer: None,
                 opacity_slider,
@@ -611,6 +721,7 @@ impl PlanetariumPanel {
                 last_synced_hips_survey_enabled: initial_hips_survey_enabled,
                 last_synced_hips_survey_opacity: initial_hips_survey_opacity,
                 last_synced_stars_opacity: initial_stars_opacity,
+                last_synced_solar_system_opacity: initial_solar_system_opacity,
                 last_synced_altaz_grid_opacity: initial_altaz_grid_opacity,
                 last_synced_equatorial_grid_opacity: initial_equatorial_grid_opacity,
                 last_synced_horizon_opacity: initial_horizon_opacity,
@@ -784,32 +895,27 @@ impl PlanetariumPanel {
         self.update_hovered_star(cx);
     }
 
-    fn star_layer_flags(&self, cx: &App) -> (bool, bool, bool) {
+    fn layer_visibility_flags(&self, cx: &App) -> (bool, bool, bool, bool) {
         cx.try_global::<GlobalSettings>()
             .map(|g| {
                 let m = g.0.read(cx);
                 (
                     m.effective_stars_opacity() > 1e-4,
+                    m.effective_solar_system_opacity() > 1e-4,
                     m.effective_ground_opacity() >= 0.95,
                     m.effective_horizon_opacity() >= 0.95,
                 )
             })
-            .unwrap_or((true, true, true))
+            .unwrap_or((true, true, true, true))
     }
 
-    fn pick_star_at_cursor(&mut self, cx: &App) -> Option<PickedStar> {
-        if self.star_index.is_none() {
-            self.star_index = self.bridge.star_index();
-        }
-        let (index, ndc, bounds) = (
-            self.star_index.as_ref()?,
+    fn pick_object_at_cursor(&mut self, cx: &App) -> Option<HoveredObject> {
+        let (ndc, bounds) = (
             self.cursor_ndc()?,
             self.viewport_bounds.lock().ok().and_then(|g| *g)?,
         );
-        let (stars_visible, occlude_ground, occlude_custom_horizon) = self.star_layer_flags(cx);
-        if !stars_visible {
-            return None;
-        }
+        let (stars_visible, solar_system_visible, occlude_ground, occlude_custom_horizon) =
+            self.layer_visibility_flags(cx);
         let horizon_occluder = if occlude_custom_horizon {
             self.active_horizon_profile.as_ref()
         } else {
@@ -817,37 +923,60 @@ impl PlanetariumPanel {
         };
         let w = f64::from(f32::from(bounds.size.width));
         let h = f64::from(f32::from(bounds.size.height));
-        index.pick(
-            &self.latest_view_info,
-            ndc,
-            (w, h),
-            self.last_scale_factor,
-            &StarRenderParams::default(),
-            occlude_ground,
-            horizon_occluder,
-        )
+
+        if solar_system_visible {
+            if let Some(body) = pick_solar_system_body(
+                &self.latest_view_info,
+                ndc,
+                (w, h),
+                self.last_scale_factor,
+                occlude_ground,
+                horizon_occluder,
+            ) {
+                return Some(HoveredObject::SolarSystem(body));
+            }
+        }
+
+        if !stars_visible {
+            return None;
+        }
+        if self.star_index.is_none() {
+            self.star_index = self.bridge.star_index();
+        }
+        let index = self.star_index.as_ref()?;
+        index
+            .pick(
+                &self.latest_view_info,
+                ndc,
+                (w, h),
+                self.last_scale_factor,
+                &StarRenderParams::default(),
+                occlude_ground,
+                horizon_occluder,
+            )
+            .map(HoveredObject::Star)
     }
 
     fn compute_hovered_star(&mut self, cx: &mut Context<Self>) -> bool {
         let next = if self.is_dragging {
             None
         } else {
-            self.pick_star_at_cursor(cx)
+            self.pick_object_at_cursor(cx)
         };
-        let next_idx = next.as_ref().map(|s| s.catalog_index);
+        let next_id = next.as_ref().map(HoveredObject::id);
         let was_visible = self.hover_preview_visible;
 
-        if next_idx != self.hover_preview_star_index {
+        if next_id != self.hover_preview_target_id {
             self.hover_preview_task = None;
             self.hover_preview_visible = false;
-            self.hover_preview_star_index = next_idx;
-            if let Some(target_idx) = next_idx {
+            self.hover_preview_target_id = next_id;
+            if let Some(target_id) = next_id {
                 self.hover_preview_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(HOVER_PREVIEW_DELAY).await;
                     let _ = this.update(cx, |this, cx| {
                         if !this.is_dragging
-                            && this.hovered_star.as_ref().map(|s| s.catalog_index)
-                                == Some(target_idx)
+                            && this.hovered_object.as_ref().map(HoveredObject::id)
+                                == Some(target_id)
                         {
                             this.hover_preview_visible = true;
                             cx.notify();
@@ -857,8 +986,8 @@ impl PlanetariumPanel {
             }
         }
 
-        let moved_on_screen = match (self.hovered_star.as_ref(), next.as_ref()) {
-            (Some(prev), Some(curr)) if prev.catalog_index == curr.catalog_index => {
+        let moved_on_screen = match (self.hovered_object.as_ref(), next.as_ref()) {
+            (Some(prev), Some(curr)) if prev.id() == curr.id() => {
                 let bounds_size = self
                     .viewport_bounds
                     .lock()
@@ -866,15 +995,17 @@ impl PlanetariumPanel {
                     .and_then(|g| *g)
                     .map(|b| (f64::from(f32::from(b.size.width)), f64::from(f32::from(b.size.height))));
                 bounds_size.is_some_and(|(w, h)| {
-                    let dx = (curr.screen_ndc[0] - prev.screen_ndc[0]) * 0.5 * w;
-                    let dy = (curr.screen_ndc[1] - prev.screen_ndc[1]) * 0.5 * h;
+                    let prev_ndc = prev.screen_ndc();
+                    let curr_ndc = curr.screen_ndc();
+                    let dx = (curr_ndc[0] - prev_ndc[0]) * 0.5 * w;
+                    let dy = (curr_ndc[1] - prev_ndc[1]) * 0.5 * h;
                     (dx * dx + dy * dy) > 0.25
                 })
             }
             _ => false,
         };
 
-        self.hovered_star = next;
+        self.hovered_object = next;
         (was_visible != self.hover_preview_visible)
             || (self.hover_preview_visible && moved_on_screen)
     }
@@ -888,11 +1019,77 @@ impl PlanetariumPanel {
     fn clear_hovered_star(&mut self, cx: &mut Context<Self>) {
         let was_visible = self.hover_preview_visible;
         self.hover_preview_task = None;
-        self.hover_preview_star_index = None;
+        self.hover_preview_target_id = None;
         self.hover_preview_visible = false;
-        self.hovered_star = None;
+        self.hovered_object = None;
         if was_visible {
             cx.notify();
+        }
+    }
+
+    fn ensure_trajectory_fresh(
+        &mut self,
+        selected: Option<&SelectedObject>,
+        cx: &App,
+    ) -> Option<Arc<DailyTrajectory>> {
+        let Some(selected) = selected else {
+            self.trajectory_cache_key = None;
+            self.cached_trajectory = None;
+            return None;
+        };
+
+        let (loc, midnight) = cx
+            .try_global::<GlobalObserver>()
+            .map(|g| {
+                let m = g.0.read(cx);
+                (m.geodetic_position(), m.local_midnight_unix_seconds())
+            })
+            .unwrap_or_else(|| {
+                let obs = self.latest_view_info.observer;
+                let secs = obs.epoch_unix_seconds();
+                let midnight = (secs / 86_400.0).floor() * 86_400.0;
+                (obs.location, midnight)
+            });
+
+        let next_key = TargetDayCacheKey {
+            target_id: selected.id(),
+            lat_bits: loc.latitude_deg().to_bits(),
+            lon_bits: loc.longitude_deg().to_bits(),
+            elev_bits: loc.elevation_m().to_bits(),
+            local_midnight_secs: midnight.round() as i64,
+            horizon_key: self.last_synced_horizon_key.clone(),
+        };
+
+        if self.trajectory_cache_key.as_ref() != Some(&next_key) {
+            let traj = match selected {
+                SelectedObject::Star(star) => compute_equatorial_daily_trajectory(
+                    loc,
+                    midnight,
+                    Angle::from_degrees(star.ra_deg),
+                    Angle::from_degrees(star.dec_deg),
+                    self.active_horizon_profile.as_ref(),
+                    145,
+                ),
+                SelectedObject::SolarSystem(body) => compute_solar_system_daily_trajectory(
+                    loc,
+                    midnight,
+                    *body,
+                    self.active_horizon_profile.as_ref(),
+                    145,
+                ),
+            };
+            self.cached_trajectory = Some(Arc::new(traj));
+            self.trajectory_cache_key = Some(next_key);
+        }
+
+        self.cached_trajectory.clone()
+    }
+
+    fn jump_to_hour(&self, hour: f64, cx: &mut Context<Self>) {
+        if let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.clone()) {
+            observer.update(cx, |model, cx| {
+                model.set_local_hour_of_day(hour, cx);
+            });
         }
     }
 
@@ -962,13 +1159,13 @@ impl PlanetariumPanel {
             self.drag_origin = None;
             self.last_mouse_pos = None;
             if is_click {
-                if let Some(picked) = self.pick_star_at_cursor(cx) {
+                if let Some(picked) = self.pick_object_at_cursor(cx) {
                     self.clear_hovered_star(cx);
                     if let Some(selection) =
                         cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone())
                     {
                         selection.update(cx, |model, cx| {
-                            model.select(SelectedStar::from_picked(&picked), cx);
+                            model.select_object(picked.to_selected(), cx);
                         });
                     }
                     cx.notify();
@@ -1145,6 +1342,20 @@ impl Render for PlanetariumPanel {
         let viewport_bounds = self.viewport_bounds.clone();
         let bounds_snapshot = viewport_bounds.lock().ok().and_then(|g| *g);
         let scale_factor = self.last_scale_factor.max(0.25);
+        // Project overlays against the rendered texture's logical size (which matches
+        // `snapshot.view_info` and `gpui::surface`), falling back to `bounds_snapshot`
+        // only before the first texture arrives. This avoids 1-frame jumps on resize
+        // (e.g. opening/closing the details panel).
+        let proj_size = texture_size
+            .map(|(tw, th)| (f64::from(tw) / scale_factor, f64::from(th) / scale_factor))
+            .or_else(|| {
+                bounds_snapshot.map(|b| {
+                    (
+                        f64::from(f32::from(b.size.width)),
+                        f64::from(f32::from(b.size.height)),
+                    )
+                })
+            });
 
         let colors = cx.theme().colors();
         let pill_bg = colors.elevated_surface_background.opacity(0.65);
@@ -1160,72 +1371,167 @@ impl Render for PlanetariumPanel {
         let text_color = colors.text;
         let muted_text = colors.text_muted;
 
-        let selected_star = cx
+        let selected_object = cx
             .try_global::<GlobalStarSelection>()
-            .and_then(|g| g.0.read(cx).selected().cloned());
-        let selected_star_id = selected_star.as_ref().map(|s| s.catalog_index);
+            .and_then(|g| g.0.read(cx).selected_object().cloned());
+        let selected_target_id = selected_object.as_ref().map(SelectedObject::id);
 
-        let selected_overlay = selected_star.as_ref().and_then(|star| {
-            let bounds = bounds_snapshot?;
-            let bw = f64::from(f32::from(bounds.size.width));
-            let bh = f64::from(f32::from(bounds.size.height));
-            if bw <= 1.0 || bh <= 1.0 {
-                return None;
-            }
-            let (stars_visible, occlude_ground, occlude_custom_horizon) =
-                self.star_layer_flags(cx);
-            if !stars_visible {
-                return None;
-            }
-            let dir = star.icrs_dir();
-            if occlude_ground || (occlude_custom_horizon && self.active_horizon_profile.is_some()) {
-                let (az_deg, alt_deg) = self.latest_view_info.icrs_to_topocentric_deg(dir);
-                if occlude_ground && alt_deg < 0.0 {
-                    return None;
-                }
-                if occlude_custom_horizon {
-                    if let Some(horizon) = self.active_horizon_profile.as_ref() {
-                        if !horizon.is_visible(az_deg, alt_deg) {
-                            return None;
-                        }
-                    }
-                }
-            }
-            let (nx, ny) = self.latest_view_info.project_icrs_to_ndc(dir)?;
-            if nx.abs() > 1.02 || ny.abs() > 1.02 {
-                return None;
-            }
-            let sx = (nx * 0.5 + 0.5) * bw;
-            let sy = (0.5 - ny * 0.5) * bh;
-            let fov_y_rad = self.latest_view_info.projection.fov_y.radians() as f32;
-            let rendered_px = StarRenderParams::default().rendered_radius_px(star.mag, fov_y_rad);
-            let inner_d =
-                ((f64::from(rendered_px) / scale_factor) * 2.0 + 10.0).clamp(16.0, 44.0);
-            let outer_d = inner_d + 6.0;
-            Some((star.srgb, sx, sy, inner_d, outer_d))
-        });
+        let (stars_visible, solar_system_visible, occlude_ground, occlude_custom_horizon) =
+            self.layer_visibility_flags(cx);
+        let selected_layer_visible = match selected_object.as_ref() {
+            Some(SelectedObject::Star(_)) => stars_visible,
+            Some(SelectedObject::SolarSystem(_)) => solar_system_visible,
+            None => false,
+        };
 
-        let hovered_overlay = self
-            .hovered_star
+        let trajectory_snapshot = if selected_layer_visible {
+            let traj = self.ensure_trajectory_fresh(selected_object.as_ref(), cx);
+            if let (Some(key), Some(traj_arc), Some(selected)) = (
+                self.trajectory_cache_key.as_ref(),
+                traj.as_ref(),
+                selected_object.as_ref(),
+            ) {
+                let sync_key = (key.clone(), occlude_ground);
+                if self.last_synced_trajectory.as_ref() != Some(&sync_key) {
+                    self.last_synced_trajectory = Some(sync_key);
+                    self.bridge.set_trajectory(Some(TrajectoryRenderData {
+                        points: traj_arc
+                            .samples
+                            .iter()
+                            .map(|s| {
+                                (
+                                    [s.topo_enu.x as f32, s.topo_enu.y as f32, s.topo_enu.z as f32],
+                                    s.above_horizon,
+                                )
+                            })
+                            .collect(),
+                        srgb: selected.srgb(),
+                        occlude_ground,
+                    }));
+                }
+            }
+            traj
+        } else {
+            if self.last_synced_trajectory.take().is_some() {
+                self.bridge.set_trajectory(None);
+            }
+            None
+        };
+
+        let selected_overlay = selected_object
             .as_ref()
-            .filter(|_| self.hover_preview_visible)
-            .and_then(|star| {
-                let bounds = bounds_snapshot?;
-                let bw = f64::from(f32::from(bounds.size.width));
-                let bh = f64::from(f32::from(bounds.size.height));
+            .filter(|_| selected_layer_visible)
+            .and_then(|selected| {
+                let (bw, bh) = proj_size?;
                 if bw <= 1.0 || bh <= 1.0 {
                     return None;
                 }
-                let sx = (star.screen_ndc[0] * 0.5 + 0.5) * bw;
-                let sy = (0.5 - star.screen_ndc[1] * 0.5) * bh;
-                let reticle_d = ((f64::from(star.rendered_radius_px) / scale_factor) * 2.0
+                let obs_ctx = self.latest_view_info.observer;
+                let fov_y_rad = self.latest_view_info.projection.fov_y.radians() as f32;
+                let (dir, rendered_px) = match selected {
+                    SelectedObject::Star(star) => (
+                        star.icrs_dir(),
+                        StarRenderParams::default().rendered_radius_px(star.mag, fov_y_rad),
+                    ),
+                    SelectedObject::SolarSystem(body) => {
+                        let eph = body.ephemeris(obs_ctx.location, obs_ctx.epoch);
+                        let px = rendered_solar_system_disc_radius_px(
+                            *body,
+                            eph.angular_radius_deg,
+                            fov_y_rad,
+                            (bh * scale_factor) as f32,
+                        );
+                        (eph.icrs_dir, px)
+                    }
+                };
+                if occlude_ground
+                    || (occlude_custom_horizon && self.active_horizon_profile.is_some())
+                {
+                    let (az_deg, alt_deg) = self.latest_view_info.icrs_to_topocentric_deg(dir);
+                    if occlude_ground && alt_deg < 0.0 {
+                        return None;
+                    }
+                    if occlude_custom_horizon {
+                        if let Some(horizon) = self.active_horizon_profile.as_ref() {
+                            if !horizon.is_visible(az_deg, alt_deg) {
+                                return None;
+                            }
+                        }
+                    }
+                }
+                let (nx, ny) = self.latest_view_info.project_icrs_to_ndc(dir)?;
+                if nx.abs() > 1.04 || ny.abs() > 1.04 {
+                    return None;
+                }
+                let sx = (nx * 0.5 + 0.5) * bw;
+                let sy = (0.5 - ny * 0.5) * bh;
+                let inner_d =
+                    ((f64::from(rendered_px) / scale_factor) * 2.0 + 10.0).clamp(16.0, 96.0);
+                let outer_d = inner_d + 6.0;
+                Some((selected.srgb(), sx, sy, inner_d, outer_d))
+            });
+
+        let trajectory_overlay = selected_object
+            .as_ref()
+            .zip(trajectory_snapshot)
+            .and_then(|(selected, trajectory)| {
+                let (bw, bh) = proj_size?;
+                if bw <= 2.0 || bh <= 2.0 {
+                    return None;
+                }
+                let srgb = selected.srgb();
+                let view_info = self.latest_view_info;
+                let is_circumpolar = trajectory.visibility.circumpolar;
+
+                let mut event_badges = Vec::with_capacity(trajectory.events.len());
+                for event in &trajectory.events {
+                    let show_event = match event.kind {
+                        TrajectoryPointKind::Rise
+                        | TrajectoryPointKind::Transit
+                        | TrajectoryPointKind::Set => {
+                            event.above_horizon || !occlude_ground
+                        }
+                        TrajectoryPointKind::LowerTransit => {
+                            (is_circumpolar && event.above_horizon) || !occlude_ground
+                        }
+                    };
+                    if !show_event {
+                        continue;
+                    }
+                    let Some((nx, ny)) = view_info.project_topo_to_ndc(event.topo_enu) else {
+                        continue;
+                    };
+                    if nx.abs() > 0.98 || ny.abs() > 0.98 {
+                        continue;
+                    }
+                    let sx = (nx * 0.5 + 0.5) * bw;
+                    let sy = (0.5 - ny * 0.5) * bh;
+                    event_badges.push((*event, sx, sy));
+                }
+
+                Some((srgb, trajectory, view_info, (bw, bh), occlude_ground, event_badges))
+            });
+
+        let hovered_overlay = self
+            .hovered_object
+            .as_ref()
+            .filter(|_| self.hover_preview_visible)
+            .and_then(|hovered| {
+                let (bw, bh) = proj_size?;
+                if bw <= 1.0 || bh <= 1.0 {
+                    return None;
+                }
+                let screen_ndc = hovered.screen_ndc();
+                let sx = (screen_ndc[0] * 0.5 + 0.5) * bw;
+                let sy = (0.5 - screen_ndc[1] * 0.5) * bh;
+                let reticle_d = ((f64::from(hovered.rendered_radius_px()) / scale_factor) * 2.0
                     + 10.0)
-                    .clamp(16.0, 44.0);
+                    .clamp(16.0, 96.0);
                 let reticle_x = sx - reticle_d * 0.5;
                 let reticle_y = sy - reticle_d * 0.5;
 
-                let title = star.display_title_and_subtitle().0;
-                let est_w = 200.0_f64;
+                let (title, badge_label) = hovered.title_and_badge();
+                let est_w = 220.0_f64;
                 let pill_h = 28.0_f64;
                 let margin = 12.0_f64;
                 let gap = reticle_d * 0.5 + 8.0;
@@ -1244,9 +1550,9 @@ impl Render for PlanetariumPanel {
                 let pill_y = pill_y.clamp(margin, (bh - pill_h - margin).max(margin));
 
                 Some((
-                    star.catalog_index,
-                    star.srgb,
-                    star.mag,
+                    hovered.id(),
+                    hovered.srgb(),
+                    badge_label,
                     title,
                     reticle_x,
                     reticle_y,
@@ -1380,6 +1686,140 @@ impl Render for PlanetariumPanel {
                     }),
             )
             .when_some(
+                trajectory_overlay,
+                |el, (srgb, trajectory, view_info, proj_dims, occlude_ground, event_badges)| {
+                    let obj_rgb = Rgba {
+                        r: srgb[0],
+                        g: srgb[1],
+                        b: srgb[2],
+                        a: 1.0,
+                    };
+                    let obj_color: Hsla = obj_rgb.into();
+                    let badges_for_canvas = event_badges.clone();
+                    let (bw, bh) = proj_dims;
+
+                    el.child(
+                        gpui::canvas(
+                            |_bounds, _window, _cx| {},
+                            move |bounds, (), window, _cx| {
+                                let proj_bounds = Bounds::new(
+                                    bounds.origin,
+                                    gpui::size(px(bw as f32), px(bh as f32)),
+                                );
+                                paint_planetarium_trajectory(
+                                    proj_bounds,
+                                    &trajectory,
+                                    &view_info,
+                                    &badges_for_canvas,
+                                    obj_rgb,
+                                    occlude_ground,
+                                    window,
+                                );
+                            },
+                        )
+                        .size_full()
+                        .absolute()
+                        .top_0()
+                        .left_0(),
+                    )
+                    .children(event_badges.into_iter().map(
+                        |(event, sx, sy)| {
+                            let (icon_glyph, kind_label, detail_text) = match event.kind {
+                                TrajectoryPointKind::Transit => (
+                                    "▲",
+                                    "Transit",
+                                    format!(
+                                        "{} ({:+.0}°)",
+                                        format_local_hour_hm(event.hour),
+                                        event.alt_deg
+                                    ),
+                                ),
+                                TrajectoryPointKind::Rise => (
+                                    "↗",
+                                    "Rise",
+                                    format_local_hour_hm(event.hour),
+                                ),
+                                TrajectoryPointKind::Set => (
+                                    "↘",
+                                    "Set",
+                                    format_local_hour_hm(event.hour),
+                                ),
+                                TrajectoryPointKind::LowerTransit => (
+                                    "▼",
+                                    "Low",
+                                    format!(
+                                        "{} ({:+.0}°)",
+                                        format_local_hour_hm(event.hour),
+                                        event.alt_deg
+                                    ),
+                                ),
+                            };
+
+                            let pill_y = match event.kind {
+                                TrajectoryPointKind::Transit => (sy - 28.0).max(10.0),
+                                TrajectoryPointKind::LowerTransit => (sy + 10.0).min(bh - 30.0),
+                                TrajectoryPointKind::Rise | TrajectoryPointKind::Set => {
+                                    (sy - 24.0).clamp(10.0, (bh - 30.0).max(10.0))
+                                }
+                            };
+                            let pill_x = (sx + 10.0).clamp(10.0, (bw - 148.0).max(10.0));
+                            let jump_hour = event.hour;
+                            let tip_text = format!(
+                                "{} at {} (Az {:.0}°, Alt {:+.1}°) — Click to jump",
+                                event.kind.label(),
+                                format_local_hour_hm(event.hour),
+                                event.az_deg,
+                                event.alt_deg
+                            );
+
+                            h_flex()
+                                .id(("trajectory_event_badge", event.kind as usize))
+                                .absolute()
+                                .left(px(pill_x as f32))
+                                .top(px(pill_y as f32))
+                                .items_center()
+                                .gap_1()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(popover_bg)
+                                .border_1()
+                                .border_color(obj_color.opacity(0.55))
+                                .shadow_md()
+                                .cursor_pointer()
+                                .hover(|s| s.border_color(obj_color.opacity(0.95)))
+                                .tooltip(Tooltip::text(tip_text))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.jump_to_hour(jump_hour, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .text_size(px(9.5))
+                                        .text_color(obj_color)
+                                        .child(icon_glyph),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(text_color)
+                                        .child(kind_label),
+                                )
+                                .child(
+                                    div()
+                                        .font_buffer(cx)
+                                        .text_size(px(10.0))
+                                        .text_color(obj_color)
+                                        .child(detail_text),
+                                )
+                        },
+                    ))
+                },
+            )
+            .when_some(
                 selected_overlay,
                 |el, (srgb, sx, sy, inner_d, outer_d)| {
                     let star_color: Hsla = Rgba {
@@ -1417,9 +1857,9 @@ impl Render for PlanetariumPanel {
                 hovered_overlay,
                 |el,
                  (
-                     star_id,
+                     hovered_id,
                      srgb,
-                     mag,
+                     badge_label,
                      title,
                      reticle_x,
                      reticle_y,
@@ -1435,15 +1875,14 @@ impl Render for PlanetariumPanel {
                         a: 1.0,
                     }
                     .into();
-                    let mag_label = format!("G {mag:.2}");
-                    let show_hover_reticle = selected_star_id != Some(star_id);
+                    let show_hover_reticle = selected_target_id != Some(hovered_id);
 
                     let preview = h_flex()
                         .absolute()
                         .top(px(pill_y as f32))
                         .when(anchor_right, |el| el.right(px(anchor_x as f32)))
                         .when(!anchor_right, |el| el.left(px(anchor_x as f32)))
-                        .max_w(px(220.0))
+                        .max_w(px(240.0))
                         .items_center()
                         .gap_1p5()
                         .px_2()
@@ -1484,7 +1923,7 @@ impl Render for PlanetariumPanel {
                                 .font_buffer(cx)
                                 .text_size(px(11.0))
                                 .text_color(star_color)
-                                .child(mag_label),
+                                .child(badge_label),
                         );
 
                     el.when(show_hover_reticle, |el| {
@@ -1671,6 +2110,79 @@ impl Render for PlanetariumPanel {
 impl Focusable for PlanetariumPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+fn paint_planetarium_trajectory(
+    bounds: Bounds<Pixels>,
+    trajectory: &DailyTrajectory,
+    view_info: &PlanetariumViewInfo,
+    event_badges: &[(celestial::TrajectoryEventPoint, f64, f64)],
+    obj_rgb: Rgba,
+    occlude_ground: bool,
+    window: &mut Window,
+) {
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    if width <= 2.0 || height <= 2.0 || trajectory.samples.len() < 2 {
+        return;
+    }
+
+    let origin_x = f32::from(bounds.origin.x);
+    let origin_y = f32::from(bounds.origin.y);
+    let bw = f64::from(width);
+    let bh = f64::from(height);
+    let crisp_color = lerp_rgba(obj_rgb, rgb(0xffffff), 0.22).alpha(0.88);
+
+    // 1. Hourly time tick marks along visible trajectory segments (single GPU quad per tick)
+    let tick_halo = rgb(0x050811).alpha(0.75);
+    for sample in &trajectory.samples {
+        if !sample.above_horizon && occlude_ground {
+            continue;
+        }
+        let nearest_hour = sample.hour.round();
+        if (sample.hour - nearest_hour).abs() > 1e-3 || nearest_hour >= 24.0 {
+            continue;
+        }
+        let Some((nx, ny)) = view_info.project_topo_to_ndc(sample.topo_enu) else {
+            continue;
+        };
+        if nx.abs() > 1.05 || ny.abs() > 1.05 {
+            continue;
+        }
+        let pt = point(
+            px(origin_x + ((nx * 0.5 + 0.5) * bw) as f32),
+            px(origin_y + ((0.5 - ny * 0.5) * bh) as f32),
+        );
+        let h_int = nearest_hour as u32;
+        let r = if h_int.is_multiple_of(6) { 2.7 } else { 1.8 };
+        let fill_color = if sample.above_horizon {
+            crisp_color
+        } else {
+            obj_rgb.alpha(0.35)
+        };
+        paint_disc(window, pt, r, fill_color, 0.9, tick_halo);
+    }
+
+    // 2. Notable event point markers (Transit, Rise, Set, Lower Culmination)
+    let dark_ring = rgb(0x060a14);
+    let bright_ring = rgb(0xf4f8ff);
+    for &(event, sx, sy) in event_badges {
+        let pt = point(px(origin_x + sx as f32), px(origin_y + sy as f32));
+        match event.kind {
+            TrajectoryPointKind::Transit => {
+                paint_disc(window, pt, 5.0, bright_ring.alpha(0.95), 1.4, dark_ring.alpha(0.88));
+                paint_disc(window, pt, 3.2, obj_rgb.alpha(1.0), 0.0, dark_ring.alpha(0.0));
+            }
+            TrajectoryPointKind::Rise | TrajectoryPointKind::Set => {
+                paint_disc(window, pt, 4.1, crisp_color, 1.3, dark_ring.alpha(0.85));
+                paint_disc(window, pt, 2.2, dark_ring.alpha(0.9), 0.0, dark_ring.alpha(0.0));
+            }
+            TrajectoryPointKind::LowerTransit => {
+                paint_disc(window, pt, 3.7, obj_rgb.alpha(0.85), 1.3, dark_ring.alpha(0.82));
+                paint_disc(window, pt, 1.9, bright_ring.alpha(0.9), 0.0, dark_ring.alpha(0.0));
+            }
+        }
     }
 }
 

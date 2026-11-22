@@ -51,6 +51,7 @@ pub struct PlanetariumViewInfo {
     pub projection: CameraProjection,
     pub camera_to_topo: DMat3,
     pub camera_to_icrs: DMat3,
+    pub observer: ObservationContext,
 }
 
 impl Default for PlanetariumViewInfo {
@@ -65,11 +66,18 @@ impl Default for PlanetariumViewInfo {
             projection: CameraProjection::default(),
             camera_to_topo: DMat3::IDENTITY,
             camera_to_icrs: DMat3::IDENTITY,
+            observer: ObservationContext::default(),
         }
     }
 }
 
 impl PlanetariumViewInfo {
+    /// Projects a unit topocentric ENU vector (`+X` East, `+Y` North, `+Z` Up) into screen NDC (`[-1, 1]^2`),
+    /// returning `None` if culled behind the projection horizon.
+    pub fn project_topo_to_ndc(&self, v_topo: DVec3) -> Option<(f64, f64)> {
+        let v_cam = self.camera_to_topo.transpose() * v_topo;
+        self.projection.project_cam_dir(v_cam)
+    }
     /// Computes topocentric (Az/Alt) and equatorial (RA/Dec) sky coordinates at screen NDC (`[-1, 1]^2`).
     pub fn coords_at_ndc(&self, ndc_x: f64, ndc_y: f64) -> SkyCoordinates {
         let v_cam = self.projection.unproject_ndc(ndc_x, ndc_y);
@@ -600,6 +608,7 @@ impl PlanetariumCamera {
             projection: self.projection(aspect_ratio),
             camera_to_topo: self.topocentric_to_camera_matrix().transpose(),
             camera_to_icrs: self.icrs_to_camera_matrix().transpose(),
+            observer: self.observer,
         }
     }
 }

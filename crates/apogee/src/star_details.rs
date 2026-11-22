@@ -1,22 +1,21 @@
 use std::sync::{Arc, Mutex};
 
 use celestial::{
-    DailyTargetVisibility, HorizonProfile, StarMetadata,
-    compute_target_visibility_with_horizon,
+    DailyTargetVisibility, HorizonProfile, ObservationContext, SolarSystemBody, StarMetadata,
+    compute_solar_system_visibility_with_horizon, compute_target_visibility_with_horizon,
     coords::{Angle, canonical_spherical_to_cartesian},
-    sample_day_equatorial_track,
+    sample_day_equatorial_track, sample_day_solar_system_track,
 };
 use glam::DVec3;
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Pixels, Point, Render, Rgba, Window, div, fill, hsla, point, prelude::*, px, rgb, svg,
+    App, AppContext, BorderStyle, Bounds, Context, Corners, Edges, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, Rgba, Window, div, fill,
+    hsla, point, prelude::*, px, rgb, svg,
 };
 use horizon::GlobalHorizons;
-use observer::{
-    GlobalObserver, ObserverModel, paint_circle, paint_twilight_backdrop, sample_day_profile,
-};
-use planetarium::PickedStar;
+use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_day_profile};
+use planetarium::{PickedSolarSystemBody, PickedStar};
 use status_bar::{format_altaz, format_radec};
 use ui::{
     ActiveTheme, ButtonCommon, Clickable, IconButton, IconName, IconSize, StyledTypography,
@@ -37,6 +36,12 @@ const ICON_HORIZON_OVERLAY: &[u8] = br##"<svg width="24" height="24" viewBox="0 
   <path d="M2.5 17.5L7.5 10.5L11.8 15L16.2 8.5L21.5 17.5" stroke="black" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M2.5 19.5H21.5" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
 </svg>"##;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SelectedObjectId {
+    Star(u32),
+    SolarSystem(SolarSystemBody),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectedStar {
@@ -104,15 +109,53 @@ impl SelectedStar {
     }
 }
 
+/// Unified selected celestial object in the planetarium (either a catalog star or a solar-system body).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SelectedObject {
+    Star(SelectedStar),
+    SolarSystem(SolarSystemBody),
+}
+
+impl SelectedObject {
+    pub fn from_picked_star(star: &PickedStar) -> Self {
+        Self::Star(SelectedStar::from_picked(star))
+    }
+
+    pub fn from_picked_solar_system(picked: &PickedSolarSystemBody) -> Self {
+        Self::SolarSystem(picked.body)
+    }
+
+    pub fn id(&self) -> SelectedObjectId {
+        match self {
+            Self::Star(s) => SelectedObjectId::Star(s.catalog_index),
+            Self::SolarSystem(body) => SelectedObjectId::SolarSystem(*body),
+        }
+    }
+
+    pub fn category_badge(&self) -> &'static str {
+        match self {
+            Self::Star(_) => "Star",
+            Self::SolarSystem(body) => body.category_label(),
+        }
+    }
+
+    pub fn srgb(&self) -> [f32; 3] {
+        match self {
+            Self::Star(s) => s.srgb,
+            Self::SolarSystem(body) => body.srgb(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct StarSelectionModel {
-    selected: Option<SelectedStar>,
+    selected: Option<SelectedObject>,
     activation_nonce: u64,
 }
 
 impl StarSelectionModel {
-    pub fn select(&mut self, star: SelectedStar, cx: &mut Context<Self>) {
-        self.selected = Some(star);
+    pub fn select_object(&mut self, object: SelectedObject, cx: &mut Context<Self>) {
+        self.selected = Some(object);
         self.activation_nonce = self.activation_nonce.wrapping_add(1);
         cx.notify();
     }
@@ -124,7 +167,7 @@ impl StarSelectionModel {
         }
     }
 
-    pub fn selected(&self) -> Option<&SelectedStar> {
+    pub fn selected_object(&self) -> Option<&SelectedObject> {
         self.selected.as_ref()
     }
 
@@ -156,27 +199,43 @@ pub fn init(cx: &mut App) {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct ProfileCacheKey {
-    catalog_index: u32,
-    lat_bits: u64,
-    lon_bits: u64,
-    elev_bits: u64,
-    local_midnight_secs: i64,
-    horizon_key: Option<(String, u64)>,
+pub(crate) struct TargetDayCacheKey {
+    pub target_id: SelectedObjectId,
+    pub lat_bits: u64,
+    pub lon_bits: u64,
+    pub elev_bits: u64,
+    pub local_midnight_secs: i64,
+    pub horizon_key: Option<(String, u64)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GraphImageKey {
+    phys_w: u32,
+    phys_h: u32,
+    profile_gen: u64,
+    show_horizon: bool,
+    rgb_bits: [u32; 3],
+}
+
+struct CachedGraphImage {
+    key: GraphImageKey,
+    image: Arc<RenderImage>,
 }
 
 pub struct StarDetailsPanel {
     focus_handle: FocusHandle,
     last_activation_nonce: u64,
-    cache_key: Option<ProfileCacheKey>,
-    cached_solar_profile: Vec<f64>,
-    cached_star_profile: Vec<f64>,
-    cached_horizon_profile: Vec<f64>,
+    cache_key: Option<TargetDayCacheKey>,
+    profile_gen: u64,
+    cached_solar_profile: Arc<Vec<f64>>,
+    cached_star_profile: Arc<Vec<f64>>,
+    cached_horizon_profile: Arc<Vec<f64>>,
     cached_visibility: Option<DailyTargetVisibility>,
     cached_has_custom_horizon: bool,
     cached_active_horizon: Option<HorizonProfile>,
     show_horizon_overlay: bool,
     graph_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    cached_graph_image: Arc<Mutex<Option<CachedGraphImage>>>,
     is_scrubbing: bool,
 }
 
@@ -196,7 +255,7 @@ impl StarDetailsPanel {
 
             cx.observe(&selection_entity, |this: &mut Self, model, cx| {
                 let nonce = model.read(cx).activation_nonce();
-                let has_selection = model.read(cx).selected().is_some();
+                let has_selection = model.read(cx).selected_object().is_some();
                 this.ensure_profiles_fresh(cx);
                 if nonce != this.last_activation_nonce {
                     this.last_activation_nonce = nonce;
@@ -230,14 +289,16 @@ impl StarDetailsPanel {
                 focus_handle: cx.focus_handle(),
                 last_activation_nonce: initial_nonce,
                 cache_key: None,
-                cached_solar_profile: Vec::new(),
-                cached_star_profile: Vec::new(),
-                cached_horizon_profile: Vec::new(),
+                profile_gen: 0,
+                cached_solar_profile: Arc::new(Vec::new()),
+                cached_star_profile: Arc::new(Vec::new()),
+                cached_horizon_profile: Arc::new(Vec::new()),
                 cached_visibility: None,
                 cached_has_custom_horizon: false,
                 cached_active_horizon: None,
                 show_horizon_overlay: true,
                 graph_bounds: Arc::new(Mutex::new(None)),
+                cached_graph_image: Arc::new(Mutex::new(None)),
                 is_scrubbing: false,
             };
             panel.ensure_profiles_fresh(cx);
@@ -246,14 +307,16 @@ impl StarDetailsPanel {
     }
 
     fn ensure_profiles_fresh(&mut self, cx: &App) {
-        let Some(star) = cx
+        let Some(selected) = cx
             .try_global::<GlobalStarSelection>()
-            .and_then(|g| g.0.read(cx).selected().cloned())
+            .and_then(|g| g.0.read(cx).selected_object().cloned())
         else {
-            self.cache_key = None;
-            self.cached_solar_profile.clear();
-            self.cached_star_profile.clear();
-            self.cached_horizon_profile.clear();
+            if self.cache_key.take().is_some() {
+                self.profile_gen = self.profile_gen.wrapping_add(1);
+            }
+            self.cached_solar_profile = Arc::new(Vec::new());
+            self.cached_star_profile = Arc::new(Vec::new());
+            self.cached_horizon_profile = Arc::new(Vec::new());
             self.cached_visibility = None;
             self.cached_has_custom_horizon = false;
             self.cached_active_horizon = None;
@@ -274,8 +337,8 @@ impl StarDetailsPanel {
 
         let loc = observer.geodetic_position();
         let midnight = observer.local_midnight_unix_seconds();
-        let next_key = ProfileCacheKey {
-            catalog_index: star.catalog_index,
+        let next_key = TargetDayCacheKey {
+            target_id: selected.id(),
             lat_bits: loc.latitude_deg().to_bits(),
             lon_bits: loc.longitude_deg().to_bits(),
             elev_bits: loc.elevation_m().to_bits(),
@@ -287,29 +350,47 @@ impl StarDetailsPanel {
             return;
         }
 
-        let ra = Angle::from_degrees(star.ra_deg);
-        let dec = Angle::from_degrees(star.dec_deg);
-        self.cached_solar_profile = observer.solar_day_profile(97);
-        let track = sample_day_equatorial_track(loc, midnight, ra, dec, 97);
-        self.cached_star_profile = track.iter().map(|(_, alt)| *alt).collect();
-        self.cached_horizon_profile = if let Some(ref prof) = active_profile {
+        self.cached_solar_profile = Arc::new(observer.solar_day_profile(97));
+        let (track, visibility) = match &selected {
+            SelectedObject::Star(star) => {
+                let ra = Angle::from_degrees(star.ra_deg);
+                let dec = Angle::from_degrees(star.dec_deg);
+                let track = sample_day_equatorial_track(loc, midnight, ra, dec, 97);
+                let vis = compute_target_visibility_with_horizon(
+                    loc,
+                    midnight,
+                    ra,
+                    dec,
+                    active_profile.as_ref(),
+                );
+                (track, vis)
+            }
+            SelectedObject::SolarSystem(body) => {
+                let track = sample_day_solar_system_track(loc, midnight, *body, 97);
+                let vis = compute_solar_system_visibility_with_horizon(
+                    loc,
+                    midnight,
+                    *body,
+                    active_profile.as_ref(),
+                );
+                (track, vis)
+            }
+        };
+
+        self.cached_star_profile = Arc::new(track.iter().map(|(_, alt)| *alt).collect());
+        self.cached_horizon_profile = Arc::new(if let Some(ref prof) = active_profile {
             track
                 .iter()
                 .map(|(az, _)| prof.altitude_at_azimuth_deg(*az))
                 .collect()
         } else {
             Vec::new()
-        };
-        self.cached_visibility = Some(compute_target_visibility_with_horizon(
-            loc,
-            midnight,
-            ra,
-            dec,
-            active_profile.as_ref(),
-        ));
+        });
+        self.cached_visibility = Some(visibility);
         self.cached_has_custom_horizon = active_profile.is_some();
         self.cached_active_horizon = active_profile;
         self.cache_key = Some(next_key);
+        self.profile_gen = self.profile_gen.wrapping_add(1);
     }
 
     fn scrub_to_position(
@@ -349,7 +430,7 @@ impl StarDetailsPanel {
 }
 
 #[inline]
-fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
+pub(crate) fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
     let t = t.clamp(0.0, 1.0);
     Rgba {
         r: a.r + (b.r - a.r) * t,
@@ -374,74 +455,206 @@ fn alt_to_y(alt_deg: f64, bounds: Bounds<Pixels>) -> f32 {
         + alt_to_y_fraction(alt_deg, GRAPH_PAD_Y, f32::from(bounds.size.height))
 }
 
-fn paint_above_horizon_segments(
-    profile: &[f64],
-    horizon_profile: &[f64],
-    bounds: Bounds<Pixels>,
-    stroke_width: f32,
-    color: Rgba,
+/// Paints a circle as a GPU-instanced rounded quad (avoiding per-frame CPU polygon tessellation).
+pub(crate) fn paint_disc(
     window: &mut Window,
+    center: Point<Pixels>,
+    radius: f32,
+    fill_color: Rgba,
+    border_width: f32,
+    border_color: Rgba,
 ) {
-    let width = f32::from(bounds.size.width);
-    let origin_x = f32::from(bounds.origin.x);
-    let denom = (profile.len() - 1) as f32;
-    let curve_pt = |i: usize| -> Point<Pixels> {
-        let x = origin_x + (i as f32 / denom) * width;
-        let y = alt_to_y(profile[i], bounds);
-        point(px(x), px(y))
-    };
+    let outer_r = radius + border_width;
+    let diameter = outer_r * 2.0;
+    window.paint_quad(gpui::quad(
+        Bounds::new(
+            point(center.x - px(outer_r), center.y - px(outer_r)),
+            gpui::size(px(diameter), px(diameter)),
+        ),
+        Corners::all(px(outer_r)),
+        fill_color,
+        Edges::all(px(border_width)),
+        border_color,
+        BorderStyle::Solid,
+    ));
+}
 
-    let mut path_builder: Option<PathBuilder> = None;
-    for i in 1..profile.len() {
-        let a0 = profile[i - 1];
-        let a1 = profile[i];
-        let h0 = horizon_profile.get(i - 1).copied().unwrap_or(0.0);
-        let h1 = horizon_profile.get(i).copied().unwrap_or(0.0);
-        let c0 = a0 - h0;
-        let c1 = a1 - h1;
-        let p0 = curve_pt(i - 1);
-        let p1 = curve_pt(i);
+#[inline]
+fn blend_bgra_pixel(buf: &mut [u8], idx: usize, r: f32, g: f32, b: f32, a: f32) {
+    if a <= 1e-4 {
+        return;
+    }
+    let dst_b = f32::from(buf[idx]) / 255.0;
+    let dst_g = f32::from(buf[idx + 1]) / 255.0;
+    let dst_r = f32::from(buf[idx + 2]) / 255.0;
+    let dst_a = f32::from(buf[idx + 3]) / 255.0;
+    let out_a = a + dst_a * (1.0 - a);
+    if out_a <= 1e-5 {
+        return;
+    }
+    let inv = 1.0 / out_a;
+    let out_r = (r * a + dst_r * dst_a * (1.0 - a)) * inv;
+    let out_g = (g * a + dst_g * dst_a * (1.0 - a)) * inv;
+    let out_b = (b * a + dst_b * dst_a * (1.0 - a)) * inv;
+    buf[idx] = (out_b.clamp(0.0, 1.0) * 255.0).round() as u8;
+    buf[idx + 1] = (out_g.clamp(0.0, 1.0) * 255.0).round() as u8;
+    buf[idx + 2] = (out_r.clamp(0.0, 1.0) * 255.0).round() as u8;
+    buf[idx + 3] = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
+}
 
-        if c0 >= 0.0 && c1 >= 0.0 {
-            let builder = path_builder.get_or_insert_with(|| {
-                let mut b = PathBuilder::stroke(px(stroke_width));
-                b.move_to(p0);
-                b
-            });
-            builder.line_to(p1);
-        } else if c0 < 0.0 && c1 >= 0.0 {
-            let frac = ((-c0) / (c1 - c0).max(1e-6)).clamp(0.0, 1.0) as f32;
-            let cross_alt = a0 + (a1 - a0) * f64::from(frac);
-            let cross = point(
-                px(f32::from(p0.x) + (f32::from(p1.x) - f32::from(p0.x)) * frac),
-                px(alt_to_y(cross_alt, bounds)),
-            );
-            let builder = path_builder.get_or_insert_with(|| {
-                let mut b = PathBuilder::stroke(px(stroke_width));
-                b.move_to(cross);
-                b
-            });
-            builder.line_to(p1);
-        } else if c0 >= 0.0 && c1 < 0.0 {
-            let frac = (c0 / (c0 - c1).max(1e-6)).clamp(0.0, 1.0) as f32;
-            let cross_alt = a0 + (a1 - a0) * f64::from(frac);
-            let cross = point(
-                px(f32::from(p0.x) + (f32::from(p1.x) - f32::from(p0.x)) * frac),
-                px(alt_to_y(cross_alt, bounds)),
-            );
-            if let Some(mut builder) = path_builder.take() {
-                builder.line_to(cross);
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, color);
+/// Rasterizes an antialiased polyline stroke into a BGRA buffer using exact segment-distance SDF.
+fn rasterize_aa_polyline(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    segments: &[((f32, f32), (f32, f32))],
+    half_width: f32,
+    color: Rgba,
+) {
+    let pad = half_width + 1.2;
+    let w_i = w as i32;
+    let h_i = h as i32;
+    let mut cov = vec![0.0_f32; (w * h) as usize];
+
+    for &((x0, y0), (x1, y1)) in segments {
+        let min_x = ((x0.min(x1) - pad).floor() as i32).clamp(0, w_i - 1);
+        let max_x = ((x0.max(x1) + pad).ceil() as i32).clamp(0, w_i - 1);
+        let min_y = ((y0.min(y1) - pad).floor() as i32).clamp(0, h_i - 1);
+        let max_y = ((y0.max(y1) + pad).ceil() as i32).clamp(0, h_i - 1);
+        let vx = x1 - x0;
+        let vy = y1 - y0;
+        let len_sq = vx * vx + vy * vy;
+
+        for py in min_y..=max_y {
+            let cy = py as f32 + 0.5;
+            let row = (py as u32 * w) as usize;
+            for px_i in min_x..=max_x {
+                let cx = px_i as f32 + 0.5;
+                let t = if len_sq > 1e-6 {
+                    (((cx - x0) * vx + (cy - y0) * vy) / len_sq).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let dx = cx - (x0 + vx * t);
+                let dy = cy - (y0 + vy * t);
+                let dist = dx.hypot(dy);
+                let c = (half_width + 0.5 - dist).clamp(0.0, 1.0);
+                if c > 0.0 {
+                    let slot = &mut cov[row + px_i as usize];
+                    if c > *slot {
+                        *slot = c;
+                    }
                 }
             }
         }
     }
-    if let Some(builder) = path_builder {
-        if let Ok(path) = builder.build() {
-            window.paint_path(path, color);
+
+    for (i, &c) in cov.iter().enumerate() {
+        if c > 0.0 {
+            blend_bgra_pixel(buf, i * 4, color.r, color.g, color.b, color.a * c);
         }
     }
+}
+
+/// Rasterizes the static horizon silhouette and elevation curves once into a cached BGRA `RenderImage`.
+fn rasterize_graph_overlay(
+    phys_w: u32,
+    phys_h: u32,
+    scale: f32,
+    star_profile: &[f64],
+    horizon_profile: &[f64],
+    star_rgb: Rgba,
+) -> Arc<RenderImage> {
+    let w = phys_w.max(2);
+    let h = phys_h.max(2);
+    let wf = w as f32;
+    let hf = h as f32;
+    let pad_y = GRAPH_PAD_Y * scale;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+
+    let y_of = |alt: f64| alt_to_y_fraction(alt, pad_y, hf);
+
+    // 1. Custom horizon obstruction silhouette & smooth top edge
+    if horizon_profile.len() >= 2 {
+        let sil = rgb(0x02040a).alpha(0.5);
+        for px_i in 0..w {
+            let hour = (px_i as f64 + 0.5) / f64::from(wf) * 24.0;
+            let yh = y_of(sample_day_profile(horizon_profile, hour));
+            let start_y = (yh.floor() as i32).clamp(0, h as i32);
+            for py in start_y..h as i32 {
+                let cov = ((py as f32 + 1.0) - yh).clamp(0.0, 1.0);
+                let idx = ((py as u32 * w + px_i) * 4) as usize;
+                blend_bgra_pixel(&mut buf, idx, sil.r, sil.g, sil.b, sil.a * cov);
+            }
+        }
+
+        let denom_h = (horizon_profile.len() - 1) as f32;
+        let h_segs: Vec<_> = (1..horizon_profile.len())
+            .map(|i| {
+                let p0 = ((i - 1) as f32 / denom_h * wf, y_of(horizon_profile[i - 1]));
+                let p1 = (i as f32 / denom_h * wf, y_of(horizon_profile[i]));
+                (p0, p1)
+            })
+            .collect();
+        rasterize_aa_polyline(
+            &mut buf,
+            w,
+            h,
+            &h_segs,
+            0.55 * scale,
+            rgb(0xffffff).alpha(0.28),
+        );
+    }
+
+    // 2. Target elevation curve (faint full track + above-horizon dark halo & crisp stroke)
+    if star_profile.len() >= 2 {
+        let denom = (star_profile.len() - 1) as f32;
+        let mut all_segs = Vec::with_capacity(star_profile.len() - 1);
+        let mut above_segs = Vec::with_capacity(star_profile.len() - 1);
+
+        for i in 1..star_profile.len() {
+            let a0 = star_profile[i - 1];
+            let a1 = star_profile[i];
+            let x0 = (i - 1) as f32 / denom * wf;
+            let x1 = i as f32 / denom * wf;
+            let p0 = (x0, y_of(a0));
+            let p1 = (x1, y_of(a1));
+            all_segs.push((p0, p1));
+
+            let h0 = horizon_profile.get(i - 1).copied().unwrap_or(0.0);
+            let h1 = horizon_profile.get(i).copied().unwrap_or(0.0);
+            let c0 = a0 - h0;
+            let c1 = a1 - h1;
+            if c0 >= 0.0 && c1 >= 0.0 {
+                above_segs.push((p0, p1));
+            } else if c0 < 0.0 && c1 >= 0.0 {
+                let frac = ((-c0) / (c1 - c0).max(1e-6)).clamp(0.0, 1.0) as f32;
+                let cross = (x0 + (x1 - x0) * frac, y_of(a0 + (a1 - a0) * f64::from(frac)));
+                above_segs.push((cross, p1));
+            } else if c0 >= 0.0 && c1 < 0.0 {
+                let frac = (c0 / (c0 - c1).max(1e-6)).clamp(0.0, 1.0) as f32;
+                let cross = (x0 + (x1 - x0) * frac, y_of(a0 + (a1 - a0) * f64::from(frac)));
+                above_segs.push((p0, cross));
+            }
+        }
+
+        let crisp_color = lerp_rgba(star_rgb, rgb(0xffffff), 0.25).alpha(0.96);
+        rasterize_aa_polyline(&mut buf, w, h, &all_segs, 0.75 * scale, star_rgb.alpha(0.38));
+        if !above_segs.is_empty() {
+            rasterize_aa_polyline(
+                &mut buf,
+                w,
+                h,
+                &above_segs,
+                1.9 * scale,
+                rgb(0x060a14).alpha(0.55),
+            );
+            rasterize_aa_polyline(&mut buf, w, h, &above_segs, 1.1 * scale, crisp_color);
+        }
+    }
+
+    let img = image::RgbaImage::from_raw(w, h, buf).expect("buffer dimensions match w * h * 4");
+    Arc::new(RenderImage::new(vec![image::Frame::new(img)]))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -453,6 +666,8 @@ fn paint_visibility_graph(
     horizon_profile: &[f64],
     visibility: Option<DailyTargetVisibility>,
     star_rgb: Rgba,
+    profile_gen: u64,
+    image_cache: &Mutex<Option<CachedGraphImage>>,
     window: &mut Window,
 ) {
     let width = f32::from(bounds.size.width);
@@ -493,74 +708,44 @@ fn paint_visibility_graph(
         hsla(0.0, 0.0, 1.0, 0.34),
     ));
 
-    // 3b. Custom horizon obstruction silhouette & curve along the star's daily azimuth track.
-    if horizon_profile.len() >= 2 {
-        let denom_h = (horizon_profile.len() - 1) as f32;
-        let h_pt = |i: usize| -> Point<Pixels> {
-            let x = origin_x + (i as f32 / denom_h) * width;
-            let y = alt_to_y(horizon_profile[i], bounds);
-            point(px(x), px(y))
-        };
-        let bottom_y = origin_y + height;
-        let mut poly = PathBuilder::fill();
-        poly.move_to(point(px(origin_x), px(bottom_y)));
-        for i in 0..horizon_profile.len() {
-            poly.line_to(h_pt(i));
+    // 4. Cached antialiased horizon silhouette + target curves (single textured quad, 0 `paint_path`).
+    let scale = window.scale_factor().max(1.0);
+    let phys_w = (width * scale).round().max(2.0) as u32;
+    let phys_h = (height * scale).round().max(2.0) as u32;
+    let key = GraphImageKey {
+        phys_w,
+        phys_h,
+        profile_gen,
+        show_horizon: !horizon_profile.is_empty(),
+        rgb_bits: [
+            star_rgb.r.to_bits(),
+            star_rgb.g.to_bits(),
+            star_rgb.b.to_bits(),
+        ],
+    };
+    let overlay_img = image_cache.lock().ok().map(|mut guard| {
+        if let Some(cached) = guard.as_ref().filter(|c| c.key == key) {
+            return cached.image.clone();
         }
-        poly.line_to(point(px(origin_x + width), px(bottom_y)));
-        poly.close();
-        if let Ok(path) = poly.build() {
-            window.paint_path(path, rgb(0x02040a).alpha(0.5));
-        }
-
-        let mut line = PathBuilder::stroke(px(1.0));
-        line.move_to(h_pt(0));
-        for i in 1..horizon_profile.len() {
-            line.line_to(h_pt(i));
-        }
-        if let Ok(path) = line.build() {
-            window.paint_path(path, hsla(0.0, 0.0, 1.0, 0.28));
-        }
+        let image = rasterize_graph_overlay(
+            phys_w,
+            phys_h,
+            scale,
+            star_profile,
+            horizon_profile,
+            star_rgb,
+        );
+        *guard = Some(CachedGraphImage {
+            key,
+            image: image.clone(),
+        });
+        image
+    });
+    if let Some(img) = overlay_img {
+        let _ = window.paint_image(bounds, bounds, Corners::default(), img, 0, false);
     }
 
     let crisp_color = lerp_rgba(star_rgb, rgb(0xffffff), 0.25).alpha(0.96);
-
-    // 4. Star elevation curve + transit peak marker.
-    if star_profile.len() >= 2 {
-        let denom = (star_profile.len() - 1) as f32;
-        let curve_pt = |i: usize| -> Point<Pixels> {
-            let x = origin_x + (i as f32 / denom) * width;
-            let y = alt_to_y(star_profile[i], bounds);
-            point(px(x), px(y))
-        };
-
-        let mut base_path = PathBuilder::stroke(px(1.5));
-        base_path.move_to(curve_pt(0));
-        for i in 1..star_profile.len() {
-            base_path.line_to(curve_pt(i));
-        }
-        if let Ok(path) = base_path.build() {
-            window.paint_path(path, star_rgb.alpha(0.38));
-        }
-
-        // Dark backing keeps bright curve legible across bright daytime sky gradients.
-        paint_above_horizon_segments(
-            star_profile,
-            horizon_profile,
-            bounds,
-            3.8,
-            rgb(0x060a14).alpha(0.55),
-            window,
-        );
-        paint_above_horizon_segments(
-            star_profile,
-            horizon_profile,
-            bounds,
-            2.2,
-            crisp_color,
-            window,
-        );
-    }
 
     if let Some(vis) = visibility {
         let visible_at_peak = if horizon_profile.is_empty() {
@@ -572,32 +757,51 @@ fn paint_visibility_graph(
         if visible_at_peak {
             let peak_x = origin_x + (vis.transit_hour / 24.0).clamp(0.0, 1.0) as f32 * width;
             let peak_y = alt_to_y(vis.max_altitude_deg, bounds);
-            let peak_pt = point(px(peak_x), px(peak_y));
-            paint_circle(window, peak_pt, 3.8, rgb(0x090d1a).alpha(0.8));
-            paint_circle(window, peak_pt, 2.5, crisp_color);
+            paint_disc(
+                window,
+                point(px(peak_x), px(peak_y)),
+                2.5,
+                crisp_color,
+                1.3,
+                rgb(0x090d1a).alpha(0.8),
+            );
         }
     }
 
-    // 5. Playhead beam and bordered orb at active time.
+    // 5. Playhead beam and bordered orb at active time (pure GPU quads).
     let t = (hour_of_day / 24.0).clamp(0.0, 1.0) as f32;
     let playhead_x = origin_x + t * width;
     let current_alt = sample_day_profile(star_profile, hour_of_day);
     let handle_y = alt_to_y(current_alt, bounds);
     let handle_pt = point(px(playhead_x), px(handle_y));
 
-    let mut beam_builder = PathBuilder::stroke(px(1.0));
-    beam_builder.move_to(point(px(playhead_x), px(origin_y)));
-    beam_builder.line_to(point(px(playhead_x), px(origin_y + height)));
-    if let Ok(beam_path) = beam_builder.build() {
-        window.paint_path(beam_path, hsla(0.0, 0.0, 1.0, 0.35));
-    }
+    window.paint_quad(fill(
+        Bounds::new(
+            point(px(playhead_x - 0.5), px(origin_y)),
+            gpui::size(px(1.0), px(height)),
+        ),
+        hsla(0.0, 0.0, 1.0, 0.35),
+    ));
 
-    paint_circle(window, handle_pt, 5.5, rgb(0x090d1a).alpha(0.88));
-    paint_circle(window, handle_pt, 4.5, rgb(0xf2f6fc).alpha(0.96));
-    paint_circle(window, handle_pt, 2.9, star_rgb.alpha(1.0));
+    paint_disc(
+        window,
+        handle_pt,
+        4.5,
+        rgb(0xf2f6fc).alpha(0.96),
+        1.0,
+        rgb(0x090d1a).alpha(0.88),
+    );
+    paint_disc(
+        window,
+        handle_pt,
+        2.9,
+        star_rgb.alpha(1.0),
+        0.0,
+        rgb(0x090d1a).alpha(0.0),
+    );
 }
 
-fn format_local_hour_hm(hour: f64) -> String {
+pub(crate) fn format_local_hour_hm(hour: f64) -> String {
     let total_mins = (hour * 60.0).round() as u32 % (24 * 60);
     format!("{:02}:{:02}", total_mins / 60, total_mins % 60)
 }
@@ -607,9 +811,9 @@ impl Render for StarDetailsPanel {
         let colors = cx.theme().colors();
         let selected = cx
             .try_global::<GlobalStarSelection>()
-            .and_then(|g| g.0.read(cx).selected().cloned());
+            .and_then(|g| g.0.read(cx).selected_object().cloned());
 
-        let Some(star) = selected else {
+        let Some(selected_obj) = selected else {
             return v_flex()
                 .size_full()
                 .bg(colors.panel_background)
@@ -624,7 +828,7 @@ impl Render for StarDetailsPanel {
                                 .text_size(px(13.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(colors.text)
-                                .child("Star Details"),
+                                .child("Object Details"),
                         )
                         .child(
                             IconButton::new("close_star_details_empty_btn", IconName::Close)
@@ -643,36 +847,62 @@ impl Render for StarDetailsPanel {
                         .justify_center()
                         .text_size(px(12.0))
                         .text_color(colors.text_muted)
-                        .child("Click a star to inspect visibility and details"),
+                        .child("Click a star, the Sun, or the Moon to inspect visibility and details"),
                 )
                 .into_any_element();
         };
 
+        let srgb = selected_obj.srgb();
         let star_rgb = Rgba {
-            r: star.srgb[0],
-            g: star.srgb[1],
-            b: star.srgb[2],
+            r: srgb[0],
+            g: srgb[1],
+            b: srgb[2],
             a: 1.0,
         };
         let star_color: Hsla = star_rgb.into();
-        let (title, subtitle) = star.display_title_and_subtitle();
 
-        let observer_snapshot = cx.try_global::<GlobalObserver>().map(|g| {
-            let model: &ObserverModel = g.0.read(cx);
-            let obs_ctx = model.observation_context();
-            let (az, alt) = obs_ctx.equatorial_to_topocentric_coords(
-                Angle::from_degrees(star.ra_deg),
-                Angle::from_degrees(star.dec_deg),
-            );
-            (
-                model.local_hour_of_day(),
-                az.degrees(),
-                alt.degrees(),
-            )
-        });
+        let (obs_ctx, hour_of_day) = cx
+            .try_global::<GlobalObserver>()
+            .map(|g| {
+                let model: &ObserverModel = g.0.read(cx);
+                (model.observation_context(), model.local_hour_of_day())
+            })
+            .unwrap_or_else(|| (ObservationContext::default(), 0.0));
 
-        let (hour_of_day, az_deg, alt_deg) =
-            observer_snapshot.unwrap_or_else(|| (0.0, 0.0, 0.0));
+        let category_badge = selected_obj.category_badge();
+        let is_solar_system = matches!(selected_obj, SelectedObject::SolarSystem(_));
+
+        let (title, subtitle, ra_deg, dec_deg, az_deg, alt_deg, solar_eph) = match &selected_obj {
+            SelectedObject::Star(star) => {
+                let (title, subtitle) = star.display_title_and_subtitle();
+                let (az, alt) = obs_ctx.equatorial_to_topocentric_coords(
+                    Angle::from_degrees(star.ra_deg),
+                    Angle::from_degrees(star.dec_deg),
+                );
+                (
+                    title,
+                    subtitle,
+                    star.ra_deg,
+                    star.dec_deg,
+                    az.degrees(),
+                    alt.degrees(),
+                    None,
+                )
+            }
+            SelectedObject::SolarSystem(body) => {
+                let eph = body.ephemeris(obs_ctx.location, obs_ctx.epoch);
+                let (title, sub) = eph.display_title_and_subtitle();
+                (
+                    title,
+                    Some(sub),
+                    eph.ra_deg,
+                    eph.dec_deg,
+                    eph.az_deg,
+                    eph.alt_deg,
+                    Some(eph),
+                )
+            }
+        };
 
         let local_horizon_alt = self
             .cached_active_horizon
@@ -686,9 +916,11 @@ impl Render for StarDetailsPanel {
         let horizon_profile = if self.show_horizon_overlay {
             self.cached_horizon_profile.clone()
         } else {
-            Vec::new()
+            Arc::new(Vec::new())
         };
         let visibility = self.cached_visibility;
+        let profile_gen = self.profile_gen;
+        let image_cache = self.cached_graph_image.clone();
         let bounds_store = self.graph_bounds.clone();
         let entity = cx.entity().clone();
 
@@ -707,6 +939,8 @@ impl Render for StarDetailsPanel {
                     &horizon_profile,
                     visibility,
                     star_rgb,
+                    profile_gen,
+                    &image_cache,
                     window,
                 );
 
@@ -883,9 +1117,97 @@ impl Render for StarDetailsPanel {
                 )
             };
 
-        let (ra_text, dec_text) = format_radec(star.ra_deg, star.dec_deg);
+        let (ra_text, dec_text) = format_radec(ra_deg, dec_deg);
         let (az_text, alt_text) = format_altaz(az_deg, alt_deg, 10.0);
-        let ids_summary = star.catalog_ids_summary();
+        let ids_summary = match &selected_obj {
+            SelectedObject::Star(star) => star.catalog_ids_summary(),
+            SelectedObject::SolarSystem(_) => None,
+        };
+
+        let specific_rows = match (&selected_obj, solar_eph) {
+            (SelectedObject::Star(star), _) => vec![
+                h_flex()
+                    .gap_3()
+                    .child(metric_cell("Mag", format!("G {:.2}", star.mag)))
+                    .child(metric_cell("Class", format!("{}-type", star.spectral_class))),
+                h_flex()
+                    .gap_3()
+                    .child(metric_cell("BP-RP", format!("{:+.2}", star.bp_rp)))
+                    .child(metric_cell("Teff", format!("~{} K", star.estimated_teff_k))),
+            ],
+            (SelectedObject::SolarSystem(SolarSystemBody::Sun), Some(eph)) => {
+                let dist_au = eph.distance_km / 149_597_870.7;
+                let diam_arcmin = eph.angular_radius_deg * 2.0 * 60.0;
+                let sky_phase = celestial::SkyPhase::from_solar_altitude_deg(eph.alt_deg).label();
+                vec![
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell("Mag", format!("V {:.2}", eph.apparent_magnitude)))
+                        .child(metric_cell("Diam", format!("{diam_arcmin:.1}'"))),
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell("Dist", format!("{dist_au:.4} AU")))
+                        .child(metric_cell("Sky", sky_phase.to_string())),
+                ]
+            }
+            (SelectedObject::SolarSystem(SolarSystemBody::Moon), Some(eph)) => {
+                let diam_arcmin = eph.angular_radius_deg * 2.0 * 60.0;
+                let (phase_label, illum_label, age_label) = if let Some(phase) = eph.lunar_phase {
+                    (
+                        phase.phase_name().to_string(),
+                        format!("{:.1}%", phase.illuminated_fraction * 100.0),
+                        format!("{:.1} d", phase.age_days),
+                    )
+                } else {
+                    ("—".to_string(), "—".to_string(), "—".to_string())
+                };
+                vec![
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell("Phase", phase_label))
+                        .child(metric_cell("Illum", illum_label)),
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell("Mag", format!("V {:.2}", eph.apparent_magnitude)))
+                        .child(metric_cell("Age", age_label)),
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell("Diam", format!("{diam_arcmin:.1}'")))
+                        .child(metric_cell("Dist", format!("{:.0} km", eph.distance_km))),
+                ]
+            }
+            (SelectedObject::SolarSystem(_), None) => Vec::new(),
+        };
+
+        let details_metrics_section = v_flex()
+            .w_full()
+            .gap_1p5()
+            .children(specific_rows)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(metric_cell("RA", ra_text))
+                    .child(metric_cell("Dec", dec_text)),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(metric_cell("Az", az_text))
+                    .child(metric_cell("Alt", alt_text)),
+            )
+            .when_some(ids_summary, |el, summary| {
+                el.child(
+                    div()
+                        .pt_1()
+                        .font_buffer(cx)
+                        .text_size(px(10.5))
+                        .text_color(colors.text_muted)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(summary),
+                )
+            });
 
         v_flex()
             .id("star_details_panel")
@@ -919,7 +1241,6 @@ impl Render for StarDetailsPanel {
                                     .child(
                                         div()
                                             .min_w_0()
-                                            .flex_1()
                                             .text_size(px(14.0))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(colors.text)
@@ -927,6 +1248,31 @@ impl Render for StarDetailsPanel {
                                             .whitespace_nowrap()
                                             .text_ellipsis()
                                             .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .px_1p5()
+                                            .py(px(1.0))
+                                            .rounded_sm()
+                                            .bg(if is_solar_system {
+                                                star_color.opacity(0.18)
+                                            } else {
+                                                colors.element_background
+                                            })
+                                            .border_1()
+                                            .border_color(if is_solar_system {
+                                                star_color.opacity(0.45)
+                                            } else {
+                                                colors.border_variant
+                                            })
+                                            .text_size(px(9.5))
+                                            .text_color(if is_solar_system {
+                                                star_color
+                                            } else {
+                                                colors.text_muted
+                                            })
+                                            .child(category_badge),
                                     ),
                             )
                             .when_some(subtitle, |el, sub| {
@@ -944,7 +1290,7 @@ impl Render for StarDetailsPanel {
                     .child(
                         IconButton::new("close_star_details_btn", IconName::Close)
                             .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Close star details"))
+                            .tooltip(Tooltip::text("Close details"))
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.close_panel(cx);
                             })),
@@ -1090,52 +1436,8 @@ impl Render for StarDetailsPanel {
                     ),
             )
             .child(div().h(px(1.0)).w_full().bg(colors.border_variant))
-            // 3. Compact photometry, coordinates & identifiers section
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_1p5()
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(metric_cell("Mag", format!("G {:.2}", star.mag)))
-                            .child(metric_cell(
-                                "Class",
-                                format!("{}-type", star.spectral_class),
-                            )),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(metric_cell("BP-RP", format!("{:+.2}", star.bp_rp)))
-                            .child(metric_cell("Teff", format!("~{} K", star.estimated_teff_k))),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(metric_cell("RA", ra_text))
-                            .child(metric_cell("Dec", dec_text)),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(metric_cell("Az", az_text))
-                            .child(metric_cell("Alt", alt_text)),
-                    )
-                    .when_some(ids_summary, |el, summary| {
-                        el.child(
-                            div()
-                                .pt_1()
-                                .font_buffer(cx)
-                                .text_size(px(10.5))
-                                .text_color(colors.text_muted)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(summary),
-                        )
-                    }),
-            )
+            // 3. Compact photometry / solar-system ephemeris, coordinates & identifiers section
+            .child(details_metrics_section)
             .into_any_element()
     }
 }
@@ -1146,7 +1448,7 @@ impl Panel for StarDetailsPanel {
     }
 
     fn title(&self, _cx: &App) -> gpui::SharedString {
-        "Star Details".into()
+        "Object Details".into()
     }
 
     fn position(&self, _cx: &App) -> DockPosition {

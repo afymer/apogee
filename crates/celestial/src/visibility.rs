@@ -1,8 +1,10 @@
+use glam::DVec3;
 use hifitime::Epoch;
 
-use crate::coords::{Angle, geodetic::GeodeticPosition};
+use crate::coords::{Angle, geodetic::GeodeticPosition, topocentric_spherical_to_enu};
 use crate::horizon::HorizonProfile;
 use crate::observer::ObservationContext;
+use crate::solar::{SolarSystemBody, solar_system_ephemeris};
 
 /// Computes topocentric `(azimuth_deg, altitude_deg)` for an equatorial ICRS target.
 pub fn equatorial_az_alt_deg(
@@ -26,6 +28,16 @@ pub fn equatorial_altitude_deg(
     equatorial_az_alt_deg(location, epoch, ra, dec).1
 }
 
+/// Computes topocentric `(azimuth_deg, altitude_deg)` for a [`SolarSystemBody`].
+pub fn solar_system_az_alt_deg(
+    location: GeodeticPosition,
+    epoch: Epoch,
+    body: SolarSystemBody,
+) -> (f64, f64) {
+    let eph = solar_system_ephemeris(body, location, epoch);
+    (eph.az_deg, eph.alt_deg)
+}
+
 /// Samples topocentric `(azimuth_deg, altitude_deg)` evenly across a 24-hour window `[0h..24h]`.
 pub fn sample_day_equatorial_track(
     location: GeodeticPosition,
@@ -34,12 +46,34 @@ pub fn sample_day_equatorial_track(
     dec: Angle,
     samples: usize,
 ) -> Vec<(f64, f64)> {
+    sample_day_track_with(local_midnight_unix_secs, samples, &|epoch| {
+        equatorial_az_alt_deg(location, epoch, ra, dec)
+    })
+}
+
+/// Samples topocentric `(azimuth_deg, altitude_deg)` for a [`SolarSystemBody`] across `[0h..24h]`.
+pub fn sample_day_solar_system_track(
+    location: GeodeticPosition,
+    local_midnight_unix_secs: f64,
+    body: SolarSystemBody,
+    samples: usize,
+) -> Vec<(f64, f64)> {
+    sample_day_track_with(local_midnight_unix_secs, samples, &|epoch| {
+        solar_system_az_alt_deg(location, epoch, body)
+    })
+}
+
+fn sample_day_track_with(
+    local_midnight_unix_secs: f64,
+    samples: usize,
+    az_alt_at_epoch: &impl Fn(Epoch) -> (f64, f64),
+) -> Vec<(f64, f64)> {
     let count = samples.max(2);
     let denom = (count - 1) as f64;
     (0..count)
         .map(|i| {
             let t_secs = local_midnight_unix_secs + (i as f64 / denom) * 86_400.0;
-            equatorial_az_alt_deg(location, Epoch::from_unix_seconds(t_secs), ra, dec)
+            az_alt_at_epoch(Epoch::from_unix_seconds(t_secs))
         })
         .collect()
 }
@@ -63,6 +97,7 @@ pub fn sample_day_equatorial_altitude(
 pub struct DailyTargetVisibility {
     pub rise_hour: Option<f64>,
     pub transit_hour: f64,
+    pub lower_transit_hour: f64,
     pub max_altitude_deg: f64,
     pub min_altitude_deg: f64,
     pub set_hour: Option<f64>,
@@ -70,38 +105,80 @@ pub struct DailyTargetVisibility {
     pub never_rises: bool,
 }
 
-fn clearance_at_hour(
-    location: GeodeticPosition,
+/// Notable event kind marked along a selected object's trajectory in the planetarium.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TrajectoryPointKind {
+    Rise,
+    Transit,
+    Set,
+    LowerTransit,
+}
+
+impl TrajectoryPointKind {
+    /// Short display label for planetarium trajectory badges.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rise => "Rise",
+            Self::Transit => "Transit",
+            Self::Set => "Set",
+            Self::LowerTransit => "Low",
+        }
+    }
+}
+
+/// Notable event point (Rise, Transit, Set, or Lower Culmination) along a daily trajectory.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrajectoryEventPoint {
+    pub kind: TrajectoryPointKind,
+    pub hour: f64,
+    pub az_deg: f64,
+    pub alt_deg: f64,
+    pub topo_enu: DVec3,
+    pub above_horizon: bool,
+}
+
+/// Single sampled point along an object's 24-hour topocentric sky trajectory.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrajectorySample {
+    pub hour: f64,
+    pub az_deg: f64,
+    pub alt_deg: f64,
+    pub topo_enu: DVec3,
+    pub above_horizon: bool,
+}
+
+/// Complete 24-hour topocentric sky trajectory, visibility summary, and notable event markers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DailyTrajectory {
+    pub samples: Vec<TrajectorySample>,
+    pub events: Vec<TrajectoryEventPoint>,
+    pub visibility: DailyTargetVisibility,
+}
+
+fn clearance_at_hour_with(
     local_midnight_unix_secs: f64,
-    ra: Angle,
-    dec: Angle,
     hour: f64,
     horizon: Option<&HorizonProfile>,
+    az_alt_at_epoch: &impl Fn(Epoch) -> (f64, f64),
 ) -> f64 {
-    let (az, alt) = equatorial_az_alt_deg(
-        location,
-        Epoch::from_unix_seconds(local_midnight_unix_secs + hour * 3600.0),
-        ra,
-        dec,
-    );
+    let (az, alt) = az_alt_at_epoch(Epoch::from_unix_seconds(
+        local_midnight_unix_secs + hour * 3600.0,
+    ));
     alt - horizon.map_or(0.0, |prof| prof.altitude_at_azimuth_deg(az))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn refine_clearance_crossing(
-    location: GeodeticPosition,
+fn refine_clearance_crossing_with(
     local_midnight_unix_secs: f64,
-    ra: Angle,
-    dec: Angle,
     horizon: Option<&HorizonProfile>,
     mut h_lo: f64,
     mut h_hi: f64,
     rising: bool,
+    az_alt_at_epoch: &impl Fn(Epoch) -> (f64, f64),
 ) -> f64 {
     for _ in 0..8 {
         let mid = f64::midpoint(h_lo, h_hi);
         let clearance =
-            clearance_at_hour(location, local_midnight_unix_secs, ra, dec, mid, horizon);
+            clearance_at_hour_with(local_midnight_unix_secs, mid, horizon, az_alt_at_epoch);
         let above = clearance >= 0.0;
         if (rising && above) || (!rising && !above) {
             h_hi = mid;
@@ -112,32 +189,26 @@ fn refine_clearance_crossing(
     f64::midpoint(h_lo, h_hi)
 }
 
-fn refine_extremum(
-    location: GeodeticPosition,
+fn refine_extremum_with(
     local_midnight_unix_secs: f64,
-    ra: Angle,
-    dec: Angle,
     mut h_lo: f64,
     mut h_hi: f64,
     find_max: bool,
+    az_alt_at_epoch: &impl Fn(Epoch) -> (f64, f64),
 ) -> (f64, f64) {
     // 2/3-point ternary search converges quickly on the unimodal transit/lower-culmination window.
     for _ in 0..26 {
         let third = (h_hi - h_lo) / 3.0;
         let m1 = h_lo + third;
         let m2 = h_hi - third;
-        let a1 = equatorial_altitude_deg(
-            location,
-            Epoch::from_unix_seconds(local_midnight_unix_secs + m1 * 3600.0),
-            ra,
-            dec,
-        );
-        let a2 = equatorial_altitude_deg(
-            location,
-            Epoch::from_unix_seconds(local_midnight_unix_secs + m2 * 3600.0),
-            ra,
-            dec,
-        );
+        let a1 = az_alt_at_epoch(Epoch::from_unix_seconds(
+            local_midnight_unix_secs + m1 * 3600.0,
+        ))
+        .1;
+        let a2 = az_alt_at_epoch(Epoch::from_unix_seconds(
+            local_midnight_unix_secs + m2 * 3600.0,
+        ))
+        .1;
         let move_right = if find_max { a1 < a2 } else { a1 > a2 };
         if move_right {
             h_lo = m1;
@@ -146,12 +217,10 @@ fn refine_extremum(
         }
     }
     let mid = f64::midpoint(h_lo, h_hi);
-    let alt = equatorial_altitude_deg(
-        location,
-        Epoch::from_unix_seconds(local_midnight_unix_secs + mid * 3600.0),
-        ra,
-        dec,
-    );
+    let alt = az_alt_at_epoch(Epoch::from_unix_seconds(
+        local_midnight_unix_secs + mid * 3600.0,
+    ))
+    .1;
     (mid, alt)
 }
 
@@ -169,9 +238,9 @@ pub fn compute_target_visibility(
 /// Computes rise, transit, set, and visibility flags over `[0h, 24h]` from `local_midnight_unix_secs`,
 /// optionally accounting for a custom [`HorizonProfile`].
 ///
-/// `transit_hour`, `max_altitude_deg`, and `min_altitude_deg` always report the true astronomical
-/// culmination values; `rise_hour`, `set_hour`, `circumpolar`, and `never_rises` reflect visibility
-/// above `horizon` (or `0°` when `None`).
+/// `transit_hour`, `lower_transit_hour`, `max_altitude_deg`, and `min_altitude_deg` always report
+/// the true astronomical culmination values; `rise_hour`, `set_hour`, `circumpolar`, and `never_rises`
+/// reflect visibility above `horizon` (or `0°` when `None`).
 pub fn compute_target_visibility_with_horizon(
     location: GeodeticPosition,
     local_midnight_unix_secs: f64,
@@ -179,16 +248,33 @@ pub fn compute_target_visibility_with_horizon(
     dec: Angle,
     horizon: Option<&HorizonProfile>,
 ) -> DailyTargetVisibility {
+    compute_visibility_with_horizon_fn(local_midnight_unix_secs, horizon, &|epoch| {
+        equatorial_az_alt_deg(location, epoch, ra, dec)
+    })
+}
+
+/// Computes rise, transit, set, and visibility flags for a [`SolarSystemBody`] over `[0h, 24h]`,
+/// optionally accounting for a custom [`HorizonProfile`].
+pub fn compute_solar_system_visibility_with_horizon(
+    location: GeodeticPosition,
+    local_midnight_unix_secs: f64,
+    body: SolarSystemBody,
+    horizon: Option<&HorizonProfile>,
+) -> DailyTargetVisibility {
+    compute_visibility_with_horizon_fn(local_midnight_unix_secs, horizon, &|epoch| {
+        solar_system_az_alt_deg(location, epoch, body)
+    })
+}
+
+fn compute_visibility_with_horizon_fn(
+    local_midnight_unix_secs: f64,
+    horizon: Option<&HorizonProfile>,
+    az_alt_at_epoch: &impl Fn(Epoch) -> (f64, f64),
+) -> DailyTargetVisibility {
     let steps: usize = if horizon.is_some() { 288 } else { 96 };
     let step_hours = 24.0 / steps as f64;
 
-    let track = sample_day_equatorial_track(
-        location,
-        local_midnight_unix_secs,
-        ra,
-        dec,
-        steps + 1,
-    );
+    let track = sample_day_track_with(local_midnight_unix_secs, steps + 1, az_alt_at_epoch);
 
     let mut profile = Vec::with_capacity(track.len());
     let mut clearances = Vec::with_capacity(track.len());
@@ -211,14 +297,12 @@ pub fn compute_target_visibility_with_horizon(
 
     let max_lo = max_idx.saturating_sub(1) as f64 * step_hours;
     let max_hi = (max_idx + 1).min(steps) as f64 * step_hours;
-    let (refined_transit, refined_max) = refine_extremum(
-        location,
+    let (refined_transit, refined_max) = refine_extremum_with(
         local_midnight_unix_secs,
-        ra,
-        dec,
         max_lo,
         max_hi,
         true,
+        az_alt_at_epoch,
     );
     let (transit_hour, max_altitude_deg) = if refined_max >= profile[max_idx] {
         (refined_transit, refined_max)
@@ -228,16 +312,18 @@ pub fn compute_target_visibility_with_horizon(
 
     let min_lo = min_idx.saturating_sub(1) as f64 * step_hours;
     let min_hi = (min_idx + 1).min(steps) as f64 * step_hours;
-    let (_, refined_min) = refine_extremum(
-        location,
+    let (refined_lower_transit, refined_min) = refine_extremum_with(
         local_midnight_unix_secs,
-        ra,
-        dec,
         min_lo,
         min_hi,
         false,
+        az_alt_at_epoch,
     );
-    let min_altitude_deg = refined_min.min(profile[min_idx]);
+    let (lower_transit_hour, min_altitude_deg) = if refined_min <= profile[min_idx] {
+        (refined_lower_transit, refined_min)
+    } else {
+        (min_idx as f64 * step_hours, profile[min_idx])
+    };
 
     let mut intervals: Vec<(f64, f64)> = Vec::new();
     let mut open_start: Option<f64> = if clearances[0] >= 0.0 {
@@ -253,27 +339,23 @@ pub fn compute_target_visibility_with_horizon(
         let h1 = i as f64 * step_hours;
 
         if prev < 0.0 && curr >= 0.0 {
-            let rise = refine_clearance_crossing(
-                location,
+            let rise = refine_clearance_crossing_with(
                 local_midnight_unix_secs,
-                ra,
-                dec,
                 horizon,
                 h0,
                 h1,
                 true,
+                az_alt_at_epoch,
             );
             open_start = Some(rise);
         } else if prev >= 0.0 && curr < 0.0 {
-            let set = refine_clearance_crossing(
-                location,
+            let set = refine_clearance_crossing_with(
                 local_midnight_unix_secs,
-                ra,
-                dec,
                 horizon,
                 h0,
                 h1,
                 false,
+                az_alt_at_epoch,
             );
             if let Some(start) = open_start.take() {
                 intervals.push((start, set));
@@ -333,11 +415,159 @@ pub fn compute_target_visibility_with_horizon(
     DailyTargetVisibility {
         rise_hour,
         transit_hour,
+        lower_transit_hour,
         max_altitude_deg,
         min_altitude_deg,
         set_hour,
         circumpolar,
         never_rises,
+    }
+}
+
+/// Builds a 24-hour topocentric [`DailyTrajectory`] and notable event markers (Rise, Transit, Set,
+/// Lower Culmination) for an equatorial ICRS target.
+pub fn compute_equatorial_daily_trajectory(
+    location: GeodeticPosition,
+    local_midnight_unix_secs: f64,
+    ra: Angle,
+    dec: Angle,
+    horizon: Option<&HorizonProfile>,
+    base_samples: usize,
+) -> DailyTrajectory {
+    compute_daily_trajectory_with(local_midnight_unix_secs, horizon, base_samples, &|epoch| {
+        equatorial_az_alt_deg(location, epoch, ra, dec)
+    })
+}
+
+/// Builds a 24-hour topocentric [`DailyTrajectory`] and notable event markers (Rise, Transit, Set,
+/// Lower Culmination) for a [`SolarSystemBody`].
+pub fn compute_solar_system_daily_trajectory(
+    location: GeodeticPosition,
+    local_midnight_unix_secs: f64,
+    body: SolarSystemBody,
+    horizon: Option<&HorizonProfile>,
+    base_samples: usize,
+) -> DailyTrajectory {
+    compute_daily_trajectory_with(local_midnight_unix_secs, horizon, base_samples, &|epoch| {
+        solar_system_az_alt_deg(location, epoch, body)
+    })
+}
+
+fn compute_daily_trajectory_with(
+    local_midnight_unix_secs: f64,
+    horizon: Option<&HorizonProfile>,
+    base_samples: usize,
+    az_alt_at_epoch: &impl Fn(Epoch) -> (f64, f64),
+) -> DailyTrajectory {
+    let visibility =
+        compute_visibility_with_horizon_fn(local_midnight_unix_secs, horizon, az_alt_at_epoch);
+
+    let count = base_samples.max(25);
+    let denom = (count - 1) as f64;
+    let mut hours: Vec<f64> = (0..count).map(|i| (i as f64 / denom) * 24.0).collect();
+
+    for event_hour in [
+        visibility.rise_hour,
+        Some(visibility.transit_hour),
+        visibility.set_hour,
+        Some(visibility.lower_transit_hour),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let h = event_hour.clamp(0.0, 24.0);
+        if hours.iter().all(|&existing| (existing - h).abs() > 1e-4) {
+            hours.push(h);
+        }
+    }
+    hours.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let sample_at_hour = |hour: f64, force_above: bool| -> TrajectorySample {
+        let (az_deg, alt_deg) = az_alt_at_epoch(Epoch::from_unix_seconds(
+            local_midnight_unix_secs + hour * 3600.0,
+        ));
+        let topo_enu = topocentric_spherical_to_enu(
+            Angle::from_degrees(az_deg),
+            Angle::from_degrees(alt_deg),
+        )
+        .normalize_or_zero();
+        let h_alt = horizon.map_or(0.0, |prof| prof.altitude_at_azimuth_deg(az_deg));
+        let above_horizon = force_above || alt_deg >= h_alt - 1e-3;
+        TrajectorySample {
+            hour,
+            az_deg,
+            alt_deg,
+            topo_enu,
+            above_horizon,
+        }
+    };
+
+    let samples: Vec<TrajectorySample> = hours
+        .into_iter()
+        .map(|h| {
+            let is_rise_or_set = visibility
+                .rise_hour
+                .is_some_and(|r| (r - h).abs() < 1e-4)
+                || visibility
+                    .set_hour
+                    .is_some_and(|s| (s - h).abs() < 1e-4);
+            sample_at_hour(h, is_rise_or_set)
+        })
+        .collect();
+
+    let mut events = Vec::with_capacity(4);
+    if let Some(rise_h) = visibility.rise_hour {
+        let s = sample_at_hour(rise_h, true);
+        events.push(TrajectoryEventPoint {
+            kind: TrajectoryPointKind::Rise,
+            hour: s.hour,
+            az_deg: s.az_deg,
+            alt_deg: s.alt_deg,
+            topo_enu: s.topo_enu,
+            above_horizon: true,
+        });
+    }
+
+    {
+        let s = sample_at_hour(visibility.transit_hour, false);
+        events.push(TrajectoryEventPoint {
+            kind: TrajectoryPointKind::Transit,
+            hour: s.hour,
+            az_deg: s.az_deg,
+            alt_deg: s.alt_deg,
+            topo_enu: s.topo_enu,
+            above_horizon: s.above_horizon,
+        });
+    }
+
+    if let Some(set_h) = visibility.set_hour {
+        let s = sample_at_hour(set_h, true);
+        events.push(TrajectoryEventPoint {
+            kind: TrajectoryPointKind::Set,
+            hour: s.hour,
+            az_deg: s.az_deg,
+            alt_deg: s.alt_deg,
+            topo_enu: s.topo_enu,
+            above_horizon: true,
+        });
+    }
+
+    if (visibility.lower_transit_hour - visibility.transit_hour).abs() > 0.25 {
+        let s = sample_at_hour(visibility.lower_transit_hour, false);
+        events.push(TrajectoryEventPoint {
+            kind: TrajectoryPointKind::LowerTransit,
+            hour: s.hour,
+            az_deg: s.az_deg,
+            alt_deg: s.alt_deg,
+            topo_enu: s.topo_enu,
+            above_horizon: s.above_horizon,
+        });
+    }
+
+    DailyTrajectory {
+        samples,
+        events,
+        visibility,
     }
 }
 
@@ -510,5 +740,44 @@ mod tests {
         assert!(!vis.never_rises);
         assert!(vis.rise_hour.is_some());
         assert!(vis.set_hour.is_some());
+    }
+
+    #[test]
+    fn daily_trajectory_includes_rise_transit_set_and_solar_system_events() {
+        let paris = GeodeticPosition::from_degrees(48.8566, 2.3522, 35.0);
+        let midnight = Epoch::from_gregorian_utc(2026, 3, 20, 0, 0, 0, 0).to_unix_seconds();
+
+        let sun_traj =
+            compute_solar_system_daily_trajectory(paris, midnight, SolarSystemBody::Sun, None, 97);
+        assert!(sun_traj.samples.len() >= 97);
+        assert!(
+            sun_traj
+                .events
+                .iter()
+                .any(|e| e.kind == TrajectoryPointKind::Rise && e.above_horizon)
+        );
+        let transit = sun_traj
+            .events
+            .iter()
+            .find(|e| e.kind == TrajectoryPointKind::Transit)
+            .expect("Sun trajectory must have Transit event");
+        assert!(transit.above_horizon);
+        assert!((transit.alt_deg - sun_traj.visibility.max_altitude_deg).abs() < 1e-4);
+        assert!(
+            sun_traj
+                .events
+                .iter()
+                .any(|e| e.kind == TrajectoryPointKind::Set && e.above_horizon)
+        );
+
+        let moon_traj =
+            compute_solar_system_daily_trajectory(paris, midnight, SolarSystemBody::Moon, None, 97);
+        assert!(moon_traj.samples.len() >= 97);
+        assert!(
+            moon_traj
+                .events
+                .iter()
+                .any(|e| e.kind == TrajectoryPointKind::Transit)
+        );
     }
 }

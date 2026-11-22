@@ -22,6 +22,9 @@ pub const DEFAULT_HIPS_SURVEY_OPACITY: f32 = 1.0;
 /// Default normalized opacity for the catalog stars layer.
 pub const DEFAULT_STARS_OPACITY: f32 = 1.0;
 
+/// Default normalized opacity for the solar-system bodies layer (Sun and Moon).
+pub const DEFAULT_SOLAR_SYSTEM_OPACITY: f32 = 1.0;
+
 /// Default normalized opacity for coordinate grid overlays (Alt/Az and Equatorial).
 pub const DEFAULT_GRID_OPACITY: f32 = 1.0;
 
@@ -51,6 +54,10 @@ fn default_hips_survey_opacity() -> f32 {
 
 fn default_stars_opacity() -> f32 {
     DEFAULT_STARS_OPACITY
+}
+
+fn default_solar_system_opacity() -> f32 {
+    DEFAULT_SOLAR_SYSTEM_OPACITY
 }
 
 fn default_grid_opacity() -> f32 {
@@ -239,6 +246,38 @@ impl StarsSettings {
     }
 }
 
+/// Solar-system bodies (Sun and Moon) rendering settings in the planetarium.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SolarSystemSettings {
+    /// Whether solar-system objects (Sun, Moon) are displayed.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Normalized solar-system layer opacity in `[0.0, 1.0]`.
+    #[serde(default = "default_solar_system_opacity")]
+    pub opacity: f32,
+}
+
+impl Default for SolarSystemSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            opacity: DEFAULT_SOLAR_SYSTEM_OPACITY,
+        }
+    }
+}
+
+impl SolarSystemSettings {
+    /// Clamps finite opacity into `[0.0, 1.0]` and resets non-finite values to the default.
+    pub fn sanitize(&mut self) {
+        sanitize_unit_interval(&mut self.opacity, DEFAULT_SOLAR_SYSTEM_OPACITY);
+    }
+
+    /// Returns the effective opacity in `[0.0, 1.0]`, or `0.0` when disabled.
+    pub fn effective_opacity(&self) -> f32 {
+        effective_unit_interval(self.enabled, self.opacity, DEFAULT_SOLAR_SYSTEM_OPACITY)
+    }
+}
+
 /// Coordinate grid overlay settings (horizontal Alt/Az and equatorial RA/Dec) in the planetarium.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridLayerSettings {
@@ -289,6 +328,9 @@ pub struct PlanetariumSettings {
     /// Catalog point-star rendering settings.
     #[serde(default)]
     pub stars: StarsSettings,
+    /// Solar-system bodies (Sun and Moon) rendering settings.
+    #[serde(default)]
+    pub solar_system: SolarSystemSettings,
     /// Horizontal (Azimuth / Altitude) coordinate grid settings.
     #[serde(default)]
     pub altaz_grid: GridLayerSettings,
@@ -355,6 +397,7 @@ impl Persistable for AppSettings {
         self.planetarium.horizon.sanitize();
         self.planetarium.hips_survey.sanitize();
         self.planetarium.stars.sanitize();
+        self.planetarium.solar_system.sanitize();
         self.planetarium.altaz_grid.sanitize();
         self.planetarium.equatorial_grid.sanitize();
     }

@@ -16,9 +16,16 @@ pub use horizon::{
 };
 pub use observer::ObservationContext;
 pub use projection::{CameraProjection, ProjectionKind};
+pub use solar::{
+    LunarPhaseInfo, SkyPhase, SolarSystemBody, SolarSystemEphemeris, lunar_ephemeris,
+    lunar_geocentric_of_date, lunar_topocentric_of_date, solar_ephemeris, solar_system_ephemeris,
+};
 pub use visibility::{
-    DailyTargetVisibility, compute_target_visibility, compute_target_visibility_with_horizon,
-    equatorial_altitude_deg, equatorial_az_alt_deg, sample_day_equatorial_altitude,
-    sample_day_equatorial_track,
+    DailyTargetVisibility, DailyTrajectory, TrajectoryEventPoint, TrajectoryPointKind,
+    TrajectorySample, compute_equatorial_daily_trajectory, compute_solar_system_daily_trajectory,
+    compute_solar_system_visibility_with_horizon, compute_target_visibility,
+    compute_target_visibility_with_horizon, equatorial_altitude_deg, equatorial_az_alt_deg,
+    sample_day_equatorial_altitude, sample_day_equatorial_track, sample_day_solar_system_track,
+    solar_system_az_alt_deg,
 };
 
