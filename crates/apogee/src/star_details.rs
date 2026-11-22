@@ -18,6 +18,7 @@ actions!(planetarium, [ClearSelection]);
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_day_profile};
 use planetarium::{PickedSolarSystemBody, PickedStar};
+use settings::ToggleObjectDetails;
 use status_bar::{format_altaz, format_radec};
 use ui::{
     ActiveTheme, ButtonCommon, Clickable, IconButton, IconName, IconSize, StyledTypography,
@@ -43,6 +44,13 @@ const ICON_CENTER_TARGET: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 
   <circle cx="12" cy="12" r="5.5" stroke="black" stroke-width="1.6"/>
   <circle cx="12" cy="12" r="1.4" fill="black"/>
   <path d="M12 3V6.5M12 17.5V21M3 12H6.5M17.5 12H21" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
+</svg>"##;
+
+const ICON_TRAJECTORY: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M3.5 17.5C6.5 8 17.5 8 20.5 17.5" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="12" cy="10.4" r="2.1" fill="black"/>
+  <circle cx="5.5" cy="14" r="1.2" fill="black"/>
+  <circle cx="18.5" cy="14" r="1.2" fill="black"/>
 </svg>"##;
 
 pub(crate) const ICON_GRAPH_CENTER_NOON: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -259,15 +267,26 @@ impl SelectedObject {
     }
 }
 
-#[derive(Default)]
 pub struct StarSelectionModel {
     selected: Option<SelectedObject>,
     activation_nonce: u64,
+    show_trajectory: bool,
+}
+
+impl Default for StarSelectionModel {
+    fn default() -> Self {
+        Self {
+            selected: None,
+            activation_nonce: 0,
+            show_trajectory: true,
+        }
+    }
 }
 
 impl StarSelectionModel {
     pub fn select_object(&mut self, object: SelectedObject, cx: &mut Context<Self>) {
         self.selected = Some(object);
+        self.show_trajectory = true;
         self.activation_nonce = self.activation_nonce.wrapping_add(1);
         cx.notify();
     }
@@ -279,8 +298,27 @@ impl StarSelectionModel {
         }
     }
 
+    pub fn hide_trajectory(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_some() && self.show_trajectory {
+            self.show_trajectory = false;
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_trajectory(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_some() {
+            self.show_trajectory = !self.show_trajectory;
+            cx.notify();
+        }
+    }
+
+    pub fn show_trajectory(&self) -> bool {
+        self.show_trajectory
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         if self.selected.take().is_some() {
+            self.show_trajectory = true;
             self.activation_nonce = self.activation_nonce.wrapping_add(1);
             cx.notify();
         }
@@ -300,6 +338,11 @@ pub struct GlobalStarSelection(pub Entity<StarSelectionModel>);
 
 impl gpui::Global for GlobalStarSelection {}
 
+#[derive(Clone)]
+pub struct GlobalStarDetailsPanel(pub Entity<StarDetailsPanel>);
+
+impl gpui::Global for GlobalStarDetailsPanel {}
+
 pub fn init(cx: &mut App) {
     let selection = cx.new(|_| StarSelectionModel::default());
     cx.set_global(GlobalStarSelection(selection));
@@ -316,9 +359,18 @@ pub fn init(cx: &mut App) {
         }
     });
 
+    cx.on_action(|_: &ToggleObjectDetails, cx| {
+        if let Some(panel) = cx.try_global::<GlobalStarDetailsPanel>().map(|g| g.0.clone()) {
+            panel.update(cx, |this, cx| {
+                this.toggle_panel(cx);
+            });
+        }
+    });
+
     cx.observe_new(|workbench: &mut workspace::workbench::Workbench, window, cx| {
         if let Some(window) = window {
             let panel = StarDetailsPanel::build(cx);
+            cx.set_global(GlobalStarDetailsPanel(panel.clone()));
             cx.observe(&panel, |_this, _panel, cx| {
                 cx.notify();
             })
@@ -393,8 +445,6 @@ impl StarDetailsPanel {
                     this.last_activation_nonce = nonce;
                     if has_selection {
                         cx.emit(PanelEvent::Activate);
-                    } else {
-                        cx.emit(PanelEvent::Close);
                     }
                 }
                 cx.notify();
@@ -584,6 +634,10 @@ impl StarDetailsPanel {
 
     fn close_panel(&self, cx: &mut Context<Self>) {
         cx.emit(PanelEvent::Close);
+    }
+
+    fn toggle_panel(&self, cx: &mut Context<Self>) {
+        cx.emit(PanelEvent::Toggle);
     }
 }
 
@@ -1078,9 +1132,13 @@ pub(crate) fn format_local_hour_hm(hour: f64) -> String {
 impl Render for StarDetailsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let selected = cx
+        let (selected, show_trajectory) = cx
             .try_global::<GlobalStarSelection>()
-            .and_then(|g| g.0.read(cx).selected_object().cloned());
+            .map(|g| {
+                let model = g.0.read(cx);
+                (model.selected_object().cloned(), model.show_trajectory())
+            })
+            .unwrap_or((None, true));
 
         let Some(selected_obj) = selected else {
             return v_flex()
@@ -1606,6 +1664,45 @@ impl Render for StarDetailsPanel {
                                     ),
                             )
                             .child(
+                                div()
+                                    .id("toggle_trajectory_btn")
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .when(show_trajectory, |s| s.bg(colors.ghost_element_selected))
+                                    .hover(|s| s.bg(colors.ghost_element_hover))
+                                    .tooltip(Tooltip::text(if show_trajectory {
+                                        "Hide trajectory"
+                                    } else {
+                                        "Show trajectory"
+                                    }))
+                                    .on_click(cx.listener(|_this, _event, _window, cx| {
+                                        if let Some(selection) = cx
+                                            .try_global::<GlobalStarSelection>()
+                                            .map(|g| g.0.clone())
+                                        {
+                                            selection.update(cx, |model, cx| {
+                                                model.toggle_trajectory(cx);
+                                            });
+                                        }
+                                    }))
+                                    .child(
+                                        svg()
+                                            .data(ICON_TRAJECTORY)
+                                            .size(px(14.0))
+                                            .flex_none()
+                                            .text_color(if show_trajectory {
+                                                colors.text
+                                            } else {
+                                                colors.text_muted.opacity(0.6)
+                                            }),
+                                    ),
+                            )
+                            .child(
                                 IconButton::new("close_star_details_btn", IconName::Close)
                                     .icon_size(IconSize::Small)
                                     .tooltip(Tooltip::text("Close details"))
@@ -1825,5 +1922,115 @@ impl Panel for StarDetailsPanel {
 
     fn min_size(&self, _cx: &App) -> Pixels {
         px(260.)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    #[gpui::test]
+    fn hide_and_toggle_trajectory_preserve_selection_and_nonce(cx: &mut TestAppContext) {
+        let selection = cx.new(|_| StarSelectionModel::default());
+        selection.update(cx, |model, cx| {
+            model.select_object(SelectedObject::SolarSystem(SolarSystemBody::Sun), cx);
+        });
+        let nonce_after_select = selection.read_with(cx, |m, _| {
+            assert!(m.show_trajectory());
+            assert_eq!(
+                m.selected_object(),
+                Some(&SelectedObject::SolarSystem(SolarSystemBody::Sun))
+            );
+            m.activation_nonce()
+        });
+
+        // Right-clicking hides trajectory while keeping selection and camera tracking nonce intact.
+        selection.update(cx, |model, cx| {
+            model.hide_trajectory(cx);
+        });
+        selection.read_with(cx, |m, _| {
+            assert!(!m.show_trajectory());
+            assert_eq!(
+                m.selected_object(),
+                Some(&SelectedObject::SolarSystem(SolarSystemBody::Sun))
+            );
+            assert_eq!(m.activation_nonce(), nonce_after_select);
+        });
+
+        // Toggle button shows it again, then hides it again.
+        selection.update(cx, |model, cx| {
+            model.toggle_trajectory(cx);
+        });
+        selection.read_with(cx, |m, _| {
+            assert!(m.show_trajectory());
+            assert_eq!(m.activation_nonce(), nonce_after_select);
+        });
+
+        selection.update(cx, |model, cx| {
+            model.toggle_trajectory(cx);
+        });
+        selection.read_with(cx, |m, _| {
+            assert!(!m.show_trajectory());
+        });
+
+        // Selecting another object restores trajectory visibility.
+        selection.update(cx, |model, cx| {
+            model.select_object(SelectedObject::SolarSystem(SolarSystemBody::Moon), cx);
+        });
+        selection.read_with(cx, |m, _| {
+            assert!(m.show_trajectory());
+            assert_eq!(
+                m.selected_object(),
+                Some(&SelectedObject::SolarSystem(SolarSystemBody::Moon))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn clearing_selection_does_not_close_details_panel_and_toggle_emits_toggle(
+        cx: &mut TestAppContext,
+    ) {
+        let events: Rc<RefCell<Vec<PanelEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = events.clone();
+
+        let (selection, panel) = cx.update(|cx| {
+            init(cx);
+            let selection = cx.global::<GlobalStarSelection>().0.clone();
+            let panel = StarDetailsPanel::build(cx);
+            cx.subscribe(&panel, move |_panel, event: &PanelEvent, _cx| {
+                events_clone.borrow_mut().push(*event);
+            })
+            .detach();
+            (selection, panel)
+        });
+
+        // Selecting an object activates the panel.
+        selection.update(cx, |model, cx| {
+            model.select_object(SelectedObject::SolarSystem(SolarSystemBody::Sun), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(*events.borrow(), vec![PanelEvent::Activate]);
+
+        // Clearing selection (Escape) must NOT emit PanelEvent::Close.
+        selection.update(cx, |model, cx| {
+            model.clear(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(*events.borrow(), vec![PanelEvent::Activate]);
+
+        // Toggling emits PanelEvent::Toggle.
+        panel.update(cx, |this, cx| {
+            this.toggle_panel(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *events.borrow(),
+            vec![PanelEvent::Activate, PanelEvent::Toggle]
+        );
     }
 }

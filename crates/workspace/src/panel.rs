@@ -9,6 +9,7 @@ use crate::{WorkspaceKind, dock::DockPosition};
 pub enum PanelEvent {
     Activate,
     Close,
+    Toggle,
 }
 
 pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized + 'static {

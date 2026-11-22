@@ -521,29 +521,25 @@ impl PlanetariumCamera {
             self.target_yaw = target_yaw;
             self.target_pitch = target_pitch;
 
-            let unlock_threshold = (self.fov_y * 0.05).max(5e-3);
-            let mut current_dir = self.forward_direction();
-            if let Some(prev_target_dir) = self.tracking_prev_target_dir {
-                let target_step = prev_target_dir.dot(target_dir).clamp(-1.0, 1.0).acos();
-                if target_step > 0.0 && target_step <= unlock_threshold {
-                    // Feed-forward continuous sidereal/orbital motion so slewing converges with
-                    // zero steady-state lag even at maximum zoom.
-                    current_dir = (DQuat::from_rotation_arc(prev_target_dir, target_dir)
-                        * current_dir)
-                        .normalize_or_zero();
-                }
-            }
-            self.tracking_prev_target_dir = Some(target_dir);
-
-            let theta = current_dir.dot(target_dir).clamp(-1.0, 1.0).acos();
-            if self.tracking_locked && theta > unlock_threshold {
-                self.tracking_locked = false;
-            }
-
             if self.tracking_locked {
                 self.yaw = target_yaw;
                 self.pitch = target_pitch;
+                self.tracking_prev_target_dir = Some(target_dir);
             } else {
+                let mut current_dir = self.forward_direction();
+                if let Some(prev_target_dir) = self.tracking_prev_target_dir {
+                    let target_step = prev_target_dir.dot(target_dir).clamp(-1.0, 1.0).acos();
+                    if target_step > 0.0 && target_step < std::f64::consts::FRAC_PI_2 {
+                        // Feed-forward continuous sidereal/orbital motion so slewing converges
+                        // with zero steady-state lag even at maximum zoom.
+                        current_dir = (DQuat::from_rotation_arc(prev_target_dir, target_dir)
+                            * current_dir)
+                            .normalize_or_zero();
+                    }
+                }
+                self.tracking_prev_target_dir = Some(target_dir);
+
+                let theta = current_dir.dot(target_dir).clamp(-1.0, 1.0).acos();
                 let lock_threshold = (self.fov_y * 1e-4).clamp(1e-8, 1e-5);
                 if theta <= lock_threshold {
                     self.yaw = target_yaw;
@@ -1170,15 +1166,16 @@ mod tests {
             .expect("tracked moon must remain centered after switching view mode");
         assert!(ndc_eq.0.hypot(ndc_eq.1) < 1e-6);
 
-        // Large time jump in Horizontal mode unlocks and smoothly slews instead of snapping.
+        // Time jump in Horizontal mode while locked snaps immediately to keep the target centered.
         cam.set_view_mode(ViewMode::Horizontal);
         cam.observer.set_epoch_unix_seconds(t0 + 3.0 * 3600.0);
         cam.update(1.0 / 60.0);
-        assert!(cam.is_tracking_slewing());
-        for _ in 0..180 {
-            cam.update(1.0 / 60.0);
-        }
         assert!(cam.is_tracking_locked());
+        let ndc_jump = cam
+            .view_info(aspect)
+            .project_icrs_to_ndc(target.icrs_dir(&cam.observer))
+            .expect("tracked moon must remain centered immediately after time jump");
+        assert!(ndc_jump.0.hypot(ndc_jump.1) < 1e-6);
 
         // Panning detaches tracking cleanly.
         cam.pan(25.0, -10.0, 900.0);

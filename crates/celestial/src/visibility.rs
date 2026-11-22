@@ -555,6 +555,18 @@ pub fn compute_solar_system_window_trajectory(
     }
 
     let mut hours: Vec<f64> = (0..count).map(|i| i as f64 * step_hours).collect();
+    // Insert exact clock half-hour boundaries (covering both integer-hour and half-hour
+    // timezones) so hourly markers along sliding windows sit at exact ephemeris positions
+    // with zero jitter as time advances.
+    let first_half_hour = (start_unix_secs / 1800.0).ceil() as i64;
+    let last_half_hour = ((start_unix_secs + duration * 3600.0) / 1800.0).floor() as i64;
+    for hh in first_half_hour..=last_half_hour {
+        let h = ((hh as f64 * 1800.0 - start_unix_secs) / 3600.0).clamp(0.0, duration);
+        if hours.iter().all(|&existing| (existing - h).abs() > 1e-4) {
+            hours.push(h);
+        }
+    }
+
     for event_h in rise_hours
         .iter()
         .copied()

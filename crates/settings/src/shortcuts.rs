@@ -31,6 +31,8 @@ actions!(
         OpenKeyboardShortcuts,
         /// Opens the Sky Object Search palette.
         OpenSkySearch,
+        /// Toggles the Object Details side panel.
+        ToggleObjectDetails,
     ]
 );
 
@@ -72,6 +74,14 @@ pub fn shortcut_specs() -> Vec<ShortcutSpec> {
             description: "Search for stars and solar-system objects in the sky.",
             default_binding: Some("secondary-f"),
             make_binding: |binding| KeyBinding::new(binding, OpenSkySearch, None),
+        },
+        ShortcutSpec {
+            id: "apogee::ToggleObjectDetails",
+            title: "Toggle Object Details",
+            category: "Planetarium",
+            description: "Show or hide the Object Details side panel.",
+            default_binding: Some("secondary-b"),
+            make_binding: |binding| KeyBinding::new(binding, ToggleObjectDetails, None),
         },
     ]
 }
@@ -1136,6 +1146,21 @@ mod tests {
             assert!(parsed[0].inner().modifiers.control);
             assert!(!parsed[0].inner().modifiers.shift);
             assert_eq!(format_keystrokes(&parsed), "ctrl-,");
+        }
+    }
+
+    #[test]
+    fn toggle_object_details_default_binding_is_ctrl_b() {
+        let default = default_binding_for_action("apogee::ToggleObjectDetails")
+            .expect("ToggleObjectDetails should have a default binding");
+        let parsed = parse_keystrokes(default).expect("default binding should parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].inner().key, "b");
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(parsed[0].inner().modifiers.control);
+            assert!(!parsed[0].inner().modifiers.shift);
+            assert_eq!(format_keystrokes(&parsed), "ctrl-b");
         }
     }
 

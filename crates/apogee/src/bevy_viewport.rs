@@ -5,12 +5,13 @@ use std::{
 };
 
 use celestial::{
-    DailyTrajectory, HorizonProfile, TrajectoryPointKind, compute_equatorial_daily_trajectory,
-    compute_solar_system_window_trajectory,
+    DailyTrajectory, HorizonProfile, TrajectoryPointKind, TrajectorySample,
+    compute_equatorial_daily_trajectory, compute_solar_system_window_trajectory,
     coords::{Angle, geodetic::GeodeticPosition},
 };
 use components::{Slider, SliderEvent};
 use futures::StreamExt;
+use glam::DVec3;
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -49,6 +50,19 @@ const CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
 const SOLAR_SYSTEM_TRAJ_HALF_WINDOW_HOURS: f64 = 6.0;
 const SOLAR_SYSTEM_TRAJ_DURATION_HOURS: f64 = SOLAR_SYSTEM_TRAJ_HALF_WINDOW_HOURS * 2.0;
 const TRAJ_EDGE_FADE_FRAC: f32 = 0.22;
+const SELECTION_RING_MIN_DIAMETER_PX: f64 = 16.0;
+const SELECTION_RING_MAX_DIAMETER_PX: f64 = 96.0;
+const SELECTION_RING_MARGIN_PX: f64 = 5.0;
+
+/// Opacity multiplier `[0.0..=1.0]` for the selection reticle ring.
+/// Stays `1.0` while the ring fits around the object and smoothly fades out once the
+/// object's rendered radius exceeds the ring's maximum radius.
+fn selection_ring_fade(object_radius_logical: f64) -> f32 {
+    let max_inner_radius = SELECTION_RING_MAX_DIAMETER_PX * 0.5;
+    let fade_start = (max_inner_radius - SELECTION_RING_MARGIN_PX) as f32;
+    let fade_end = (max_inner_radius + 12.0) as f32;
+    1.0 - smoothstep(fade_start, fade_end, object_radius_logical as f32)
+}
 
 #[inline]
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -1494,9 +1508,13 @@ impl Render for PlanetariumPanel {
         let text_color = colors.text;
         let muted_text = colors.text_muted;
 
-        let selected_object = cx
+        let (selected_object, show_trajectory) = cx
             .try_global::<GlobalStarSelection>()
-            .and_then(|g| g.0.read(cx).selected_object().cloned());
+            .map(|g| {
+                let model = g.0.read(cx);
+                (model.selected_object().cloned(), model.show_trajectory())
+            })
+            .unwrap_or((None, true));
         let selected_target_id = selected_object.as_ref().map(SelectedObject::id);
 
         let (stars_visible, solar_system_visible, occlude_ground, occlude_custom_horizon) =
@@ -1507,7 +1525,7 @@ impl Render for PlanetariumPanel {
             None => false,
         };
 
-        let trajectory_snapshot = if selected_layer_visible {
+        let trajectory_snapshot = if selected_layer_visible && show_trajectory {
             let traj = self.ensure_trajectory_fresh(selected_object.as_ref(), cx);
             if let (Some(key), Some(traj_arc), Some(selected)) = (
                 self.trajectory_cache_key.as_ref(),
@@ -1547,7 +1565,7 @@ impl Render for PlanetariumPanel {
 
         let selected_overlay = selected_object
             .as_ref()
-            .filter(|_| selected_layer_visible)
+            .filter(|_| selected_layer_visible && show_trajectory)
             .and_then(|selected| {
                 let (bw, bh) = proj_size?;
                 if bw <= 1.0 || bh <= 1.0 {
@@ -1592,10 +1610,15 @@ impl Render for PlanetariumPanel {
                 }
                 let sx = (nx * 0.5 + 0.5) * bw;
                 let sy = (0.5 - ny * 0.5) * bh;
-                let inner_d =
-                    ((f64::from(rendered_px) / scale_factor) * 2.0 + 10.0).clamp(16.0, 96.0);
+                let object_radius_logical = f64::from(rendered_px) / scale_factor;
+                let ring_fade = selection_ring_fade(object_radius_logical);
+                if ring_fade <= 0.01 {
+                    return None;
+                }
+                let inner_d = (object_radius_logical * 2.0 + SELECTION_RING_MARGIN_PX * 2.0)
+                    .clamp(SELECTION_RING_MIN_DIAMETER_PX, SELECTION_RING_MAX_DIAMETER_PX);
                 let outer_d = inner_d + 6.0;
-                Some((selected.srgb(), sx, sy, inner_d, outer_d))
+                Some((selected.srgb(), sx, sy, inner_d, outer_d, ring_fade))
             });
 
         let trajectory_overlay = selected_object
@@ -1661,9 +1684,12 @@ impl Render for PlanetariumPanel {
                 let screen_ndc = hovered.screen_ndc();
                 let sx = (screen_ndc[0] * 0.5 + 0.5) * bw;
                 let sy = (0.5 - screen_ndc[1] * 0.5) * bh;
-                let reticle_d = ((f64::from(hovered.rendered_radius_px()) / scale_factor) * 2.0
-                    + 10.0)
-                    .clamp(16.0, 96.0);
+                let object_radius_logical = f64::from(hovered.rendered_radius_px()) / scale_factor;
+                if object_radius_logical > SELECTION_RING_MAX_DIAMETER_PX * 0.5 {
+                    return None;
+                }
+                let reticle_d = (object_radius_logical * 2.0 + SELECTION_RING_MARGIN_PX * 2.0)
+                    .clamp(SELECTION_RING_MIN_DIAMETER_PX, SELECTION_RING_MAX_DIAMETER_PX);
                 let reticle_x = sx - reticle_d * 0.5;
                 let reticle_y = sy - reticle_d * 0.5;
 
@@ -1769,6 +1795,19 @@ impl Render for PlanetariumPanel {
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
                     this.handle_mouse_down(event, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus_handle, cx);
+                    if let Some(selection) =
+                        cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone())
+                    {
+                        selection.update(cx, |model, cx| {
+                            model.hide_trajectory(cx);
+                        });
+                    }
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
@@ -1981,7 +2020,7 @@ impl Render for PlanetariumPanel {
             )
             .when_some(
                 selected_overlay,
-                |el, (srgb, sx, sy, inner_d, outer_d)| {
+                |el, (srgb, sx, sy, inner_d, outer_d, ring_fade)| {
                     let star_color: Hsla = Rgba {
                         r: srgb[0],
                         g: srgb[1],
@@ -1998,7 +2037,7 @@ impl Render for PlanetariumPanel {
                             .h(px(outer_d as f32))
                             .rounded_full()
                             .border_1()
-                            .border_color(star_color.opacity(0.92)),
+                            .border_color(star_color.opacity(0.92 * ring_fade)),
                     )
                     .child(
                         div()
@@ -2009,7 +2048,7 @@ impl Render for PlanetariumPanel {
                             .h(px(inner_d as f32))
                             .rounded_full()
                             .border_1()
-                            .border_color(star_color.opacity(0.45)),
+                            .border_color(star_color.opacity(0.45 * ring_fade)),
                     )
                 },
             )
@@ -2273,6 +2312,42 @@ impl Focusable for PlanetariumPanel {
     }
 }
 
+/// Interpolates a topocentric unit direction and horizon visibility along sorted trajectory
+/// samples at an exact window-relative `offset_hour`.
+fn sample_trajectory_at_offset(
+    samples: &[TrajectorySample],
+    offset_hour: f64,
+) -> Option<(DVec3, bool)> {
+    if samples.is_empty() {
+        return None;
+    }
+    let idx = samples.partition_point(|s| s.hour < offset_hour);
+    if idx == 0 {
+        let s = &samples[0];
+        return ((s.hour - offset_hour).abs() <= 1e-3).then_some((s.topo_enu, s.above_horizon));
+    }
+    if idx >= samples.len() {
+        let s = samples.last()?;
+        return ((offset_hour - s.hour).abs() <= 1e-3).then_some((s.topo_enu, s.above_horizon));
+    }
+    let s0 = &samples[idx - 1];
+    let s1 = &samples[idx];
+    let span = s1.hour - s0.hour;
+    if span <= 1e-9 {
+        return Some((s1.topo_enu, s1.above_horizon));
+    }
+    let t = ((offset_hour - s0.hour) / span).clamp(0.0, 1.0);
+    let topo_enu = s0.topo_enu.lerp(s1.topo_enu, t).normalize_or_zero();
+    let above_horizon = if s0.above_horizon == s1.above_horizon {
+        s0.above_horizon
+    } else if t < 0.5 {
+        s0.above_horizon
+    } else {
+        s1.above_horizon
+    };
+    Some((topo_enu, above_horizon))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_planetarium_trajectory(
     bounds: Bounds<Pixels>,
@@ -2298,24 +2373,28 @@ fn paint_planetarium_trajectory(
     let bh = f64::from(height);
     let crisp_color = lerp_rgba(obj_rgb, rgb(0xffffff), 0.22).alpha(0.88);
 
-    // 1. Hourly time tick marks along visible trajectory segments (faded near window ends when faded)
-    for sample in &trajectory.samples {
-        if !sample.above_horizon && occlude_ground {
+    // 1. Hourly time tick marks anchored to exact integer local clock hours so dots stay
+    //    stationary as the current time of day advances (faded near window ends when faded).
+    let first_hour = (start_local_hour - 1e-6).ceil() as i32;
+    let last_hour = (start_local_hour + duration_hours + 1e-6).floor() as i32;
+    for h in first_hour..=last_hour {
+        let offset_h = (f64::from(h) - start_local_hour).clamp(0.0, duration_hours);
+        if !is_faded && offset_h >= duration_hours - 1e-3 {
             continue;
         }
-        let fade = trajectory_edge_fade(sample.hour, duration_hours, is_faded);
+        let fade = trajectory_edge_fade(offset_h, duration_hours, is_faded);
         if fade <= 0.08 {
             continue;
         }
-        let clock_h = start_local_hour + sample.hour;
-        let nearest_hour = clock_h.round();
-        if (clock_h - nearest_hour).abs() > 0.045 {
+        let Some((topo_enu, above_horizon)) =
+            sample_trajectory_at_offset(&trajectory.samples, offset_h)
+        else {
+            continue;
+        };
+        if !above_horizon && occlude_ground {
             continue;
         }
-        if !is_faded && sample.hour >= duration_hours - 1e-3 {
-            continue;
-        }
-        let Some((nx, ny)) = view_info.project_topo_to_ndc(sample.topo_enu) else {
+        let Some((nx, ny)) = view_info.project_topo_to_ndc(topo_enu) else {
             continue;
         };
         if nx.abs() > 1.05 || ny.abs() > 1.05 {
@@ -2325,9 +2404,9 @@ fn paint_planetarium_trajectory(
             px(origin_x + ((nx * 0.5 + 0.5) * bw) as f32),
             px(origin_y + ((0.5 - ny * 0.5) * bh) as f32),
         );
-        let h_int = (nearest_hour.rem_euclid(24.0)).round() as u32 % 24;
+        let h_int = h.rem_euclid(24) as u32;
         let r = if h_int.is_multiple_of(6) { 2.7 } else { 1.8 };
-        let base_fill = if sample.above_horizon {
+        let base_fill = if above_horizon {
             crisp_color
         } else {
             obj_rgb.alpha(0.35)
@@ -2389,5 +2468,56 @@ impl Drop for PlanetariumPanel {
                 tracing::error!("Failed to join PlanetariumRenderer thread: {e:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use celestial::SolarSystemBody;
+
+    #[test]
+    fn solar_system_hourly_dot_position_is_invariant_across_time_of_day() {
+        let paris = GeodeticPosition::from_degrees(48.8566, 2.3522, 35.0);
+        let midnight = 1_718_928_000.0_f64; // 2024-06-21 00:00:00 UTC
+        let target_hour = 13.0_f64;
+
+        let mut dirs = Vec::new();
+        for minute_offset in [0_i64, 1, 2, 3, 5, 7, 11, 29] {
+            let start_local_hour = 6.0 + minute_offset as f64 / 60.0;
+            let start_secs = midnight + start_local_hour * 3600.0;
+            let traj = compute_solar_system_window_trajectory(
+                paris,
+                start_secs,
+                SOLAR_SYSTEM_TRAJ_DURATION_HOURS,
+                SolarSystemBody::Sun,
+                None,
+                121,
+            );
+            let offset_h = target_hour - start_local_hour;
+            let (dir, above) = sample_trajectory_at_offset(&traj.samples, offset_h)
+                .expect("target integer hour should sample cleanly");
+            assert!(above, "Sun at 13:00 in Paris should be above horizon");
+            dirs.push(dir);
+        }
+
+        let reference = dirs[0];
+        for dir in &dirs[1..] {
+            let angular_err_arcsec = reference.dot(*dir).clamp(-1.0, 1.0).acos().to_degrees() * 3600.0;
+            assert!(
+                angular_err_arcsec < 1.0,
+                "hourly dot jittered by {angular_err_arcsec:.3}\" across window shifts"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_ring_fades_out_when_object_exceeds_max_radius() {
+        assert_eq!(selection_ring_fade(10.0), 1.0);
+        assert_eq!(selection_ring_fade(43.0), 1.0);
+        let mid = selection_ring_fade(51.0);
+        assert!(mid > 0.0 && mid < 1.0, "expected partial fade at 51px, got {mid}");
+        assert_eq!(selection_ring_fade(60.0), 0.0);
+        assert_eq!(selection_ring_fade(200.0), 0.0);
     }
 }

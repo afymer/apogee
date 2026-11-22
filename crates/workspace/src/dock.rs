@@ -148,6 +148,20 @@ impl Dock {
                         this.set_open(false, cx);
                     }
                 }
+                PanelEvent::Toggle => {
+                    if let Some(ix) = this
+                        .entries
+                        .iter()
+                        .position(|entry| entry.panel.panel_id() == panel.entity_id())
+                    {
+                        if this.is_open && this.active_index == Some(ix) {
+                            this.set_open(false, cx);
+                        } else {
+                            this.activate_panel(ix, cx);
+                            this.set_open(true, cx);
+                        }
+                    }
+                }
             }),
         ];
 
