@@ -68,7 +68,7 @@ pub fn observer_menu(cx: &App) -> impl IntoElement {
                 ),
         );
 
-    PopoverMenu::new("observer_menu")
+    let menu = PopoverMenu::new("observer_menu")
         .anchor(Anchor::TopRight)
         .attach(Anchor::BottomRight)
         .trigger(trigger)
@@ -78,5 +78,14 @@ pub fn observer_menu(cx: &App) -> impl IntoElement {
             } else {
                 None
             }
-        })
+        });
+
+    // Right-click the trigger to sync back to "now".
+    div().on_mouse_down(gpui::MouseButton::Right, |_, _, cx| {
+        cx.stop_propagation();
+        if let Some(global) = cx.try_global::<GlobalObserver>().cloned() {
+            global.0.update(cx, |model, cx| model.set_live(cx));
+        }
+    })
+    .child(menu)
 }
