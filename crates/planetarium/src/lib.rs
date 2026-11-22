@@ -47,7 +47,9 @@ use bevy::{
     },
 };
 
-pub use camera::{PlanetariumCamera, PlanetariumViewInfo, SkyCoordinates, ViewMode};
+pub use camera::{
+    PlanetariumCamera, PlanetariumViewInfo, SkyCoordinates, TrackingTarget, ViewMode,
+};
 use celestial::HorizonProfile;
 use grids::{create_altaz_grid_mesh, create_equatorial_grid_mesh, create_horizon_mesh};
 pub use material::{CelestialLineMaterial, CelestialLineUniforms, init_celestial_materials};
@@ -307,6 +309,10 @@ impl BevyBridge {
         self.send_command(ViewportCommand::SetTrajectory(data));
     }
 
+    pub fn track_target(&self, target: Option<TrackingTarget>) {
+        self.send_command(ViewportCommand::TrackTarget(target));
+    }
+
     pub fn resize(&self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
@@ -517,6 +523,10 @@ fn camera_movement_and_interpolation_system(
                 observer_clock.0 = update.clock;
                 moved = true;
             }
+            ViewportCommand::TrackTarget(target) => {
+                camera.set_tracking_target(target);
+                moved = true;
+            }
             ViewportCommand::Resize(_, _) => {
                 moved = true;
             }
@@ -537,7 +547,15 @@ fn camera_movement_and_interpolation_system(
     let prev_pitch = camera.pitch;
     let prev_fov = camera.fov_y;
 
-    camera.update(time.delta().as_secs_f64());
+    // When waking from idle sleep, `time.delta()` reflects the sleep duration rather than
+    // an animation frame interval; cap the first animation step to ~60 Hz so slews and zooms
+    // start smoothly without an initial jump.
+    let dt = if camera_sync.is_interpolating {
+        time.delta().as_secs_f64()
+    } else {
+        time.delta().as_secs_f64().min(1.0 / 60.0)
+    };
+    camera.update(dt);
 
     let yaw_diff = (camera.yaw - prev_yaw).abs();
     let pitch_diff = (camera.pitch - prev_pitch).abs();
@@ -551,12 +569,18 @@ fn camera_movement_and_interpolation_system(
     let target_pitch_diff = (camera.target_pitch - camera.pitch).abs();
     let target_fov_diff = (camera.target_fov_y - camera.fov_y).abs();
 
-    let is_interpolating = yaw_diff > 1e-8
-        || pitch_diff > 1e-8
-        || fov_diff > 1e-8
-        || target_yaw_diff > 1e-7
-        || target_pitch_diff > 1e-7
-        || target_fov_diff > 1e-7;
+    let is_interpolating = if camera.is_tracking_locked() {
+        fov_diff > 1e-8 || target_fov_diff > 1e-7
+    } else if camera.is_tracking_slewing() {
+        true
+    } else {
+        yaw_diff > 1e-8
+            || pitch_diff > 1e-8
+            || fov_diff > 1e-8
+            || target_yaw_diff > 1e-7
+            || target_pitch_diff > 1e-7
+            || target_fov_diff > 1e-7
+    };
 
     let is_first_run = !*is_initialized;
     if is_first_run {

@@ -13,15 +13,16 @@ use components::{Slider, SliderEvent};
 use futures::StreamExt;
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    Rgba, ScrollDelta, ScrollWheelEvent, Task, Window, div, point, prelude::*, px, rgb, svg,
+    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Rgba, ScrollDelta, ScrollWheelEvent, Task, Window, div, point, prelude::*, px,
+    rgb, svg,
 };
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
 use planetarium::{
     BevyBridge, HorizonImageData, HorizonLayerData, ObserverClockSpec, PickedSolarSystemBody,
     PickedStar, PlanetariumRenderer, PlanetariumViewInfo, StarRenderParams, StarSpatialIndex,
-    TrajectoryRenderData, ViewMode, pick_solar_system_body,
+    TrackingTarget, TrajectoryRenderData, ViewMode, pick_solar_system_body,
     rendered_solar_system_disc_radius_px,
 };
 use settings::{GlobalSettings, SettingsModel};
@@ -387,6 +388,7 @@ pub struct PlanetariumPanel {
     hover_preview_visible: bool,
     hover_preview_target_id: Option<SelectedObjectId>,
     hover_preview_task: Option<Task<()>>,
+    last_synced_selection_nonce: Option<u64>,
     trajectory_cache_key: Option<TargetDayCacheKey>,
     cached_trajectory: Option<Arc<DailyTrajectory>>,
     last_synced_trajectory: Option<(TargetDayCacheKey, bool)>,
@@ -409,6 +411,13 @@ pub struct PlanetariumPanel {
     last_requested_image_tag: Option<(String, u64)>,
     active_horizon_profile: Option<HorizonProfile>,
     horizon_image_load_gen: u64,
+}
+
+fn tracking_target_for_selected(selected: &SelectedObject) -> TrackingTarget {
+    match selected {
+        SelectedObject::Star(star) => TrackingTarget::equatorial_deg(star.ra_deg, star.dec_deg),
+        SelectedObject::SolarSystem(body) => TrackingTarget::SolarSystem(*body),
+    }
 }
 
 fn observer_spec(model: &ObserverModel) -> (GeodeticPosition, ObserverClockSpec) {
@@ -668,14 +677,44 @@ impl PlanetariumPanel {
             let initial_star_index = bridge.star_index();
             let initial_scale_factor = f64::from(window.scale_factor());
 
-            if let Some(selection_entity) =
-                cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone())
-            {
-                cx.observe(&selection_entity, |_this: &mut Self, _model, cx| {
-                    cx.notify();
-                })
-                .detach();
-            }
+            let initial_selection_nonce =
+                if let Some(selection_entity) =
+                    cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone())
+                {
+                    let (initial_target, initial_nonce) = {
+                        let model = selection_entity.read(cx);
+                        (
+                            model.selected_object().map(tracking_target_for_selected),
+                            model.selected_object().map(|_| model.activation_nonce()),
+                        )
+                    };
+                    if let Some(target) = initial_target {
+                        bridge.track_target(Some(target));
+                    }
+                    cx.observe(&selection_entity, |this: &mut Self, model, cx| {
+                        let model_ref = model.read(cx);
+                        match model_ref.selected_object() {
+                            Some(selected) => {
+                                let nonce = model_ref.activation_nonce();
+                                if this.last_synced_selection_nonce != Some(nonce) {
+                                    this.last_synced_selection_nonce = Some(nonce);
+                                    this.bridge
+                                        .track_target(Some(tracking_target_for_selected(selected)));
+                                }
+                            }
+                            None => {
+                                if this.last_synced_selection_nonce.take().is_some() {
+                                    this.bridge.track_target(None);
+                                }
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .detach();
+                    initial_nonce
+                } else {
+                    None
+                };
 
             cx.spawn(async move |this, cx| {
                 while let Some(()) = rx.next().await {
@@ -708,6 +747,7 @@ impl PlanetariumPanel {
                 hover_preview_visible: false,
                 hover_preview_target_id: None,
                 hover_preview_task: None,
+                last_synced_selection_nonce: initial_selection_nonce,
                 trajectory_cache_key: None,
                 cached_trajectory: None,
                 last_synced_trajectory: None,
@@ -1608,11 +1648,18 @@ impl Render for PlanetariumPanel {
 
         div()
             .id("planetarium_viewport")
+            .track_focus(&self.focus_handle)
             .size_full()
             .overflow_hidden()
             .bg(rgb(0x000000))
             .relative()
             .cursor(CursorStyle::Arrow)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" && this.active_opacity_layer.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 if !hovered {
                     this.cursor_position = None;
@@ -1622,7 +1669,8 @@ impl Render for PlanetariumPanel {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus_handle, cx);
                     this.handle_mouse_down(event, cx);
                 }),
             )

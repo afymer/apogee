@@ -1,12 +1,12 @@
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_3, PI, TAU};
 
-use celestial::ObservationContext;
+use celestial::{ObservationContext, SolarSystemBody};
 use celestial::coords::{
-    Angle, AngleInterval, SphericalRect, cartesian_to_canonical_spherical,
-    topocentric_enu_to_spherical,
+    Angle, AngleInterval, SphericalRect, canonical_spherical_to_cartesian,
+    cartesian_to_canonical_spherical, topocentric_enu_to_spherical,
 };
 use celestial::projection::{CameraProjection, ProjectionKind};
-use glam::{DMat3, DMat4, DVec3, Mat4};
+use glam::{DMat3, DMat4, DQuat, DVec3, Mat4};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
@@ -41,6 +41,37 @@ pub struct SkyCoordinates {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackingTarget {
+    /// Fixed equatorial (ICRS) coordinates in radians.
+    Equatorial { ra_rad: f64, dec_rad: f64 },
+    /// Solar-system body whose ICRS direction is recomputed from observer location and epoch.
+    SolarSystem(SolarSystemBody),
+}
+
+impl TrackingTarget {
+    pub fn equatorial_deg(ra_deg: f64, dec_deg: f64) -> Self {
+        Self::Equatorial {
+            ra_rad: ra_deg.to_radians(),
+            dec_rad: dec_deg.to_radians(),
+        }
+    }
+
+    pub fn icrs_dir(&self, observer: &ObservationContext) -> DVec3 {
+        match *self {
+            Self::Equatorial { ra_rad, dec_rad } => canonical_spherical_to_cartesian(
+                Angle::from_radians(ra_rad),
+                Angle::from_radians(dec_rad),
+            )
+            .normalize_or_zero(),
+            Self::SolarSystem(body) => body
+                .ephemeris(observer.location, observer.epoch)
+                .icrs_dir
+                .normalize_or_zero(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanetariumViewInfo {
     pub center_ra_deg: f64,
     pub center_dec_deg: f64,
@@ -48,6 +79,7 @@ pub struct PlanetariumViewInfo {
     pub center_alt_deg: f64,
     pub fov_deg: f64,
     pub view_mode: ViewMode,
+    pub is_tracking: bool,
     pub projection: CameraProjection,
     pub camera_to_topo: DMat3,
     pub camera_to_icrs: DMat3,
@@ -63,6 +95,7 @@ impl Default for PlanetariumViewInfo {
             center_alt_deg: 90.0,
             fov_deg: 180.0,
             view_mode: ViewMode::Horizontal,
+            is_tracking: false,
             projection: CameraProjection::default(),
             camera_to_topo: DMat3::IDENTITY,
             camera_to_icrs: DMat3::IDENTITY,
@@ -131,6 +164,9 @@ pub struct PlanetariumCamera {
     pub yaw_vel: f64,
     pub pitch_vel: f64,
     pub(crate) zoom_anchor: Option<ZoomAnchor>,
+    pub(crate) tracking_target: Option<TrackingTarget>,
+    pub(crate) tracking_locked: bool,
+    pub(crate) tracking_prev_target_dir: Option<DVec3>,
 }
 
 impl Default for PlanetariumCamera {
@@ -147,6 +183,9 @@ impl Default for PlanetariumCamera {
             yaw_vel: 0.0,
             pitch_vel: 0.0,
             zoom_anchor: None,
+            tracking_target: None,
+            tracking_locked: false,
+            tracking_prev_target_dir: None,
         }
     }
 }
@@ -195,6 +234,24 @@ pub fn compute_spherical_bounds(
 
 fn wrap_pi(angle: f64) -> f64 {
     (angle + PI).rem_euclid(TAU) - PI
+}
+
+fn slerp_unit(a: DVec3, b: DVec3, t: f64) -> DVec3 {
+    let dot = a.dot(b).clamp(-1.0, 1.0);
+    let theta = dot.acos();
+    if theta < 1e-7 {
+        return a.lerp(b, t).normalize_or_zero();
+    }
+    if theta > PI - 1e-4 {
+        let fallback = if a.z.abs() < 0.9 { DVec3::Z } else { DVec3::X };
+        let axis = a.cross(fallback).normalize();
+        let angle = theta * t;
+        return (a * angle.cos() + axis.cross(a) * angle.sin()).normalize();
+    }
+    let sin_theta = theta.sin();
+    let w0 = ((1.0 - t) * theta).sin() / sin_theta;
+    let w1 = (t * theta).sin() / sin_theta;
+    (a * w0 + b * w1).normalize()
 }
 
 fn solve_orientation_for_anchor(
@@ -303,10 +360,68 @@ impl PlanetariumCamera {
         self.yaw_vel = 0.0;
         self.pitch_vel = 0.0;
         self.zoom_anchor = None;
+        self.tracking_prev_target_dir = None;
+    }
+
+    pub fn set_tracking_target(&mut self, target: Option<TrackingTarget>) {
+        self.zoom_anchor = None;
+        self.tracking_target = target;
+        self.tracking_locked = false;
+        if let Some(target) = target {
+            let (target_dir, target_yaw, target_pitch) = self.resolve_target_in_frame(target);
+            self.target_yaw = target_yaw;
+            self.target_pitch = target_pitch;
+            self.tracking_prev_target_dir = Some(target_dir);
+        } else {
+            self.target_yaw = self.yaw;
+            self.target_pitch = self.pitch;
+            self.tracking_prev_target_dir = None;
+        }
+    }
+
+    pub fn is_tracking(&self) -> bool {
+        self.tracking_target.is_some()
+    }
+
+    pub fn is_tracking_slewing(&self) -> bool {
+        self.tracking_target.is_some() && !self.tracking_locked
+    }
+
+    pub fn is_tracking_locked(&self) -> bool {
+        self.tracking_target.is_some() && self.tracking_locked
+    }
+
+    fn frame_dir_to_yaw_pitch(&self, dir: DVec3) -> (f64, f64) {
+        match self.view_mode {
+            ViewMode::Horizontal => {
+                let (az, alt) = topocentric_enu_to_spherical(dir);
+                (az.radians(), alt.radians())
+            }
+            ViewMode::Equatorial => {
+                let (ra, dec) = cartesian_to_canonical_spherical(dir);
+                (ra.radians(), dec.radians())
+            }
+        }
+    }
+
+    fn resolve_target_in_frame(&self, target: TrackingTarget) -> (DVec3, f64, f64) {
+        let v_icrs = target.icrs_dir(&self.observer);
+        let frame_dir = match self.view_mode {
+            ViewMode::Horizontal => self
+                .observer
+                .equatorial_to_topocentric_dir(v_icrs)
+                .normalize_or_zero(),
+            ViewMode::Equatorial => v_icrs,
+        };
+        let (yaw, pitch) = self.frame_dir_to_yaw_pitch(frame_dir);
+        (frame_dir, yaw, pitch)
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64, viewport_height: f64) {
         self.zoom_anchor = None;
+        self.tracking_target = None;
+        self.tracking_locked = false;
+        self.tracking_prev_target_dir = None;
         let proj = self.projection(1.0);
         let scale = proj.scale_factor();
         let h = viewport_height.max(1.0);
@@ -336,8 +451,13 @@ impl PlanetariumCamera {
     }
 
     /// Zooms toward a normalized cursor coordinate (`[-1, 1]^2`), pinning the sky direction under
-    /// that cursor position throughout the smooth zoom interpolation.
+    /// that cursor position throughout the smooth zoom interpolation. When tracking an object,
+    /// zooms toward the tracked center instead of pulling the object off-center.
     pub fn zoom_at(&mut self, delta: f64, cursor_ndc: (f64, f64), aspect_ratio: f32) {
+        if self.tracking_target.is_some() {
+            self.zoom(delta);
+            return;
+        }
         let aspect = f64::from(aspect_ratio);
         let zoom_factor = (-delta * 0.15).exp();
         let next_target_fov =
@@ -390,6 +510,55 @@ impl PlanetariumCamera {
     pub fn update(&mut self, dt_seconds: f64) {
         let dt = dt_seconds.clamp(0.0, 0.1);
         let factor = 1.0 - (-12.0 * dt).exp();
+
+        if let Some(target) = self.tracking_target {
+            self.fov_y += (self.target_fov_y - self.fov_y) * factor;
+            if (self.target_fov_y - self.fov_y).abs() <= 1e-9 {
+                self.fov_y = self.target_fov_y;
+            }
+
+            let (target_dir, target_yaw, target_pitch) = self.resolve_target_in_frame(target);
+            self.target_yaw = target_yaw;
+            self.target_pitch = target_pitch;
+
+            let unlock_threshold = (self.fov_y * 0.05).max(5e-3);
+            let mut current_dir = self.forward_direction();
+            if let Some(prev_target_dir) = self.tracking_prev_target_dir {
+                let target_step = prev_target_dir.dot(target_dir).clamp(-1.0, 1.0).acos();
+                if target_step > 0.0 && target_step <= unlock_threshold {
+                    // Feed-forward continuous sidereal/orbital motion so slewing converges with
+                    // zero steady-state lag even at maximum zoom.
+                    current_dir = (DQuat::from_rotation_arc(prev_target_dir, target_dir)
+                        * current_dir)
+                        .normalize_or_zero();
+                }
+            }
+            self.tracking_prev_target_dir = Some(target_dir);
+
+            let theta = current_dir.dot(target_dir).clamp(-1.0, 1.0).acos();
+            if self.tracking_locked && theta > unlock_threshold {
+                self.tracking_locked = false;
+            }
+
+            if self.tracking_locked {
+                self.yaw = target_yaw;
+                self.pitch = target_pitch;
+            } else {
+                let lock_threshold = (self.fov_y * 1e-4).clamp(1e-8, 1e-5);
+                if theta <= lock_threshold {
+                    self.yaw = target_yaw;
+                    self.pitch = target_pitch;
+                    self.tracking_locked = true;
+                } else {
+                    let slew_factor = 1.0 - (-9.0 * dt).exp();
+                    let next_dir = slerp_unit(current_dir, target_dir, slew_factor);
+                    let (ny, np) = self.frame_dir_to_yaw_pitch(next_dir);
+                    self.yaw = ny;
+                    self.pitch = np;
+                }
+            }
+            return;
+        }
 
         if let Some(anchor) = self.zoom_anchor {
             self.fov_y += (self.target_fov_y - self.fov_y) * factor;
@@ -605,6 +774,7 @@ impl PlanetariumCamera {
             center_alt_deg: alt,
             fov_deg: self.fov_y.to_degrees(),
             view_mode: self.view_mode,
+            is_tracking: self.tracking_target.is_some(),
             projection: self.projection(aspect_ratio),
             camera_to_topo: self.topocentric_to_camera_matrix().transpose(),
             camera_to_icrs: self.icrs_to_camera_matrix().transpose(),
@@ -883,5 +1053,136 @@ mod tests {
         assert!(cam.zoom_anchor.is_some());
         cam.pan(12.0, -8.0, 900.0);
         assert!(cam.zoom_anchor.is_none());
+    }
+
+    #[test]
+    fn test_tracking_smooth_centering_and_high_zoom_sidereal_follow() {
+        let aspect = 16.0_f32 / 9.0;
+        let mut cam = PlanetariumCamera {
+            view_mode: ViewMode::Horizontal,
+            yaw: 120.0_f64.to_radians(),
+            pitch: 35.0_f64.to_radians(),
+            fov_y: (1.0 / 60.0_f64).to_radians(), // 1 arcminute high zoom
+            target_yaw: 120.0_f64.to_radians(),
+            target_pitch: 35.0_f64.to_radians(),
+            target_fov_y: (1.0 / 60.0_f64).to_radians(),
+            ..Default::default()
+        };
+        let t0 = 1_700_000_000.0;
+        cam.observer.set_epoch_unix_seconds(t0);
+
+        // Pick a star ~15 degrees away from the initial view center.
+        let (star_ra, star_dec) = cam.observer.topocentric_to_equatorial_coords(
+            Angle::from_degrees(135.0),
+            Angle::from_degrees(42.0),
+        );
+        let target = TrackingTarget::Equatorial {
+            ra_rad: star_ra.radians(),
+            dec_rad: star_dec.radians(),
+        };
+        let initial_dir = cam.forward_direction();
+        let target_dir_0 = cam
+            .observer
+            .equatorial_to_topocentric_dir(target.icrs_dir(&cam.observer))
+            .normalize();
+        let initial_angle = initial_dir.dot(target_dir_0).clamp(-1.0, 1.0).acos();
+        assert!(initial_angle > 0.1);
+
+        // Selecting the target must not snap immediately.
+        cam.set_tracking_target(Some(target));
+        assert!(cam.is_tracking());
+        assert!(cam.is_tracking_slewing());
+        assert!(cam.forward_direction().distance(initial_dir) < 1e-12);
+
+        // First frame should advance smoothly (no snap).
+        cam.update(1.0 / 60.0);
+        let after_first = cam.forward_direction().dot(target_dir_0).clamp(-1.0, 1.0).acos();
+        assert!(after_first < initial_angle);
+        assert!(after_first > initial_angle * 0.5);
+
+        // Converge to lock while live time ticks forward.
+        let mut t = t0;
+        for _ in 0..180 {
+            t += 1.0 / 60.0;
+            cam.observer.set_epoch_unix_seconds(t);
+            cam.update(1.0 / 60.0);
+        }
+        assert!(cam.is_tracking_locked());
+
+        // Advance time by 30 seconds at 60 Hz under 1-arcmin FOV: star must stay dead center.
+        for _ in 0..1800 {
+            t += 1.0 / 60.0;
+            cam.observer.set_epoch_unix_seconds(t);
+            cam.update(1.0 / 60.0);
+            let info = cam.view_info(aspect);
+            let ndc = info
+                .project_icrs_to_ndc(target.icrs_dir(&cam.observer))
+                .expect("tracked star must remain projectable");
+            assert!(
+                ndc.0.hypot(ndc.1) < 1e-6,
+                "tracked star drifted off center at high zoom: {ndc:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tracking_zoom_pan_view_mode_and_time_jump() {
+        let aspect = 16.0_f32 / 9.0;
+        let mut cam = PlanetariumCamera {
+            view_mode: ViewMode::Horizontal,
+            yaw: 90.0_f64.to_radians(),
+            pitch: 30.0_f64.to_radians(),
+            fov_y: 40.0_f64.to_radians(),
+            target_yaw: 90.0_f64.to_radians(),
+            target_pitch: 30.0_f64.to_radians(),
+            target_fov_y: 40.0_f64.to_radians(),
+            ..Default::default()
+        };
+        let t0 = 1_700_000_000.0;
+        cam.observer.set_epoch_unix_seconds(t0);
+
+        let target = TrackingTarget::SolarSystem(SolarSystemBody::Moon);
+        cam.set_tracking_target(Some(target));
+        for _ in 0..180 {
+            cam.update(1.0 / 60.0);
+        }
+        assert!(cam.is_tracking_locked());
+
+        // Zooming with an off-center cursor while tracking must keep the object centered.
+        cam.zoom_at(6.0, (0.6, -0.4), aspect);
+        assert!(cam.zoom_anchor.is_none());
+        for _ in 0..60 {
+            cam.update(1.0 / 60.0);
+            let ndc = cam
+                .view_info(aspect)
+                .project_icrs_to_ndc(target.icrs_dir(&cam.observer))
+                .expect("tracked moon must stay projectable during zoom");
+            assert!(ndc.0.hypot(ndc.1) < 1e-6);
+        }
+
+        // Switching view mode keeps tracking locked and centered.
+        cam.set_view_mode(ViewMode::Equatorial);
+        assert!(cam.is_tracking_locked());
+        cam.update(1.0 / 60.0);
+        let ndc_eq = cam
+            .view_info(aspect)
+            .project_icrs_to_ndc(target.icrs_dir(&cam.observer))
+            .expect("tracked moon must remain centered after switching view mode");
+        assert!(ndc_eq.0.hypot(ndc_eq.1) < 1e-6);
+
+        // Large time jump in Horizontal mode unlocks and smoothly slews instead of snapping.
+        cam.set_view_mode(ViewMode::Horizontal);
+        cam.observer.set_epoch_unix_seconds(t0 + 3.0 * 3600.0);
+        cam.update(1.0 / 60.0);
+        assert!(cam.is_tracking_slewing());
+        for _ in 0..180 {
+            cam.update(1.0 / 60.0);
+        }
+        assert!(cam.is_tracking_locked());
+
+        // Panning detaches tracking cleanly.
+        cam.pan(25.0, -10.0, 900.0);
+        assert!(!cam.is_tracking());
+        assert!(!cam.is_tracking_locked());
     }
 }

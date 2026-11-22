@@ -1,4 +1,4 @@
-use crate::camera::ViewMode;
+use crate::camera::{TrackingTarget, ViewMode};
 use crate::landscape::HorizonLayerData;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,5 +48,6 @@ pub enum ViewportCommand {
     SetHorizonOpacity(f32),
     SetHorizonLineVisible(bool),
     SetTrajectory(Option<TrajectoryRenderData>),
+    TrackTarget(Option<TrackingTarget>),
 }
 

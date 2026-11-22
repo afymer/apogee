@@ -9,10 +9,12 @@ use celestial::{
 use glam::DVec3;
 use gpui::{
     App, AppContext, BorderStyle, Bounds, Context, Corners, Edges, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, Rgba, Window, div, fill,
-    hsla, point, prelude::*, px, rgb, svg,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, Rgba,
+    Window, actions, div, fill, hsla, point, prelude::*, px, rgb, svg,
 };
+
+actions!(planetarium, [ClearSelection]);
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_day_profile};
 use planetarium::{PickedSolarSystemBody, PickedStar};
@@ -35,6 +37,12 @@ const GRAPH_MAX_ALT_DEG: f64 = 90.0;
 const ICON_HORIZON_OVERLAY: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
   <path d="M2.5 17.5L7.5 10.5L11.8 15L16.2 8.5L21.5 17.5" stroke="black" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M2.5 19.5H21.5" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
+</svg>"##;
+
+const ICON_CENTER_TARGET: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="12" cy="12" r="5.5" stroke="black" stroke-width="1.6"/>
+  <circle cx="12" cy="12" r="1.4" fill="black"/>
+  <path d="M12 3V6.5M12 17.5V21M3 12H6.5M17.5 12H21" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
 </svg>"##;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -160,9 +168,16 @@ impl StarSelectionModel {
         cx.notify();
     }
 
-    #[allow(dead_code)]
+    pub fn recenter(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_some() {
+            self.activation_nonce = self.activation_nonce.wrapping_add(1);
+            cx.notify();
+        }
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         if self.selected.take().is_some() {
+            self.activation_nonce = self.activation_nonce.wrapping_add(1);
             cx.notify();
         }
     }
@@ -184,6 +199,15 @@ impl gpui::Global for GlobalStarSelection {}
 pub fn init(cx: &mut App) {
     let selection = cx.new(|_| StarSelectionModel::default());
     cx.set_global(GlobalStarSelection(selection));
+
+    cx.bind_keys([KeyBinding::new("escape", ClearSelection, None)]);
+    cx.on_action(|_: &ClearSelection, cx| {
+        if let Some(selection) = cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone()) {
+            selection.update(cx, |model, cx| {
+                model.clear(cx);
+            });
+        }
+    });
 
     cx.observe_new(|workbench: &mut workspace::workbench::Workbench, window, cx| {
         if let Some(window) = window {
@@ -1288,12 +1312,47 @@ impl Render for StarDetailsPanel {
                             }),
                     )
                     .child(
-                        IconButton::new("close_star_details_btn", IconName::Close)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Close details"))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.close_panel(cx);
-                            })),
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id("recenter_selected_object_btn")
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(colors.ghost_element_hover))
+                                    .tooltip(Tooltip::text("Center & follow object"))
+                                    .on_click(cx.listener(|_this, _event, _window, cx| {
+                                        if let Some(selection) = cx
+                                            .try_global::<GlobalStarSelection>()
+                                            .map(|g| g.0.clone())
+                                        {
+                                            selection.update(cx, |model, cx| {
+                                                model.recenter(cx);
+                                            });
+                                        }
+                                    }))
+                                    .child(
+                                        svg()
+                                            .data(ICON_CENTER_TARGET)
+                                            .size(px(14.0))
+                                            .flex_none()
+                                            .text_color(colors.text_muted),
+                                    ),
+                            )
+                            .child(
+                                IconButton::new("close_star_details_btn", IconName::Close)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Close details"))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_panel(cx);
+                                    })),
+                            ),
                     ),
             )
             .child(div().h(px(1.0)).w_full().bg(colors.border_variant))
