@@ -1,5 +1,5 @@
 use gpui::{App, IntoElement, RenderOnce, SharedString, Window, div, px};
-use protocol::{CameraStatus, ConnectionState};
+use protocol::{CameraStatus, ConnectionState, MountStatus};
 use theme::ActiveTheme;
 use ui::prelude::*;
 
@@ -64,6 +64,71 @@ impl From<CameraStatus> for LogicState {
     fn from(status: CameraStatus) -> Self {
         LogicState::from(&status)
     }
+}
+
+impl From<&MountStatus> for LogicState {
+    fn from(status: &MountStatus) -> Self {
+        match status {
+            MountStatus::Ready => LogicState::Valid,
+            MountStatus::Connecting { .. } => LogicState::Pending,
+            MountStatus::Error(_) | MountStatus::Disconnected => LogicState::Invalid,
+        }
+    }
+}
+
+impl From<MountStatus> for LogicState {
+    fn from(status: MountStatus) -> Self {
+        LogicState::from(&status)
+    }
+}
+
+/// Canonical `(LogicState, label)` presentation for a daemon WebSocket connection state.
+pub fn connection_status_presentation(state: &ConnectionState) -> (LogicState, SharedString) {
+    let label = match state {
+        ConnectionState::Connected => SharedString::from("Connected"),
+        ConnectionState::Connecting => SharedString::from("Connecting..."),
+        ConnectionState::Reconnecting { attempt, .. } => {
+            SharedString::from(format!("Reconnecting ({attempt})"))
+        }
+        ConnectionState::Disconnected => SharedString::from("Disconnected"),
+    };
+    (LogicState::from(state), label)
+}
+
+/// Canonical `(LogicState, label)` presentation for a camera driver status.
+pub fn camera_status_presentation(
+    status: &CameraStatus,
+    daemon_connected: bool,
+) -> (LogicState, SharedString) {
+    if !daemon_connected {
+        return (LogicState::Muted, SharedString::from("Offline"));
+    }
+    let label = match status {
+        CameraStatus::Ready => SharedString::from("Ready"),
+        CameraStatus::Recovering { attempt, .. } => {
+            SharedString::from(format!("Recovering ({attempt})"))
+        }
+        CameraStatus::Fatal(_) => SharedString::from("Fatal Error"),
+        CameraStatus::Disconnected => SharedString::from("Disconnected"),
+    };
+    (LogicState::from(status), label)
+}
+
+/// Canonical `(LogicState, label)` presentation for a mount driver status.
+pub fn mount_status_presentation(
+    status: &MountStatus,
+    daemon_connected: bool,
+) -> (LogicState, SharedString) {
+    if !daemon_connected {
+        return (LogicState::Muted, SharedString::from("Offline"));
+    }
+    let label = match status {
+        MountStatus::Ready => SharedString::from("Ready"),
+        MountStatus::Connecting { port } => SharedString::from(format!("Connecting ({port})")),
+        MountStatus::Error(_) => SharedString::from("Error"),
+        MountStatus::Disconnected => SharedString::from("Disconnected"),
+    };
+    (LogicState::from(status), label)
 }
 
 #[derive(IntoElement)]

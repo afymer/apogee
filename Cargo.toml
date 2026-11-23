@@ -11,7 +11,10 @@ members = [
     "crates/title_bar",
     "crates/status_bar",
     "crates/drivers/gphoto",
+    "crates/drivers/synscan",
     "crates/raw_viewer",
+    "crates/mount_renderer",
+    "crates/mount_viewer",
     "crates/components",
     "crates/client",
     "crates/catalog_builder",
@@ -70,6 +73,7 @@ bevy = { version = "0.19", default-features = false, features = [
 
 protocol.path = "crates/protocol"
 gphoto.path = "crates/drivers/gphoto"
+synscan.path = "crates/drivers/synscan"
 controller.path = "crates/controller"
 celestial.path = "crates/celestial"
 hips.path = "crates/hips"
@@ -80,6 +84,8 @@ workspace.path = "crates/workspace"
 planetarium.path = "crates/planetarium"
 title_bar.path = "crates/title_bar"
 raw_viewer.path = "crates/raw_viewer"
+mount_renderer.path = "crates/mount_renderer"
+mount_viewer.path = "crates/mount_viewer"
 persistence.path = "crates/persistence"
 observer.path = "crates/observer"
 settings.path = "crates/settings"

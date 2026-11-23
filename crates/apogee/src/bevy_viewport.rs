@@ -7,8 +7,9 @@ use std::{
 use celestial::{
     DailyTrajectory, HorizonProfile, TrajectoryPointKind, TrajectorySample,
     compute_equatorial_daily_trajectory, compute_solar_system_window_trajectory,
-    coords::{Angle, geodetic::GeodeticPosition},
+    coords::{Angle, canonical_spherical_to_cartesian, geodetic::GeodeticPosition},
 };
+use client::GlobalDaemonState;
 use components::{Slider, SliderEvent};
 use futures::StreamExt;
 use glam::DVec3;
@@ -27,7 +28,7 @@ use planetarium::{
     rendered_solar_system_disc_radius_px,
 };
 use settings::{
-    GlobalSettings, SettingsModel, SnapToDawn, SnapToDusk, TimeStepBackward,
+    GlobalSettings, LayerPillStyle, QuickLayer, SnapToDawn, SnapToDusk, TimeStepBackward,
     TimeStepBackwardCoarse, TimeStepBackwardFine, TimeStepForward, TimeStepForwardCoarse,
     TimeStepForwardFine, ToggleViewMode,
 };
@@ -103,253 +104,6 @@ const ICON_COORDS_EQUATORIAL: &[u8] = br##"<svg width="24" height="24" viewBox="
   <path d="M5.5 8.25Q9.6 16.15 18.5 15.75" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
   <path d="M15.75 5.5Q17.55 15.2 8.25 18.5" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
 </svg>"##;
-
-const ICON_LAYER_ATMOSPHERE: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M3 16.5Q12 13.5 21 16.5" stroke="black" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M7.5 15.2A4.5 4.5 0 0 1 16.5 15.2" stroke="black" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M12 5.2V7.8M6.2 7.8L8 9.6M17.8 7.8L16 9.6" stroke="black" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M6.5 19.5H17.5" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
-</svg>"##;
-
-const ICON_LAYER_GROUND: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M2.5 10.5H21.5" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
-  <path d="M4 10.5A8 8 0 0 0 20 10.5" stroke="black" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M5.6 14.8H18.4" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
-  <path d="M12 10.5V18.5" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
-</svg>"##;
-
-const ICON_LAYER_HORIZON: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M2.5 17.5L7.5 10.5L11.8 15L16.2 8.5L21.5 17.5" stroke="black" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M2.5 19.5H21.5" stroke="black" stroke-width="1.35" stroke-linecap="round"/>
-  <circle cx="8" cy="6.2" r="1.2" fill="black"/>
-</svg>"##;
-
-const ICON_LAYER_HIPS: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" stroke="black" stroke-width="1.5"/>
-  <circle cx="12" cy="12" r="1.4" fill="black"/>
-  <path d="M12 10.6C13.8 8.2 17 8.8 17.5 11.2M12 13.4C10.2 15.8 7 15.2 6.5 12.8" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
-  <circle cx="7" cy="8" r="0.9" fill="black"/>
-  <circle cx="17" cy="16.2" r="0.9" fill="black"/>
-</svg>"##;
-
-const ICON_LAYER_STARS: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M11 4.5L12.5 9.5L17.5 11L12.5 12.5L11 17.5L9.5 12.5L4.5 11L9.5 9.5L11 4.5Z" stroke="black" stroke-width="1.45" stroke-linejoin="round"/>
-  <circle cx="18.2" cy="6.2" r="1.15" fill="black"/>
-  <circle cx="17.5" cy="17.8" r="1.05" fill="black"/>
-  <circle cx="6" cy="17.5" r="0.95" fill="black"/>
-</svg>"##;
-
-const ICON_LAYER_SOLAR_SYSTEM: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <circle cx="12" cy="12" r="4.2" stroke="black" stroke-width="1.5"/>
-  <path d="M12 3.2V5.3M12 18.7V20.8M3.2 12H5.3M18.7 12H20.8M5.8 5.8L7.3 7.3M16.7 16.7L18.2 18.2M18.2 5.8L16.7 7.3M7.3 16.7L5.8 18.2" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
-</svg>"##;
-
-const ICON_GRID_ALTAZ: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M5 8.5H19M4 15.5H20" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
-  <path d="M12 3.5V20.5" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
-  <path d="M9.5 4.2Q6.2 12 9.5 19.8M14.5 4.2Q17.8 12 14.5 19.8" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
-</svg>"##;
-
-const ICON_GRID_EQUATORIAL: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M16 4.5L8 19.5" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
-  <path d="M7.3 5.5L20 12.3M4 11.7L16.7 18.5" stroke="black" stroke-width="1.45" stroke-linecap="round"/>
-  <path d="M12.3 3.3Q6.9 9.3 5 17.1M19 6.9Q17.1 14.7 11.7 20.7" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
-</svg>"##;
-
-#[derive(Clone, Copy)]
-struct LayerPillStyle {
-    pill_bg: Hsla,
-    pill_border: Hsla,
-    active_bg: Hsla,
-    hover_bg: Hsla,
-    active_icon: Hsla,
-    disabled_icon: Hsla,
-    popover_ring: Hsla,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum QuickLayer {
-    Atmosphere,
-    Ground,
-    Horizon,
-    HipsSurvey,
-    Stars,
-    SolarSystem,
-    AltAzGrid,
-    EquatorialGrid,
-}
-
-impl QuickLayer {
-    const SKY_LAYERS: [Self; 6] = [
-        Self::Atmosphere,
-        Self::Ground,
-        Self::Horizon,
-        Self::HipsSurvey,
-        Self::Stars,
-        Self::SolarSystem,
-    ];
-    const GRID_LAYERS: [Self; 2] = [Self::AltAzGrid, Self::EquatorialGrid];
-
-    fn id(self) -> &'static str {
-        match self {
-            Self::Atmosphere => "quick_layer_atmosphere",
-            Self::Ground => "quick_layer_ground",
-            Self::Horizon => "quick_layer_horizon",
-            Self::HipsSurvey => "quick_layer_hips",
-            Self::Stars => "quick_layer_stars",
-            Self::SolarSystem => "quick_layer_solar_system",
-            Self::AltAzGrid => "quick_layer_altaz_grid",
-            Self::EquatorialGrid => "quick_layer_eq_grid",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Atmosphere => "Sky Atmosphere",
-            Self::Ground => "Ground Floor",
-            Self::Horizon => "Custom Horizon",
-            Self::HipsSurvey => "HiPS Survey",
-            Self::Stars => "Stars",
-            Self::SolarSystem => "Solar System",
-            Self::AltAzGrid => "Alt/Az Grid",
-            Self::EquatorialGrid => "Equatorial Grid",
-        }
-    }
-
-    fn icon(self) -> &'static [u8] {
-        match self {
-            Self::Atmosphere => ICON_LAYER_ATMOSPHERE,
-            Self::Ground => ICON_LAYER_GROUND,
-            Self::Horizon => ICON_LAYER_HORIZON,
-            Self::HipsSurvey => ICON_LAYER_HIPS,
-            Self::Stars => ICON_LAYER_STARS,
-            Self::SolarSystem => ICON_LAYER_SOLAR_SYSTEM,
-            Self::AltAzGrid => ICON_GRID_ALTAZ,
-            Self::EquatorialGrid => ICON_GRID_EQUATORIAL,
-        }
-    }
-
-    fn active_icon_color(self, default: Hsla) -> Hsla {
-        match self {
-            Self::AltAzGrid => rgb(0x66b5f5).into(),
-            Self::EquatorialGrid => rgb(0xeb9b56).into(),
-            Self::SolarSystem => rgb(0xf7c957).into(),
-            Self::Atmosphere | Self::Ground | Self::Horizon | Self::HipsSurvey | Self::Stars => {
-                default
-            }
-        }
-    }
-
-    fn is_enabled(self, model: &SettingsModel) -> bool {
-        match self {
-            Self::Atmosphere => model.atmosphere_enabled(),
-            Self::Ground => model.ground_enabled(),
-            Self::Horizon => model.horizon_enabled(),
-            Self::HipsSurvey => model.hips_survey_enabled(),
-            Self::Stars => model.stars_enabled(),
-            Self::SolarSystem => model.solar_system_enabled(),
-            Self::AltAzGrid => model.altaz_grid_enabled(),
-            Self::EquatorialGrid => model.equatorial_grid_enabled(),
-        }
-    }
-
-    fn stored_opacity(self, model: &SettingsModel) -> f32 {
-        match self {
-            Self::Atmosphere => model.atmosphere_strength(),
-            Self::Ground => model.ground_opacity(),
-            Self::Horizon => model.horizon_opacity(),
-            Self::HipsSurvey => model.hips_survey_opacity(),
-            Self::Stars => model.stars_opacity(),
-            Self::SolarSystem => model.solar_system_opacity(),
-            Self::AltAzGrid => model.altaz_grid_opacity(),
-            Self::EquatorialGrid => model.equatorial_grid_opacity(),
-        }
-    }
-
-    fn is_visible(self, model: &SettingsModel) -> bool {
-        self.is_enabled(model) && self.stored_opacity(model) > 1e-3
-    }
-
-    fn set_enabled(
-        self,
-        model: &mut SettingsModel,
-        enabled: bool,
-        cx: &mut Context<SettingsModel>,
-    ) {
-        match self {
-            Self::Atmosphere => model.set_atmosphere_enabled(enabled, cx),
-            Self::Ground => model.set_ground_enabled(enabled, cx),
-            Self::Horizon => model.set_horizon_enabled(enabled, cx),
-            Self::HipsSurvey => model.set_hips_survey_enabled(enabled, cx),
-            Self::Stars => model.set_stars_enabled(enabled, cx),
-            Self::SolarSystem => model.set_solar_system_enabled(enabled, cx),
-            Self::AltAzGrid => model.set_altaz_grid_enabled(enabled, cx),
-            Self::EquatorialGrid => model.set_equatorial_grid_enabled(enabled, cx),
-        }
-    }
-
-    fn toggle(self, model: &mut SettingsModel, cx: &mut Context<SettingsModel>) {
-        if self.is_visible(model) {
-            self.set_enabled(model, false, cx);
-        } else {
-            if self.stored_opacity(model) <= 1e-3 {
-                self.commit_raw_opacity(model, 1.0, cx);
-            }
-            self.set_enabled(model, true, cx);
-        }
-    }
-
-    fn preview_opacity(
-        self,
-        model: &mut SettingsModel,
-        value: f32,
-        cx: &mut Context<SettingsModel>,
-    ) {
-        if !self.is_enabled(model) && value > 1e-3 {
-            self.set_enabled(model, true, cx);
-        }
-        match self {
-            Self::Atmosphere => model.preview_atmosphere_strength(value, cx),
-            Self::Ground => model.preview_ground_opacity(value, cx),
-            Self::Horizon => model.preview_horizon_opacity(value, cx),
-            Self::HipsSurvey => model.preview_hips_survey_opacity(value, cx),
-            Self::Stars => model.preview_stars_opacity(value, cx),
-            Self::SolarSystem => model.preview_solar_system_opacity(value, cx),
-            Self::AltAzGrid => model.preview_altaz_grid_opacity(value, cx),
-            Self::EquatorialGrid => model.preview_equatorial_grid_opacity(value, cx),
-        }
-    }
-
-    fn commit_opacity(
-        self,
-        model: &mut SettingsModel,
-        value: f32,
-        cx: &mut Context<SettingsModel>,
-    ) {
-        if !self.is_enabled(model) && value > 1e-3 {
-            self.set_enabled(model, true, cx);
-        }
-        self.commit_raw_opacity(model, value, cx);
-    }
-
-    fn commit_raw_opacity(
-        self,
-        model: &mut SettingsModel,
-        value: f32,
-        cx: &mut Context<SettingsModel>,
-    ) {
-        match self {
-            Self::Atmosphere => model.commit_atmosphere_strength(value, cx),
-            Self::Ground => model.commit_ground_opacity(value, cx),
-            Self::Horizon => model.commit_horizon_opacity(value, cx),
-            Self::HipsSurvey => model.commit_hips_survey_opacity(value, cx),
-            Self::Stars => model.commit_stars_opacity(value, cx),
-            Self::SolarSystem => model.commit_solar_system_opacity(value, cx),
-            Self::AltAzGrid => model.commit_altaz_grid_opacity(value, cx),
-            Self::EquatorialGrid => model.commit_equatorial_grid_opacity(value, cx),
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 enum HoveredObject {
@@ -472,6 +226,10 @@ pub struct PlanetariumPanel {
     last_requested_image_tag: Option<(String, u64)>,
     active_horizon_profile: Option<HorizonProfile>,
     horizon_image_load_gen: u64,
+    mount_filtered_radec: Option<(f64, f64)>,
+    mount_target_radec: Option<(f64, f64)>,
+    mount_filter_task: Option<Task<()>>,
+    is_following_mount: bool,
 }
 
 fn tracking_target_for_selected(selected: &SelectedObject) -> TrackingTarget {
@@ -512,6 +270,7 @@ impl PlanetariumPanel {
             };
 
             let bridge = BevyBridge::new(notify_ui);
+            cx.set_global(mount_viewer::SharedPlanetariumBridge(bridge.clone()));
             let observer_entity = cx.try_global::<GlobalObserver>().map(|g| g.0.clone());
             let initial_observer = observer_entity.as_ref().map(|entity| {
                 let spec = observer_spec(entity.read(cx));
@@ -535,6 +294,18 @@ impl PlanetariumPanel {
             if let Some(entity) = horizons_entity {
                 cx.observe(&entity, |this: &mut Self, _model, cx| {
                     this.sync_horizon_to_bridge(cx);
+                    cx.notify();
+                })
+                .detach();
+            }
+
+            if let Some(daemon) = cx.try_global::<GlobalDaemonState>().map(|g| g.0.clone()) {
+                cx.observe(&daemon, |this: &mut Self, model, cx| {
+                    let next = model
+                        .read(cx)
+                        .effective_mount_pointing()
+                        .map(|(p, _)| (p.ra_deg, p.dec_deg));
+                    this.update_mount_target_radec(next, cx);
                     cx.notify();
                 })
                 .detach();
@@ -766,6 +537,9 @@ impl PlanetariumPanel {
                             .selected_object()
                             .filter(|_| model_ref.center_requested())
                             .map(tracking_target_for_selected);
+                        if target.is_some() {
+                            this.is_following_mount = false;
+                        }
                         this.bridge.track_target(target);
                     }
                     cx.notify();
@@ -834,6 +608,10 @@ impl PlanetariumPanel {
                 last_requested_image_tag: None,
                 active_horizon_profile: None,
                 horizon_image_load_gen: 0,
+                mount_filtered_radec: None,
+                mount_target_radec: None,
+                mount_filter_task: None,
+                is_following_mount: false,
             };
             panel.sync_horizon_to_bridge(cx);
             panel.sync_status_bar(cx);
@@ -1306,6 +1084,7 @@ impl PlanetariumPanel {
 
         // dx > 0 when dragging right
         // dy > 0 when dragging down
+        self.is_following_mount = false;
         self.bridge.pan(dx, dy);
         self.last_mouse_pos = Some(event.position);
     }
@@ -1445,7 +1224,7 @@ impl PlanetariumPanel {
                 );
 
                 div()
-                    .id(layer.id())
+                    .id(("quick_layer", layer as usize))
                     .w(px(26.0))
                     .h(px(22.0))
                     .flex()
@@ -1491,7 +1270,11 @@ impl PlanetariumPanel {
 impl Render for PlanetariumPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.bridge.snapshot();
-        self.cached_texture = snapshot.texture_view;
+        self.cached_texture = if snapshot.is_mount_frame {
+            None
+        } else {
+            snapshot.texture_view
+        };
         self.latest_view_info = snapshot.view_info;
         self.last_scale_factor = f64::from(window.scale_factor());
         let bridge = self.bridge.clone();
@@ -1766,6 +1549,52 @@ impl Render for PlanetariumPanel {
             popover_ring: popover_ring_border,
         };
 
+        // Mount pointing overlay: always shown when connected, or at last known position when offline.
+        let mount_overlay = cx
+            .try_global::<GlobalDaemonState>()
+            .and_then(|g| {
+                let model = g.0.read(cx);
+                let (pointing, is_live) = model.effective_mount_pointing()?;
+                let (ra_deg, dec_deg) = self
+                    .mount_filtered_radec
+                    .unwrap_or((pointing.ra_deg, pointing.dec_deg));
+                let (is_slewing, is_parked) = model
+                    .state
+                    .mount_telemetry
+                    .as_ref()
+                    .map(|t| (t.is_slewing, t.is_parked))
+                    .unwrap_or((false, false));
+                Some((ra_deg, dec_deg, is_live, is_slewing, is_parked))
+            })
+            .and_then(|(ra_deg, dec_deg, is_live, is_slewing, is_parked)| {
+                let (bw, bh) = proj_size?;
+                if bw <= 2.0 || bh <= 2.0 {
+                    return None;
+                }
+                let v_icrs = canonical_spherical_to_cartesian(
+                    Angle::from_degrees(ra_deg),
+                    Angle::from_degrees(dec_deg),
+                )
+                .normalize_or_zero();
+                let projected = self.latest_view_info.project_icrs_to_ndc(v_icrs);
+                let (sx, sy, on_screen) = if let Some((nx, ny)) = projected {
+                    let x = (nx * 0.5 + 0.5) * bw;
+                    let y = (0.5 - ny * 0.5) * bh;
+                    let inside = nx.abs() <= 1.0 && ny.abs() <= 1.0;
+                    (x, y, inside)
+                } else {
+                    // Behind projection hemisphere: compute edge direction from camera-space vector
+                    let v_cam = self.latest_view_info.camera_to_icrs.transpose() * v_icrs;
+                    let len = v_cam.x.hypot(v_cam.y).max(1e-6);
+                    let dx = v_cam.x / len;
+                    let dy = -v_cam.y / len;
+                    (bw * 0.5 + dx * bw, bh * 0.5 + dy * bh, false)
+                };
+                Some((
+                    ra_deg, dec_deg, is_live, is_slewing, is_parked, sx, sy, on_screen, bw, bh,
+                ))
+            });
+
         let active_popover_state = self.active_opacity_layer.map(|layer| {
             let model = cx.try_global::<GlobalSettings>().map(|g| g.0.read(cx));
             (
@@ -1899,8 +1728,12 @@ impl Render for PlanetariumPanel {
                         let scale = window.scale_factor();
                         let width = (f32::from(bounds.size.width) * scale).round() as u32;
                         let height = (f32::from(bounds.size.height) * scale).round() as u32;
-                        if width > 0 && height > 0 && last_size != Some((width, height)) {
-                            bridge.resize(width, height);
+                        if width > 0 && height > 0 {
+                            if bridge.is_mount_camera_active() {
+                                bridge.set_mount_camera_with_size(None, Some((width, height)));
+                            } else if last_size != Some((width, height)) {
+                                bridge.resize(width, height);
+                            }
                         }
                     },
                     |_bounds, _state, _window, _cx| {},
@@ -2073,6 +1906,168 @@ impl Render for PlanetariumPanel {
                                     )
                             }),
                     )
+                },
+            )
+            .when_some(
+                mount_overlay,
+                |el, (ra_deg, dec_deg, is_live, is_slewing, is_parked, sx, sy, on_screen, bw, bh)| {
+                    let accent: Hsla = if !is_live {
+                        rgb(0xa3aab8).into()
+                    } else if is_slewing {
+                        rgb(0xf7b955).into()
+                    } else if is_parked {
+                        rgb(0x8899b0).into()
+                    } else {
+                        rgb(0x3dd9c7).into()
+                    };
+                    let badge_text = if !is_live {
+                        "Mount (last)"
+                    } else if is_slewing {
+                        "NEQ6 (Slewing)"
+                    } else if is_parked {
+                        "NEQ6 (Parked)"
+                    } else {
+                        "NEQ6"
+                    };
+                    let (ra_fmt, dec_fmt) = status_bar::format_radec(ra_deg, dec_deg);
+                    let tip = format!("{badge_text} ({ra_fmt}, {dec_fmt}), click to center");
+
+                    if on_screen {
+                        let ring_d = 26.0_f32;
+                        let tick_len = 7.0_f32;
+                        let tick_gap = 5.0_f32;
+                        let pill_x = (sx + 18.0).clamp(10.0, (bw - 128.0).max(10.0));
+                        let pill_y = (sy - 11.0).clamp(10.0, (bh - 30.0).max(10.0));
+                        let opacity = if is_live { 0.95 } else { 0.62 };
+
+                        el.child(
+                            div()
+                                .absolute()
+                                .left(px(sx as f32 - ring_d * 0.5))
+                                .top(px(sy as f32 - ring_d * 0.5))
+                                .w(px(ring_d))
+                                .h(px(ring_d))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(accent.opacity(opacity)),
+                        )
+                        // 4 crisp crosshair ticks
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(sx as f32 - 0.5))
+                                .top(px(sy as f32 - tick_gap - tick_len))
+                                .w(px(1.5))
+                                .h(px(tick_len))
+                                .bg(accent.opacity(opacity)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(sx as f32 - 0.5))
+                                .top(px(sy as f32 + tick_gap))
+                                .w(px(1.5))
+                                .h(px(tick_len))
+                                .bg(accent.opacity(opacity)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(sx as f32 - tick_gap - tick_len))
+                                .top(px(sy as f32 - 0.5))
+                                .w(px(tick_len))
+                                .h(px(1.5))
+                                .bg(accent.opacity(opacity)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(sx as f32 + tick_gap))
+                                .top(px(sy as f32 - 0.5))
+                                .w(px(tick_len))
+                                .h(px(1.5))
+                                .bg(accent.opacity(opacity)),
+                        )
+                        .child(
+                            h_flex()
+                                .id("planetarium_mount_badge")
+                                .absolute()
+                                .left(px(pill_x as f32))
+                                .top(px(pill_y as f32))
+                                .items_center()
+                                .gap_1()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(popover_bg)
+                                .border_1()
+                                .border_color(accent.opacity(if is_live { 0.75 } else { 0.45 }))
+                                .shadow_md()
+                                .cursor_pointer()
+                                .tooltip(Tooltip::text(tip))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.follow_mount(ra_deg, dec_deg, cx);
+                                }))
+                                .child(div().size(px(6.0)).rounded_full().bg(accent))
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(if is_live { text_color } else { muted_text })
+                                        .child(badge_text),
+                                ),
+                        )
+                    } else {
+                        // Subtle, borderless directional chevron arrow along the viewport margin
+                        let cx_mid = bw * 0.5;
+                        let cy_mid = bh * 0.5;
+                        let dx = sx - cx_mid;
+                        let dy = sy - cy_mid;
+                        let margin = 20.0_f64;
+                        let half_w = (cx_mid - margin).max(10.0);
+                        let half_h = (cy_mid - margin).max(10.0);
+                        let scale = (dx.abs() / half_w).max(dy.abs() / half_h).max(1.0);
+                        let arrow_cx = (cx_mid + dx / scale).clamp(margin, (bw - margin).max(margin));
+                        let arrow_cy = (cy_mid + dy / scale).clamp(margin, (bh - margin).max(margin));
+                        let angle = (dy as f32).atan2(dx as f32);
+                        let hit_size = 24.0_f32;
+                        let arrow_color = accent.opacity(if is_live { 0.78 } else { 0.42 });
+
+                        el.child(
+                            div()
+                                .id("planetarium_mount_edge_arrow")
+                                .absolute()
+                                .left(px(arrow_cx as f32 - hit_size * 0.5))
+                                .top(px(arrow_cy as f32 - hit_size * 0.5))
+                                .w(px(hit_size))
+                                .h(px(hit_size))
+                                .cursor_pointer()
+                                .tooltip(Tooltip::text(tip))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.follow_mount(ra_deg, dec_deg, cx);
+                                }))
+                                .child(
+                                    gpui::canvas(
+                                        |_bounds, _window, _cx| {},
+                                        move |bounds, (), window, _cx| {
+                                            paint_directional_mount_arrow(
+                                                bounds,
+                                                angle,
+                                                arrow_color,
+                                                window,
+                                            );
+                                        },
+                                    )
+                                    .size_full(),
+                                ),
+                        )
+                    }
                 },
             )
             .when_some(
@@ -2361,6 +2356,121 @@ impl Render for PlanetariumPanel {
                         },
                     ),
             )
+    }
+}
+
+/// Paints a crisp, minimal rotated chevron arrow pointing toward the off-screen mount position.
+fn paint_directional_mount_arrow(
+    bounds: Bounds<Pixels>,
+    angle_rad: f32,
+    color: Hsla,
+    window: &mut Window,
+) {
+    let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) * 0.5;
+    let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) * 0.5;
+    let (sin_a, cos_a) = angle_rad.sin_cos();
+
+    let rot = |lx: f32, ly: f32| -> Point<Pixels> {
+        point(
+            px(cx + lx * cos_a - ly * sin_a),
+            px(cy + lx * sin_a + ly * cos_a),
+        )
+    };
+
+    // Sleek open chevron arrowhead pointing along +X before rotation
+    let mut path = gpui::PathBuilder::fill();
+    path.move_to(rot(7.5, 0.0));
+    path.line_to(rot(-5.0, -5.8));
+    path.line_to(rot(-2.2, 0.0));
+    path.line_to(rot(-5.0, 5.8));
+    path.close();
+
+    if let Ok(built) = path.build() {
+        window.paint_path(built, color);
+    }
+}
+
+impl PlanetariumPanel {
+    fn follow_mount(&mut self, ra_deg: f64, dec_deg: f64, cx: &mut Context<Self>) {
+        self.is_following_mount = true;
+        self.bridge
+            .track_target(Some(TrackingTarget::equatorial_deg(ra_deg, dec_deg)));
+        cx.notify();
+    }
+
+    fn update_mount_target_radec(&mut self, next: Option<(f64, f64)>, cx: &mut Context<Self>) {
+        self.mount_target_radec = next;
+        let Some((tgt_ra, tgt_dec)) = next else {
+            self.mount_filtered_radec = None;
+            self.mount_filter_task = None;
+            self.is_following_mount = false;
+            return;
+        };
+        let Some((cur_ra, cur_dec)) = self.mount_filtered_radec else {
+            self.mount_filtered_radec = Some((tgt_ra, tgt_dec));
+            if self.is_following_mount {
+                self.bridge
+                    .track_target(Some(TrackingTarget::equatorial_deg(tgt_ra, tgt_dec)));
+            }
+            return;
+        };
+        let dra = ((tgt_ra - cur_ra) + 180.0).rem_euclid(360.0) - 180.0;
+        let ddec = tgt_dec - cur_dec;
+        if dra.abs().max(ddec.abs()) <= 0.002 {
+            self.mount_filtered_radec = Some((tgt_ra, tgt_dec));
+            if self.is_following_mount {
+                self.bridge
+                    .track_target(Some(TrackingTarget::equatorial_deg(tgt_ra, tgt_dec)));
+            }
+            return;
+        }
+        if self.mount_filter_task.is_some() {
+            return;
+        }
+        self.mount_filter_task = Some(cx.spawn(async move |this, cx| {
+            const DT_SECS: f64 = 0.016;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let keep_going = this
+                    .update(cx, |panel, cx| {
+                        let (Some((mut cur_ra, mut cur_dec)), Some((tgt_ra, tgt_dec))) =
+                            (panel.mount_filtered_radec, panel.mount_target_radec)
+                        else {
+                            panel.mount_filter_task = None;
+                            return false;
+                        };
+                        let still_moving = mount_viewer::step_angular_lowpass(
+                            &mut cur_ra,
+                            &mut cur_dec,
+                            tgt_ra,
+                            tgt_dec,
+                            DT_SECS,
+                        );
+                        panel.mount_filtered_radec = Some((cur_ra, cur_dec));
+                        if !still_moving {
+                            panel.mount_filter_task = None;
+                        }
+                        if panel.is_following_mount {
+                            panel
+                                .bridge
+                                .track_target(Some(TrackingTarget::equatorial_deg(
+                                    cur_ra, cur_dec,
+                                )));
+                        }
+                        // Avoid waking Explore panel while the Mount workspace owns the viewport.
+                        if !panel.bridge.is_mount_camera_active() {
+                            cx.notify();
+                        }
+                        still_moving
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
     }
 }
 

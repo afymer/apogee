@@ -1,7 +1,7 @@
 use client::GlobalDaemonState;
 use components::{LogicState, StatusIndicator};
 use gpui::{App, Context, Entity, Global, SharedString, div, px};
-use protocol::{CameraStatus, ConnectionState};
+use protocol::{ConnectionState, MountStatus};
 use settings::ToggleLogs;
 use ui::{
     ButtonSize, Divider, FixedWidth, IconButton, IconName, IconSize, StyledTypography, Tooltip,
@@ -234,41 +234,32 @@ impl Render for StatusBar {
             .map(|g| g.0.read(cx).state.clone())
             .unwrap_or_default();
 
-        let (daemon_logic, daemon_text) = match daemon_state.connection {
-            ConnectionState::Connected => {
-                (LogicState::Valid, SharedString::from("Daemon: Connected"))
-            }
-            ConnectionState::Connecting => (
-                LogicState::Pending,
-                SharedString::from("Daemon: Connecting..."),
-            ),
-            ConnectionState::Reconnecting { attempt, .. } => (
-                LogicState::Pending,
-                SharedString::from(format!("Daemon: Reconnecting (#{attempt})")),
-            ),
-            ConnectionState::Disconnected => (
-                LogicState::Invalid,
-                SharedString::from("Daemon: Disconnected"),
-            ),
-        };
+        let is_connected = daemon_state.connection == ConnectionState::Connected;
+        let (daemon_logic, daemon_label) =
+            components::connection_status_presentation(&daemon_state.connection);
+        let daemon_text = SharedString::from(format!("Daemon: {daemon_label}"));
 
-        let (camera_logic, camera_text) = match daemon_state.connection {
-            ConnectionState::Connected => match daemon_state.camera {
-                CameraStatus::Ready => (LogicState::Valid, SharedString::from("Camera: Ready")),
-                CameraStatus::Recovering { attempt, reason } => (
-                    LogicState::Pending,
-                    SharedString::from(format!("Camera: Recovering (#{attempt} - {reason})")),
-                ),
-                CameraStatus::Fatal(reason) => (
-                    LogicState::Invalid,
-                    SharedString::from(format!("Camera: Error ({reason})")),
-                ),
-                CameraStatus::Disconnected => (
-                    LogicState::Invalid,
-                    SharedString::from("Camera: Disconnected"),
-                ),
-            },
-            _ => (LogicState::Muted, SharedString::from("Camera: Offline")),
+        let (camera_logic, camera_label) =
+            components::camera_status_presentation(&daemon_state.camera, is_connected);
+        let camera_text = SharedString::from(format!("Camera: {camera_label}"));
+
+        let (mount_logic, mount_text) = if is_connected && daemon_state.mount == MountStatus::Ready
+        {
+            if let Some(t) = &daemon_state.mount_telemetry {
+                if t.is_slewing {
+                    (LogicState::Pending, SharedString::from("Mount: Slewing"))
+                } else if t.is_parked {
+                    (LogicState::Muted, SharedString::from("Mount: Parked"))
+                } else {
+                    (LogicState::Valid, SharedString::from("Mount: Ready"))
+                }
+            } else {
+                (LogicState::Valid, SharedString::from("Mount: Ready"))
+            }
+        } else {
+            let (logic, label) =
+                components::mount_status_presentation(&daemon_state.mount, is_connected);
+            (logic, SharedString::from(format!("Mount: {label}")))
         };
 
         let telemetry = if self.show_planetarium_telemetry {
@@ -360,6 +351,8 @@ impl Render for StatusBar {
                     .items_center()
                     .gap_3()
                     .child(StatusIndicator::new(daemon_logic, daemon_text))
+                    .child(Divider::vertical())
+                    .child(StatusIndicator::new(mount_logic, mount_text))
                     .child(Divider::vertical())
                     .child(StatusIndicator::new(camera_logic, camera_text)),
             )

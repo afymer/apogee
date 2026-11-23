@@ -288,8 +288,10 @@ dependencies = [
  "horizon",
  "image",
  "jiff",
+ "mount_viewer",
  "observer",
  "planetarium",
+ "protocol",
  "raw_viewer",
  "refineable",
  "serde",
@@ -2081,9 +2083,9 @@ dependencies = [
  "anyhow",
  "futures",
  "gpui",
+ "persistence",
  "protocol",
  "reqwest",
- "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
@@ -2351,6 +2353,7 @@ version = "0.1.0"
 dependencies = [
  "gphoto",
  "protocol",
+ "synscan",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -2689,6 +2692,7 @@ dependencies = [
  "protocol",
  "serde",
  "serde_json",
+ "synscan",
  "tokio",
  "tower",
  "tower-http",
@@ -5213,6 +5217,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount_renderer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "celestial",
+ "glam",
+ "protocol",
+ "wgpu",
+]
+
+[[package]]
+name = "mount_viewer"
+version = "0.1.0"
+dependencies = [
+ "celestial",
+ "client",
+ "components",
+ "futures",
+ "glam",
+ "gpui",
+ "mount_renderer",
+ "observer",
+ "planetarium",
+ "protocol",
+ "settings",
+ "status_bar",
+ "theme",
+ "ui",
+ "wgpu",
+ "workspace",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6025,6 +6062,7 @@ name = "persistence"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "protocol",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -6356,6 +6394,7 @@ name = "protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7887,6 +7926,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 dependencies = [
  "futures-core",
+]
+
+[[package]]
+name = "synscan"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "protocol",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

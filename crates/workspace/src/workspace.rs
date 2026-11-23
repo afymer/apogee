@@ -13,19 +13,23 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum WorkspaceKind {
+    Connect,
     #[default]
     Explore,
+    Mount,
     Capture,
 }
 
 impl WorkspaceKind {
     pub fn all() -> &'static [Self] {
-        &[Self::Explore, Self::Capture]
+        &[Self::Connect, Self::Explore, Self::Mount, Self::Capture]
     }
 
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Connect => "Connect",
             Self::Explore => "Explore",
+            Self::Mount => "Mount",
             Self::Capture => "Capture",
         }
     }
@@ -92,7 +96,7 @@ impl Render for Workspace {
         let bounds_store = self.bounds.clone();
 
         div()
-            .id(format!("workspace_{}", self.kind.name()))
+            .id(("workspace", self.kind as usize))
             .size_full()
             .relative()
             .flex()

@@ -1,0 +1,25 @@
+[package]
+name = "mount_viewer"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+celestial.workspace = true
+client.workspace = true
+components.workspace = true
+futures.workspace = true
+glam.workspace = true
+gpui = { workspace = true, features = ["wgpu"] }
+mount_renderer.workspace = true
+observer.workspace = true
+planetarium.workspace = true
+protocol.workspace = true
+settings.workspace = true
+status_bar.workspace = true
+theme.workspace = true
+ui.workspace = true
+wgpu.workspace = true
+workspace.workspace = true
+
+[lints]
+workspace = true

@@ -1,6 +1,9 @@
+pub mod quick_layers;
 pub mod shortcuts;
 pub mod state;
 pub mod window;
+
+pub use quick_layers::{LayerPillStyle, QuickLayer};
 
 pub use shortcuts::{
     CenterOnSelection, OpenKeyboardShortcuts, OpenSettings, OpenSkySearch, ShortcutSpec,
