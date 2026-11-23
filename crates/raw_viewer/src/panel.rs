@@ -279,8 +279,8 @@ impl RawViewerPanel {
 
                 let drag_delta = (dy + dx) * 0.008;
                 let zoom_factor = (2.0f32).powf(drag_delta);
-                let new_zoom =
-                    (start_zoom * zoom_factor).clamp(ViewTransform::MIN_ZOOM, ViewTransform::MAX_ZOOM);
+                let new_zoom = (start_zoom * zoom_factor)
+                    .clamp(ViewTransform::MIN_ZOOM, ViewTransform::MAX_ZOOM);
                 let ratio = new_zoom / start_zoom;
                 let new_pan = anchor_pan - (anchor_pan - start_pan) * ratio;
                 self.bridge.set_pan_zoom(new_pan, new_zoom);

@@ -91,9 +91,7 @@ fn refine_raw_theme(raw: RawTheme) -> Theme {
         }
         if let Some(color_str) = val.as_str() {
             if let Err(err) = try_parse_color(color_str) {
-                tracing::warn!(
-                    "Ignoring invalid color '{color_str}' for theme key '{key}': {err}"
-                );
+                tracing::warn!("Ignoring invalid color '{color_str}' for theme key '{key}': {err}");
                 continue;
             }
         }
@@ -103,18 +101,17 @@ fn refine_raw_theme(raw: RawTheme) -> Theme {
     let colors_value = serde_json::Value::Object(normalized_colors);
 
     // Deserialize into StatusColorsRefinement
-    let mut status_refinement: StatusColorsRefinement = match serde_json::from_value(
-        colors_value.clone(),
-    ) {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(
-                "Failed to deserialize status colors for theme '{}': {err}",
-                raw.name
-            );
-            StatusColorsRefinement::default()
-        }
-    };
+    let mut status_refinement: StatusColorsRefinement =
+        match serde_json::from_value(colors_value.clone()) {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to deserialize status colors for theme '{}': {err}",
+                    raw.name
+                );
+                StatusColorsRefinement::default()
+            }
+        };
     apply_status_color_defaults(&mut status_refinement);
 
     let mut status_colors = match appearance {
@@ -124,18 +121,17 @@ fn refine_raw_theme(raw: RawTheme) -> Theme {
     status_colors.refine(&status_refinement);
 
     // Deserialize into ThemeColorsRefinement
-    let mut theme_colors_refinement: ThemeColorsRefinement = match serde_json::from_value(
-        colors_value,
-    ) {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(
-                "Failed to deserialize theme colors for theme '{}': {err}",
-                raw.name
-            );
-            ThemeColorsRefinement::default()
-        }
-    };
+    let mut theme_colors_refinement: ThemeColorsRefinement =
+        match serde_json::from_value(colors_value) {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to deserialize theme colors for theme '{}': {err}",
+                    raw.name
+                );
+                ThemeColorsRefinement::default()
+            }
+        };
 
     if theme_colors_refinement.version_control_added.is_none() {
         theme_colors_refinement.version_control_added = status_refinement.created;

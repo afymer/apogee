@@ -286,10 +286,7 @@ mod tests {
 
     #[test]
     fn smooth_circular_smooths_across_seam_and_sanitize_clamps() {
-        let profile = HorizonProfile::from_samples(
-            vec![f32::NAN, 120.0, -120.0, 0.0],
-            725.0,
-        );
+        let profile = HorizonProfile::from_samples(vec![f32::NAN, 120.0, -120.0, 0.0], 725.0);
         assert_eq!(profile.samples_deg[0], 0.0);
         assert_eq!(profile.samples_deg[1], MAX_HORIZON_ALT_DEG);
         assert_eq!(profile.samples_deg[2], MIN_HORIZON_ALT_DEG);

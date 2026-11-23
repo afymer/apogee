@@ -13,8 +13,8 @@ pub fn equatorial_az_alt_deg(
     ra: Angle,
     dec: Angle,
 ) -> (f64, f64) {
-    let (az, alt) = ObservationContext::new(location, epoch)
-        .equatorial_to_topocentric_coords(ra, dec);
+    let (az, alt) =
+        ObservationContext::new(location, epoch).equatorial_to_topocentric_coords(ra, dec);
     (az.degrees(), alt.degrees())
 }
 
@@ -369,8 +369,7 @@ fn compute_visibility_with_horizon_fn(
     let (circumpolar, never_rises) = if horizon.is_none() {
         (min_altitude_deg >= 0.0, max_altitude_deg < 0.0)
     } else {
-        let all_above =
-            intervals.len() == 1 && intervals[0].0 == 0.0 && intervals[0].1 == 24.0;
+        let all_above = intervals.len() == 1 && intervals[0].0 == 0.0 && intervals[0].1 == 24.0;
         let all_below = intervals.is_empty();
         (all_above, all_below)
     };
@@ -584,11 +583,9 @@ pub fn compute_solar_system_window_trajectory(
     let sample_at_hour = |hour: f64, force_above: bool| -> TrajectorySample {
         let (az_deg, alt_deg) =
             az_alt_at_epoch(Epoch::from_unix_seconds(start_unix_secs + hour * 3600.0));
-        let topo_enu = topocentric_spherical_to_enu(
-            Angle::from_degrees(az_deg),
-            Angle::from_degrees(alt_deg),
-        )
-        .normalize_or_zero();
+        let topo_enu =
+            topocentric_spherical_to_enu(Angle::from_degrees(az_deg), Angle::from_degrees(alt_deg))
+                .normalize_or_zero();
         let h_alt = horizon.map_or(0.0, |prof| prof.altitude_at_azimuth_deg(az_deg));
         let above_horizon = force_above || alt_deg >= h_alt - 1e-3;
         TrajectorySample {
@@ -708,11 +705,9 @@ fn compute_daily_trajectory_with(
         let (az_deg, alt_deg) = az_alt_at_epoch(Epoch::from_unix_seconds(
             local_midnight_unix_secs + hour * 3600.0,
         ));
-        let topo_enu = topocentric_spherical_to_enu(
-            Angle::from_degrees(az_deg),
-            Angle::from_degrees(alt_deg),
-        )
-        .normalize_or_zero();
+        let topo_enu =
+            topocentric_spherical_to_enu(Angle::from_degrees(az_deg), Angle::from_degrees(alt_deg))
+                .normalize_or_zero();
         let h_alt = horizon.map_or(0.0, |prof| prof.altitude_at_azimuth_deg(az_deg));
         let above_horizon = force_above || alt_deg >= h_alt - 1e-3;
         TrajectorySample {
@@ -727,12 +722,8 @@ fn compute_daily_trajectory_with(
     let samples: Vec<TrajectorySample> = hours
         .into_iter()
         .map(|h| {
-            let is_rise_or_set = visibility
-                .rise_hour
-                .is_some_and(|r| (r - h).abs() < 1e-4)
-                || visibility
-                    .set_hour
-                    .is_some_and(|s| (s - h).abs() < 1e-4);
+            let is_rise_or_set = visibility.rise_hour.is_some_and(|r| (r - h).abs() < 1e-4)
+                || visibility.set_hour.is_some_and(|s| (s - h).abs() < 1e-4);
             sample_at_hour(h, is_rise_or_set)
         })
         .collect();
@@ -932,13 +923,8 @@ mod tests {
         let ra = Angle::from_degrees(78.634);
         let dec = Angle::from_degrees(-8.2016);
         let high_horizon = HorizonProfile::flat(45.0, 360);
-        let vis = compute_target_visibility_with_horizon(
-            paris,
-            midnight,
-            ra,
-            dec,
-            Some(&high_horizon),
-        );
+        let vis =
+            compute_target_visibility_with_horizon(paris, midnight, ra, dec, Some(&high_horizon));
         assert!(vis.max_altitude_deg > 20.0);
         assert!(vis.never_rises);
         assert!(!vis.circumpolar);

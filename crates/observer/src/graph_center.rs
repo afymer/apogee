@@ -66,6 +66,7 @@ impl VisibilityGraphCenter {
         (offset_hour + self.start_hour()).rem_euclid(24.0)
     }
 
+    #[must_use]
     pub fn toggle(self) -> Self {
         match self {
             Self::Noon => Self::Midnight,

@@ -232,7 +232,9 @@ impl DocumentBackend for MemoryBackend {
         validate_key(namespace)?;
         validate_asset_name(name)?;
         let guard = self.assets.lock().unwrap_or_else(PoisonError::into_inner);
-        Ok(guard.get(&(namespace.to_string(), name.to_string())).cloned())
+        Ok(guard
+            .get(&(namespace.to_string(), name.to_string()))
+            .cloned())
     }
 
     fn write_asset(

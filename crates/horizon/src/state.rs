@@ -93,8 +93,11 @@ impl HorizonModel {
         };
         let id = self.catalog.unique_id_for(display_name);
         let asset_name = format!("{id}.{}", prepared.asset_ext);
-        self.store
-            .write_asset(HORIZON_ASSET_NAMESPACE, &asset_name, &prepared.managed_bytes)?;
+        self.store.write_asset(
+            HORIZON_ASSET_NAMESPACE,
+            &asset_name,
+            &prepared.managed_bytes,
+        )?;
 
         self.catalog.create_background(
             Some(id.clone()),
@@ -142,8 +145,11 @@ impl HorizonModel {
             return Err(PersistenceError::HorizonNotFound(id.to_string()));
         }
         let asset_name = format!("{id}.{}", prepared.asset_ext);
-        self.store
-            .write_asset(HORIZON_ASSET_NAMESPACE, &asset_name, &prepared.managed_bytes)?;
+        self.store.write_asset(
+            HORIZON_ASSET_NAMESPACE,
+            &asset_name,
+            &prepared.managed_bytes,
+        )?;
 
         let (prev_asset, _) = self.catalog.replace_image(
             id,
@@ -155,9 +161,7 @@ impl HorizonModel {
         if let Some(old_asset) = prev_asset
             && old_asset != asset_name
         {
-            let _ = self
-                .store
-                .delete_asset(HORIZON_ASSET_NAMESPACE, &old_asset);
+            let _ = self.store.delete_asset(HORIZON_ASSET_NAMESPACE, &old_asset);
         }
         self.persist();
         self.bump_generation();

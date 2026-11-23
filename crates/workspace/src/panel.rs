@@ -1,6 +1,6 @@
 use gpui::{
-    AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Pixels,
-    Render, SharedString, px,
+    AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Pixels, Render,
+    SharedString, px,
 };
 
 use crate::{WorkspaceKind, dock::DockPosition};

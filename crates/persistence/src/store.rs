@@ -100,7 +100,11 @@ impl DocumentStore {
     }
 
     /// Reads an auxiliary binary asset stored under `(namespace, name)`.
-    pub fn read_asset(&self, namespace: &str, name: &str) -> Result<Option<Vec<u8>>, PersistenceError> {
+    pub fn read_asset(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
         self.backend.read_asset(namespace, name)
     }
 

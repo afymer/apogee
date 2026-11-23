@@ -75,7 +75,10 @@ pub async fn download_captured_file(
     camera: &CameraHandle,
     file_ref: &CameraFileRef,
 ) -> Result<Vec<u8>, CaptureExecutionError> {
-    info!("Downloading {}/{} from camera...", file_ref.folder, file_ref.filename);
+    info!(
+        "Downloading {}/{} from camera...",
+        file_ref.folder, file_ref.filename
+    );
 
     camera
         .download(&file_ref.folder, &file_ref.filename)
@@ -88,7 +91,10 @@ pub async fn delete_camera_file(
     camera: &CameraHandle,
     file_ref: &CameraFileRef,
 ) -> Result<(), CaptureExecutionError> {
-    info!("Deleting {}/{} from camera...", file_ref.folder, file_ref.filename);
+    info!(
+        "Deleting {}/{} from camera...",
+        file_ref.folder, file_ref.filename
+    );
 
     camera
         .delete_file(&file_ref.folder, &file_ref.filename)

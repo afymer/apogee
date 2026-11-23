@@ -132,7 +132,11 @@ impl SolarSystemEphemeris {
         let title = self.body.name().to_string();
         let subtitle = match (self.body, self.lunar_phase) {
             (SolarSystemBody::Sun, _) => {
-                format!("{} · {}", self.body.category_label(), self.body.kind_label())
+                format!(
+                    "{} · {}",
+                    self.body.category_label(),
+                    self.body.kind_label()
+                )
             }
             (SolarSystemBody::Moon, Some(phase)) => {
                 format!(
@@ -143,7 +147,11 @@ impl SolarSystemEphemeris {
                 )
             }
             (SolarSystemBody::Moon, None) => {
-                format!("{} · {}", self.body.category_label(), self.body.kind_label())
+                format!(
+                    "{} · {}",
+                    self.body.category_label(),
+                    self.body.kind_label()
+                )
             }
         };
         (title, subtitle)
@@ -200,14 +208,13 @@ fn solar_equatorial_and_distance_of_date(epoch: Epoch) -> (Angle, Angle, f64, f6
     let n = epoch.to_jde_utc_days() - 2451545.0;
     let mean_lon_deg = (280.460 + 0.9856474 * n).rem_euclid(360.0);
     let mean_anom_rad = (357.528 + 0.9856003 * n).rem_euclid(360.0).to_radians();
-    let ecliptic_lon_deg = (mean_lon_deg
-        + 1.915 * mean_anom_rad.sin()
-        + 0.020 * (2.0 * mean_anom_rad).sin())
-    .rem_euclid(360.0);
+    let ecliptic_lon_deg =
+        (mean_lon_deg + 1.915 * mean_anom_rad.sin() + 0.020 * (2.0 * mean_anom_rad).sin())
+            .rem_euclid(360.0);
     let ecliptic_lon_rad = ecliptic_lon_deg.to_radians();
     let obliquity_rad = (23.439 - 0.0000004 * n).to_radians();
-    let dist_au = (1.00014 - 0.01671 * mean_anom_rad.cos() - 0.00014 * (2.0 * mean_anom_rad).cos())
-        .max(0.98);
+    let dist_au =
+        (1.00014 - 0.01671 * mean_anom_rad.cos() - 0.00014 * (2.0 * mean_anom_rad).cos()).max(0.98);
 
     let (sin_lam, cos_lam) = ecliptic_lon_rad.sin_cos();
     let (sin_eps, cos_eps) = obliquity_rad.sin_cos();
@@ -302,7 +309,8 @@ pub fn lunar_geocentric_of_date(epoch: Epoch) -> (Angle, Angle, f64, f64, f64) {
         + 0.009_266 * (2.0 * d_rad + mp_rad - f_rad).sin()
         + 0.008_822 * (2.0 * mp_rad - f_rad).sin();
 
-    let dist_km = (385_000.56 - 20_905.355 * mp_rad.cos()
+    let dist_km = (385_000.56
+        - 20_905.355 * mp_rad.cos()
         - 3_699.111 * (2.0 * d_rad - mp_rad).cos()
         - 2_955.968 * (2.0 * d_rad).cos()
         - 569.925 * (2.0 * mp_rad).cos()
@@ -360,11 +368,8 @@ pub fn lunar_topocentric_of_date(
 
     let lst = ObservationContext::new(location, epoch).local_sidereal_time();
     let (sin_lst, cos_lst) = lst.sin_cos();
-    let r_obs_eq = DVec3::new(
-        rho_cos_phi * cos_lst,
-        rho_cos_phi * sin_lst,
-        rho_sin_phi,
-    ) * EARTH_REQ_KM;
+    let r_obs_eq =
+        DVec3::new(rho_cos_phi * cos_lst, rho_cos_phi * sin_lst, rho_sin_phi) * EARTH_REQ_KM;
 
     let topo_vec = r_moon_eq - r_obs_eq;
     let topo_dist_km = topo_vec.length().max(1.0);
@@ -384,11 +389,16 @@ pub fn solar_ephemeris(location: GeodeticPosition, epoch: Epoch) -> SolarSystemE
     let lst = obs_ctx.local_sidereal_time();
     let (ra_date, dec_date, dist_km, _) = solar_equatorial_and_distance_of_date(epoch);
     let topo_enu = equatorial_of_date_to_enu(location, lst, ra_date, dec_date);
-    let icrs_dir = obs_ctx.topocentric_to_equatorial_dir(topo_enu).normalize_or_zero();
+    let icrs_dir = obs_ctx
+        .topocentric_to_equatorial_dir(topo_enu)
+        .normalize_or_zero();
     let (ra_icrs, dec_icrs) = cartesian_to_canonical_spherical(icrs_dir);
     let (az, alt) = topocentric_enu_to_spherical(topo_enu);
 
-    let angular_radius_deg = (SOLAR_RADIUS_KM / dist_km).clamp(0.0, 1.0).asin().to_degrees();
+    let angular_radius_deg = (SOLAR_RADIUS_KM / dist_km)
+        .clamp(0.0, 1.0)
+        .asin()
+        .to_degrees();
     let dist_au = (dist_km / AU_KM).max(0.1);
     let apparent_magnitude = (-26.74 + 5.0 * dist_au.log10()) as f32;
 
@@ -419,12 +429,16 @@ pub fn lunar_ephemeris(location: GeodeticPosition, epoch: Epoch) -> SolarSystemE
     let lst = obs_ctx.local_sidereal_time();
     let (sun_ra_date, sun_dec_date, _, sun_lon_deg) = solar_equatorial_and_distance_of_date(epoch);
     let sun_enu = equatorial_of_date_to_enu(location, lst, sun_ra_date, sun_dec_date);
-    let sun_icrs_dir = obs_ctx.topocentric_to_equatorial_dir(sun_enu).normalize_or_zero();
+    let sun_icrs_dir = obs_ctx
+        .topocentric_to_equatorial_dir(sun_enu)
+        .normalize_or_zero();
 
     let (ra_date, dec_date, topo_dist_km, moon_lon_deg, _) =
         lunar_topocentric_of_date(location, epoch);
     let topo_enu = equatorial_of_date_to_enu(location, lst, ra_date, dec_date);
-    let icrs_dir = obs_ctx.topocentric_to_equatorial_dir(topo_enu).normalize_or_zero();
+    let icrs_dir = obs_ctx
+        .topocentric_to_equatorial_dir(topo_enu)
+        .normalize_or_zero();
     let (ra_icrs, dec_icrs) = cartesian_to_canonical_spherical(icrs_dir);
     let (az, alt) = topocentric_enu_to_spherical(topo_enu);
 
@@ -639,9 +653,7 @@ pub fn find_sky_events(
         let h0 = (i - 1) as f64 * step_hours;
         let h1 = i as f64 * step_hours;
 
-        if sunrise_hour.is_none()
-            && prev < SUNRISE_SUNSET_ALT_DEG
-            && curr >= SUNRISE_SUNSET_ALT_DEG
+        if sunrise_hour.is_none() && prev < SUNRISE_SUNSET_ALT_DEG && curr >= SUNRISE_SUNSET_ALT_DEG
         {
             sunrise_hour = Some(refine_crossing(
                 location,
@@ -652,9 +664,7 @@ pub fn find_sky_events(
                 true,
             ));
         }
-        if sunset_hour.is_none()
-            && prev >= SUNRISE_SUNSET_ALT_DEG
-            && curr < SUNRISE_SUNSET_ALT_DEG
+        if sunset_hour.is_none() && prev >= SUNRISE_SUNSET_ALT_DEG && curr < SUNRISE_SUNSET_ALT_DEG
         {
             sunset_hour = Some(refine_crossing(
                 location,
@@ -761,22 +771,50 @@ mod tests {
         let noon = Epoch::from_gregorian_utc(2026, 3, 20, 12, 7, 0, 0);
         let enu_noon = solar_topocentric_enu(mid_lat, noon);
         assert!((enu_noon.length() - 1.0).abs() < 1e-12);
-        assert!(enu_noon.x.abs() < 0.05, "expected due south at noon, x={}", enu_noon.x);
-        assert!(enu_noon.y < -0.65, "expected south (-Y) at noon, y={}", enu_noon.y);
-        assert!(enu_noon.z > 0.65, "expected ~45° altitude at noon, z={}", enu_noon.z);
+        assert!(
+            enu_noon.x.abs() < 0.05,
+            "expected due south at noon, x={}",
+            enu_noon.x
+        );
+        assert!(
+            enu_noon.y < -0.65,
+            "expected south (-Y) at noon, y={}",
+            enu_noon.y
+        );
+        assert!(
+            enu_noon.z > 0.65,
+            "expected ~45° altitude at noon, z={}",
+            enu_noon.z
+        );
         assert!((enu_noon.z.asin().to_degrees() - solar_altitude_deg(mid_lat, noon)).abs() < 1e-10);
 
         let sunrise = Epoch::from_gregorian_utc(2026, 3, 20, 6, 7, 0, 0);
         let enu_sunrise = solar_topocentric_enu(mid_lat, sunrise);
         assert!((enu_sunrise.length() - 1.0).abs() < 1e-12);
-        assert!(enu_sunrise.x > 0.95, "expected east (+X) at sunrise, x={}", enu_sunrise.x);
-        assert!(enu_sunrise.z.abs() < 0.08, "expected near horizon at sunrise, z={}", enu_sunrise.z);
+        assert!(
+            enu_sunrise.x > 0.95,
+            "expected east (+X) at sunrise, x={}",
+            enu_sunrise.x
+        );
+        assert!(
+            enu_sunrise.z.abs() < 0.08,
+            "expected near horizon at sunrise, z={}",
+            enu_sunrise.z
+        );
 
         let sunset = Epoch::from_gregorian_utc(2026, 3, 20, 18, 7, 0, 0);
         let enu_sunset = solar_topocentric_enu(mid_lat, sunset);
         assert!((enu_sunset.length() - 1.0).abs() < 1e-12);
-        assert!(enu_sunset.x < -0.95, "expected west (-X) at sunset, x={}", enu_sunset.x);
-        assert!(enu_sunset.z.abs() < 0.08, "expected near horizon at sunset, z={}", enu_sunset.z);
+        assert!(
+            enu_sunset.x < -0.95,
+            "expected west (-X) at sunset, x={}",
+            enu_sunset.x
+        );
+        assert!(
+            enu_sunset.z.abs() < 0.08,
+            "expected near horizon at sunset, z={}",
+            enu_sunset.z
+        );
     }
 
     #[test]
@@ -808,7 +846,8 @@ mod tests {
         let mut max_illum = 0.0_f64;
 
         for day in 0..30 {
-            let ep = Epoch::from_unix_seconds(base_epoch.to_unix_seconds() + f64::from(day) * 86_400.0);
+            let ep =
+                Epoch::from_unix_seconds(base_epoch.to_unix_seconds() + f64::from(day) * 86_400.0);
             let moon = lunar_ephemeris(paris, ep);
             let phase = moon.lunar_phase.expect("Moon has phase");
             min_illum = min_illum.min(phase.illuminated_fraction);
@@ -822,8 +861,14 @@ mod tests {
             assert!(moon.distance_km > 350_000.0 && moon.distance_km < 415_000.0);
         }
 
-        assert!(min_illum < 0.05, "expected near-0 illumination at New Moon, got {min_illum}");
-        assert!(max_illum > 0.95, "expected near-1 illumination at Full Moon, got {max_illum}");
+        assert!(
+            min_illum < 0.05,
+            "expected near-0 illumination at New Moon, got {min_illum}"
+        );
+        assert!(
+            max_illum > 0.95,
+            "expected near-1 illumination at Full Moon, got {max_illum}"
+        );
         assert!(saw_crescent);
         assert!(saw_full);
     }

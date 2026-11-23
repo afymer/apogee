@@ -136,7 +136,8 @@ pub fn decode_and_prepare_panorama(bytes: &[u8]) -> Result<PreparedPanorama, Str
         None
     };
 
-    let (target_w, target_h) = fit_dimensions(orig_w, orig_h, MAX_MANAGED_WIDTH, MAX_MANAGED_HEIGHT);
+    let (target_w, target_h) =
+        fit_dimensions(orig_w, orig_h, MAX_MANAGED_WIDTH, MAX_MANAGED_HEIGHT);
     let managed = if target_w == orig_w && target_h == orig_h {
         img
     } else {
@@ -145,8 +146,7 @@ pub fn decode_and_prepare_panorama(bytes: &[u8]) -> Result<PreparedPanorama, Str
 
     let working = make_working_panorama(&managed);
     let managed_rgba = managed.to_rgba8();
-    let has_alpha = managed.color().has_alpha()
-        && managed_rgba.pixels().any(|p| p[3] < 250);
+    let has_alpha = managed.color().has_alpha() && managed_rgba.pixels().any(|p| p[3] < 250);
 
     let mut encoded = Vec::new();
     let asset_ext = if has_alpha {

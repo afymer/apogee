@@ -42,7 +42,11 @@ mod tests {
 
     fn temp_test_dir() -> PathBuf {
         let seq = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("apogee_persistence_test_{}_{}", std::process::id(), seq))
+        std::env::temp_dir().join(format!(
+            "apogee_persistence_test_{}_{}",
+            std::process::id(),
+            seq
+        ))
     }
 
     #[test]
@@ -168,7 +172,9 @@ mod tests {
         assert_eq!(catalog.active_profile().icon, ObservatoryIcon::Balcony);
         assert_eq!(catalog.active_profile().revision, 2);
 
-        catalog.delete_profile("backyard-2").expect("delete succeeds");
+        catalog
+            .delete_profile("backyard-2")
+            .expect("delete succeeds");
         assert_eq!(catalog.active_profile_id, "backyard");
 
         catalog
@@ -256,7 +262,8 @@ mod tests {
             }
           ]
         }"#;
-        let parsed: ObserverCatalog = serde_json::from_slice(legacy_json).expect("legacy json loads");
+        let parsed: ObserverCatalog =
+            serde_json::from_slice(legacy_json).expect("legacy json loads");
         assert_eq!(parsed.active_profile().timezone, TimezoneConfig::default());
     }
 
@@ -281,7 +288,10 @@ mod tests {
     fn catalog_default_for_utc_and_load_or_else() {
         let seeded = ObserverCatalog::default_for_utc_offset_minutes(-300);
         assert!((seeded.active_profile().location.longitude_deg + 75.0).abs() < 1e-9);
-        assert_eq!(seeded.active_profile().timezone.mode, TimezoneMode::SiteLocal);
+        assert_eq!(
+            seeded.active_profile().timezone.mode,
+            TimezoneMode::SiteLocal
+        );
 
         let store = DocumentStore::in_memory();
         let fallback_loaded: ObserverCatalog =
@@ -296,8 +306,10 @@ mod tests {
 
     #[test]
     fn coordinate_standard_utc_offset_lookup() {
-        let southern_france_lat = parse_coordinate("43°28'54\" N", CoordinateAxis::Latitude).unwrap();
-        let southern_france_lon = parse_coordinate("1°21'07\" E", CoordinateAxis::Longitude).unwrap();
+        let southern_france_lat =
+            parse_coordinate("43°28'54\" N", CoordinateAxis::Latitude).unwrap();
+        let southern_france_lon =
+            parse_coordinate("1°21'07\" E", CoordinateAxis::Longitude).unwrap();
         assert_eq!(
             lookup_standard_utc_offset_minutes(southern_france_lat, southern_france_lon),
             60
@@ -310,27 +322,27 @@ mod tests {
 
         let cases = [
             // France & Spain (UTC+1 despite near-0° or negative longitudes)
-            (48.8364, 2.3364, 60),    // Paris
-            (42.9369, 0.1411, 60),    // Pic du Midi
-            (48.3904, -4.4861, 60),   // Brest
-            (40.4168, -3.7038, 60),   // Madrid
-            (42.2406, -8.7207, 60),   // Vigo
+            (48.8364, 2.3364, 60),  // Paris
+            (42.9369, 0.1411, 60),  // Pic du Midi
+            (48.3904, -4.4861, 60), // Brest
+            (40.4168, -3.7038, 60), // Madrid
+            (42.2406, -8.7207, 60), // Vigo
             // UK & Portugal (UTC+0)
-            (51.5074, -0.1278, 0),    // London
-            (51.1279, 1.3134, 0),     // Dover
-            (38.7223, -9.1393, 0),    // Lisbon
+            (51.5074, -0.1278, 0), // London
+            (51.1279, 1.3134, 0),  // Dover
+            (38.7223, -9.1393, 0), // Lisbon
             // Non-15°-aligned and fractional-hour zones
-            (43.8256, 87.6168, 480),  // Urumqi (UTC+8)
-            (28.6139, 77.2090, 330),  // New Delhi (UTC+5:30)
-            (27.7172, 85.3240, 345),  // Kathmandu (UTC+5:45)
-            (35.6892, 51.3890, 210),  // Tehran (UTC+3:30)
-            (-31.6767, 128.8886, 525), // Eucla (UTC+8:45)
-            (-34.9285, 138.6007, 570), // Adelaide (UTC+9:30)
-            (-33.8688, 151.2093, 600), // Sydney (UTC+10)
-            (47.5615, -52.7126, -210), // St. John's (UTC-3:30)
-            (40.7128, -74.0060, -300), // New York (UTC-5)
+            (43.8256, 87.6168, 480),    // Urumqi (UTC+8)
+            (28.6139, 77.2090, 330),    // New Delhi (UTC+5:30)
+            (27.7172, 85.3240, 345),    // Kathmandu (UTC+5:45)
+            (35.6892, 51.3890, 210),    // Tehran (UTC+3:30)
+            (-31.6767, 128.8886, 525),  // Eucla (UTC+8:45)
+            (-34.9285, 138.6007, 570),  // Adelaide (UTC+9:30)
+            (-33.8688, 151.2093, 600),  // Sydney (UTC+10)
+            (47.5615, -52.7126, -210),  // St. John's (UTC-3:30)
+            (40.7128, -74.0060, -300),  // New York (UTC-5)
             (-32.8895, -68.8458, -180), // Mendoza (UTC-3)
-            (35.6762, 139.6503, 540),  // Tokyo (UTC+9)
+            (35.6762, 139.6503, 540),   // Tokyo (UTC+9)
             // Boundaries & non-finite fallback
             (0.0, -180.0, -720),
             (0.0, 180.0, 720),
@@ -690,7 +702,10 @@ mod tests {
         let store = DocumentStore::in_memory();
         let defaults = store.load_or_default::<AppSettings>();
         assert!(defaults.planetarium.horizon.enabled);
-        assert_eq!(defaults.planetarium.horizon.opacity, DEFAULT_HORIZON_OPACITY);
+        assert_eq!(
+            defaults.planetarium.horizon.opacity,
+            DEFAULT_HORIZON_OPACITY
+        );
         assert!(!defaults.planetarium.horizon.show_line);
 
         let legacy: HorizonLayerSettings =

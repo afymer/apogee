@@ -99,8 +99,12 @@ fn default_categories() -> Vec<SettingsCategory> {
                             description: "Adjust the intensity of the day and twilight sky atmosphere in the planetarium viewport.",
                             control: SettingControl::Slider {
                                 get: |settings| settings.planetarium.atmosphere.strength,
-                                preview: |model, value, cx| model.preview_atmosphere_strength(value, cx),
-                                commit: |model, value, cx| model.commit_atmosphere_strength(value, cx),
+                                preview: |model, value, cx| {
+                                    model.preview_atmosphere_strength(value, cx);
+                                },
+                                commit: |model, value, cx| {
+                                    model.commit_atmosphere_strength(value, cx);
+                                },
                                 min: 0.0,
                                 max: 1.0,
                                 default: DEFAULT_ATMOSPHERE_STRENGTH,
@@ -157,7 +161,9 @@ fn default_categories() -> Vec<SettingsCategory> {
                             description: "Adjust the opacity of the custom horizon line and 360° landscape layer.",
                             control: SettingControl::Slider {
                                 get: |settings| settings.planetarium.horizon.opacity,
-                                preview: |model, value, cx| model.preview_horizon_opacity(value, cx),
+                                preview: |model, value, cx| {
+                                    model.preview_horizon_opacity(value, cx);
+                                },
                                 commit: |model, value, cx| model.commit_horizon_opacity(value, cx),
                                 min: 0.0,
                                 max: 1.0,
@@ -540,11 +546,13 @@ impl SettingsWindow {
                                             denormalize_slider_value(t, min, max),
                                             cx,
                                         ),
-                                        SliderEvent::Commit(t) => commit(
-                                            model,
-                                            denormalize_slider_value(t, min, max),
-                                            cx,
-                                        ),
+                                        SliderEvent::Commit(t) => {
+                                            commit(
+                                                model,
+                                                denormalize_slider_value(t, min, max),
+                                                cx,
+                                            );
+                                        }
                                     });
                                 }
                             },
@@ -646,10 +654,7 @@ impl SettingsWindow {
             }
         }
 
-        let first_visible = self
-            .visible_navbar_entries()
-            .map(|(index, _)| index)
-            .next();
+        let first_visible = self.visible_navbar_entries().map(|(index, _)| index).next();
         if let Some(first_visible) = first_visible {
             self.selected_nav_index = first_visible;
         }
@@ -812,11 +817,10 @@ impl SettingsWindow {
                             .root_item(entry.is_root)
                             .toggle_state(is_selected)
                             .when(entry.is_root, |item| {
-                                item.expanded(entry.expanded || has_query).on_toggle(
-                                    cx.listener(move |this, _, _window, cx| {
+                                item.expanded(entry.expanded || has_query)
+                                    .on_toggle(cx.listener(move |this, _, _window, cx| {
                                         this.toggle_navbar_entry(entry_index, cx);
-                                    }),
-                                )
+                                    }))
                             })
                             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                                 if entry.is_root && event.click_count() == 2 {
@@ -981,9 +985,11 @@ impl SettingsWindow {
                                             .icon_color(Color::Muted)
                                             .icon_size(IconSize::Small)
                                             .tooltip(Tooltip::text("Reset to Default"))
-                                            .on_click(move |_, _, cx| {
-                                                reset_handler(cx);
-                                            }),
+                                            .on_click(
+                                                move |_, _, cx| {
+                                                    reset_handler(cx);
+                                                },
+                                            ),
                                         )
                                     }),
                             )
@@ -995,7 +1001,9 @@ impl SettingsWindow {
                     )
                     .child(control_el),
             )
-            .when(!is_last_in_section, |this| this.child(Divider::horizontal()))
+            .when(!is_last_in_section, |this| {
+                this.child(Divider::horizontal())
+            })
     }
 
     fn render_page(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1032,9 +1040,12 @@ impl SettingsWindow {
                     .overflow_y_scroll()
                     .track_scroll(&self.content_scroll_handle)
                     .child(
-                        div()
-                            .px_8()
-                            .child(Label::new(category.title).size(LabelSize::Large).mt_2().mb_3()),
+                        div().px_8().child(
+                            Label::new(category.title)
+                                .size(LabelSize::Large)
+                                .mt_2()
+                                .mb_3(),
+                        ),
                     )
                     .children(matching_sections.into_iter().map(|(section, items)| {
                         let item_count = items.len();

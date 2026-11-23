@@ -213,7 +213,9 @@ impl HorizonCatalog {
             trimmed.to_string()
         };
         let resolved_id = match id {
-            Some(explicit) if !explicit.trim().is_empty() && self.background(&explicit).is_none() => {
+            Some(explicit)
+                if !explicit.trim().is_empty() && self.background(&explicit).is_none() =>
+            {
                 explicit
             }
             _ => self.unique_id_for(&display_name),

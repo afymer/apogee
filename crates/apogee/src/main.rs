@@ -13,7 +13,6 @@ use gpui::{App, AppContext, WindowOptions};
 use gpui_platform::application;
 use workspace::workbench::Workbench;
 
-
 fn main() {
     let app_start = std::time::Instant::now();
     apogee_tracing::init_tracing();
@@ -106,7 +105,6 @@ fn main() {
             let _span = ::tracing::info_span!("raw_viewer_init").entered();
             raw_viewer::init(cx);
         }
-
 
         drop(startup_span);
 

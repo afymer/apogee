@@ -760,8 +760,10 @@ fn camera_movement_and_interpolation_system(
     if let Some(star_entity) = handles.star_entity {
         if let Ok(mut mat) = star_materials.get_mut(star_entity) {
             let proj_params = camera.projection_params(aspect);
-            let sun_enu =
-                celestial::solar::solar_topocentric_enu(camera.observer.location, camera.observer.epoch);
+            let sun_enu = celestial::solar::solar_topocentric_enu(
+                camera.observer.location,
+                camera.observer.epoch,
+            );
             let sun_alt_deg = sun_enu.z.clamp(-1.0, 1.0).asin().to_degrees() as f32;
             let render_params = stars::StarRenderParams::for_sky(
                 sun_alt_deg,
@@ -871,7 +873,8 @@ fn process_viewport_commands(
                 }
             }
             ViewportCommand::SetStarOpacity(opacity) => {
-                if let Some(mut settings) = app.world_mut().get_resource_mut::<stars::StarSettings>()
+                if let Some(mut settings) =
+                    app.world_mut().get_resource_mut::<stars::StarSettings>()
                 {
                     settings.opacity = if opacity.is_finite() {
                         opacity.clamp(0.0, 1.0)
@@ -934,9 +937,8 @@ fn process_viewport_commands(
                 }
             }
             ViewportCommand::SetGroundOpacity(opacity) => {
-                if let Some(mut settings) = app
-                    .world_mut()
-                    .get_resource_mut::<ground::GroundSettings>()
+                if let Some(mut settings) =
+                    app.world_mut().get_resource_mut::<ground::GroundSettings>()
                 {
                     settings.opacity = if opacity.is_finite() {
                         opacity.clamp(0.0, 1.0)
@@ -1420,8 +1422,10 @@ impl PlanetariumRenderer {
                         address_mode_w: ImageAddressMode::ClampToEdge,
                         ..ImageSamplerDescriptor::linear()
                     });
-                    let fallback_image =
-                        app.world_mut().resource_mut::<Assets<Image>>().add(fallback);
+                    let fallback_image = app
+                        .world_mut()
+                        .resource_mut::<Assets<Image>>()
+                        .add(fallback);
                     landscape::HorizonRenderSettings {
                         opacity: 1.0,
                         active: false,
@@ -1477,11 +1481,13 @@ impl PlanetariumRenderer {
                         1.0,
                         1.0,
                     ));
-                    world.spawn(landscape::CelestialLandscapeMaterial::from_camera_and_settings(
-                        &initial_camera,
-                        initial_proj,
-                        &initial_horizon_settings,
-                    ));
+                    world.spawn(
+                        landscape::CelestialLandscapeMaterial::from_camera_and_settings(
+                            &initial_camera,
+                            initial_proj,
+                            &initial_horizon_settings,
+                        ),
+                    );
                     (horizon, altaz, eq, trajectory, star)
                 };
 
@@ -1668,9 +1674,11 @@ impl PlanetariumRenderer {
                                                             mip_level_count: 1,
                                                             sample_count: 1,
                                                             dimension: wgpu::TextureDimension::D2,
-                                                            format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                                                            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                                                                | wgpu::TextureUsages::COPY_DST,
+                                                            format:
+                                                                wgpu::TextureFormat::Bgra8UnormSrgb,
+                                                            usage:
+                                                                wgpu::TextureUsages::TEXTURE_BINDING
+                                                                    | wgpu::TextureUsages::COPY_DST,
                                                             view_formats: &[],
                                                         },
                                                     );
@@ -1684,7 +1692,8 @@ impl PlanetariumRenderer {
                                             present_index = 0;
                                         }
 
-                                        let slot = &present_ring[present_index % present_ring.len()];
+                                        let slot =
+                                            &present_ring[present_index % present_ring.len()];
                                         present_index = present_index.wrapping_add(1);
                                         let mut encoder = sync_device.create_command_encoder(
                                             &wgpu::CommandEncoderDescriptor {
@@ -1696,8 +1705,9 @@ impl PlanetariumRenderer {
                                             slot.texture.as_image_copy(),
                                             copy_extent,
                                         );
-                                        last_submission =
-                                            Some(sync_queue.submit(std::iter::once(encoder.finish())));
+                                        last_submission = Some(
+                                            sync_queue.submit(std::iter::once(encoder.finish())),
+                                        );
                                         submitted_copy = true;
                                         new_texture_view = Some(slot.view.clone());
                                     }

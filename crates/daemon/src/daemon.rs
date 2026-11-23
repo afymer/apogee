@@ -30,7 +30,9 @@ async fn main() -> anyhow::Result<()> {
         Ok(raw_addr) => match raw_addr.parse() {
             Ok(addr) => addr,
             Err(err) => {
-                warn!("Invalid APOGEE_DAEMON_ADDR '{raw_addr}': {err}. Falling back to 0.0.0.0:4000");
+                warn!(
+                    "Invalid APOGEE_DAEMON_ADDR '{raw_addr}': {err}. Falling back to 0.0.0.0:4000"
+                );
                 SocketAddr::from(([0, 0, 0, 0], 4000))
             }
         },

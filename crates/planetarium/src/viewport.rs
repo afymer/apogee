@@ -27,7 +27,10 @@ pub struct TrajectoryRenderData {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewportCommand {
     Resize(u32, u32),
-    Pan { delta_x: f64, delta_y: f64 },
+    Pan {
+        delta_x: f64,
+        delta_y: f64,
+    },
     Zoom {
         delta: f64,
         cursor_ndc: Option<(f64, f64)>,
@@ -50,4 +53,3 @@ pub enum ViewportCommand {
     SetTrajectory(Option<TrajectoryRenderData>),
     TrackTarget(Option<TrackingTarget>),
 }
-

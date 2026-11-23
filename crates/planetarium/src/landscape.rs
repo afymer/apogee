@@ -10,9 +10,7 @@ use bevy::{
             ColorWrites, FragmentState, MultisampleState, PrimitiveState, PrimitiveTopology,
             RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
             SpecializedRenderPipeline, TextureFormat, TextureSampleType, VertexState,
-            binding_types::{
-                sampler, storage_buffer_read_only_sized, texture_2d, uniform_buffer,
-            },
+            binding_types::{sampler, storage_buffer_read_only_sized, texture_2d, uniform_buffer},
         },
         storage::ShaderBuffer,
         sync_component::SyncComponent,
@@ -277,7 +275,8 @@ pub(crate) fn landscape_system(
     };
     let aspect = dims.width as f32 / dims.height.max(1) as f32;
     let projection = camera.projection_params(aspect);
-    let updated = CelestialLandscapeMaterial::from_camera_and_settings(camera, projection, &settings);
+    let updated =
+        CelestialLandscapeMaterial::from_camera_and_settings(camera, projection, &settings);
     for mut mat in &mut materials {
         *mat = updated.clone();
     }

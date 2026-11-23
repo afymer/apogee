@@ -15,17 +15,16 @@ use std::{
 use components::{TextField, TextFieldEvent};
 use gpui::{
     Anchor, App, AppContext, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, MouseButton, Pixels, Render, ScrollStrategy, SharedString, Stateful,
-    Subscription, UniformListScrollHandle, Window, anchored, deferred, div, point, prelude::*, px,
-    uniform_list,
+    IntoElement, MouseButton, Pixels, Render, ScrollStrategy, SharedString, Stateful, Subscription,
+    UniformListScrollHandle, Window, anchored, deferred, div, point, prelude::*, px, uniform_list,
 };
 use settings::ToggleLogs;
 use tracing::{Level, field::Field};
 use tracing_subscriber::{Layer, layer::Context as LayerContext};
 use ui::{
-    ActiveTheme, Button, ButtonCommon, ButtonLike, ButtonStyle, Clickable, Color, Icon,
-    IconButton, IconButtonShape, IconName, IconSize, Label, LabelCommon, LabelSize,
-    StyledTypography, Tooltip, h_flex, v_flex,
+    ActiveTheme, Button, ButtonCommon, ButtonLike, ButtonStyle, Clickable, Color, Icon, IconButton,
+    IconButtonShape, IconName, IconSize, Label, LabelCommon, LabelSize, StyledTypography, Tooltip,
+    h_flex, v_flex,
 };
 use workspace::{
     WorkspaceKind,
@@ -492,12 +491,7 @@ impl LogsPanel {
     }
 
     fn domain_rows(&self) -> Vec<DomainRow> {
-        fn walk(
-            node: &DomainNode,
-            depth: usize,
-            panel: &LogsPanel,
-            rows: &mut Vec<DomainRow>,
-        ) {
+        fn walk(node: &DomainNode, depth: usize, panel: &LogsPanel, rows: &mut Vec<DomainRow>) {
             for child in node.children.values() {
                 let (enabled, total) = child.counts(&panel.disabled_targets);
                 let has_children = !child.children.is_empty();
@@ -902,13 +896,11 @@ impl Render for LogsPanel {
                     .px_1()
                     .child(self.search_input.clone()),
             )
-            .child(
-                div().text_xs().text_color(colors.text_muted).child(format!(
-                    "{} / {}",
-                    self.filtered.len(),
-                    self.entries.len()
-                )),
-            )
+            .child(div().text_xs().text_color(colors.text_muted).child(format!(
+                "{} / {}",
+                self.filtered.len(),
+                self.entries.len()
+            )))
             .child(
                 Button::new("logs_follow", "Follow")
                     .style(if self.follow {

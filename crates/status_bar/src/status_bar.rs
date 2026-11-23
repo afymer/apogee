@@ -155,7 +155,9 @@ pub fn format_radec(ra_deg: f64, dec_deg: f64) -> (String, String) {
     (ra_text, dec_text)
 }
 
-fn format_coord_pair(telemetry: &PlanetariumTelemetry) -> (&'static str, String, &'static str, String) {
+fn format_coord_pair(
+    telemetry: &PlanetariumTelemetry,
+) -> (&'static str, String, &'static str, String) {
     match telemetry.mode {
         TelemetryCoordMode::Horizontal => {
             if let Some(c) = telemetry.cursor {
@@ -299,12 +301,7 @@ impl Render for StatusBar {
                             h_flex()
                                 .items_center()
                                 .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(label_color)
-                                        .child(k1),
-                                )
+                                .child(div().text_size(px(11.0)).text_color(label_color).child(k1))
                                 .child(
                                     div()
                                         .font_buffer(cx)
@@ -317,12 +314,7 @@ impl Render for StatusBar {
                             h_flex()
                                 .items_center()
                                 .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(label_color)
-                                        .child(k2),
-                                )
+                                .child(div().text_size(px(11.0)).text_color(label_color).child(k2))
                                 .child(
                                     div()
                                         .font_buffer(cx)

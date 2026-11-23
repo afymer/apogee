@@ -186,7 +186,6 @@ pub(crate) fn propagate_icrs_mas(
 ) -> (f64, f64) {
     let cos_dec = dec_deg.to_radians().cos().abs().max(0.005);
     let prop_dec = (dec_deg + pm_de_mas_yr * dt_years / 3_600_000.0).clamp(-90.0, 90.0);
-    let prop_ra =
-        (ra_deg + (pm_ra_mas_yr * dt_years / 3_600_000.0) / cos_dec).rem_euclid(360.0);
+    let prop_ra = (ra_deg + (pm_ra_mas_yr * dt_years / 3_600_000.0) / cos_dec).rem_euclid(360.0);
     (prop_ra, prop_dec)
 }

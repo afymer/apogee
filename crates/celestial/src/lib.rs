@@ -28,4 +28,3 @@ pub use visibility::{
     equatorial_az_alt_deg, sample_day_equatorial_altitude, sample_day_equatorial_track,
     sample_day_solar_system_track, solar_system_az_alt_deg,
 };
-

@@ -64,8 +64,9 @@ pub fn compute_sky_palette(sun_alt_deg: f32) -> SkyPalette {
     let day_horizon = Vec3::new(1.10, 1.78, 2.85) * horizon_trans * day_env;
 
     let sun_glow_weight = smoothstep(-3.5, 6.0, sun_alt_deg);
-    let sun_glow_color =
-        Vec3::new(1.0, 0.96, 0.90) * horizon_trans * (0.55 + 0.45 * smoothstep(-1.0, 6.0, sun_alt_deg));
+    let sun_glow_color = Vec3::new(1.0, 0.96, 0.90)
+        * horizon_trans
+        * (0.55 + 0.45 * smoothstep(-1.0, 6.0, sun_alt_deg));
 
     let twilight_rise = smoothstep(-18.0, -1.5, sun_alt_deg);
     let twilight_fade_day = 1.0 - smoothstep(0.0, 10.0, sun_alt_deg);
@@ -74,8 +75,8 @@ pub fn compute_sky_palette(sun_alt_deg: f32) -> SkyPalette {
     let twilight_zenith = Vec3::new(0.022, 0.068, 0.24) * dome_weight;
     let twilight_horizon = Vec3::new(0.08, 0.15, 0.36) * dome_weight;
 
-    let warm_weight = smoothstep(-15.0, -2.5, sun_alt_deg).powf(1.8)
-        * (1.0 - smoothstep(2.0, 12.0, sun_alt_deg));
+    let warm_weight =
+        smoothstep(-15.0, -2.5, sun_alt_deg).powf(1.8) * (1.0 - smoothstep(2.0, 12.0, sun_alt_deg));
     let dusk_color = Vec3::new(1.15, 0.30, 0.07) * warm_weight;
 
     SkyPalette {
@@ -183,8 +184,7 @@ mod tests {
         for _ in 0..3 {
             let t2 = half_tan * half_tan;
             let denom = (1.0 - t2).max(1e-4);
-            let err =
-                2.0 * (1.0 - blend) * half_tan + (2.0 * blend * half_tan) / denom - radius;
+            let err = 2.0 * (1.0 - blend) * half_tan + (2.0 * blend * half_tan) / denom - radius;
             let deriv = 2.0 * (1.0 - blend) + (2.0 * blend * (1.0 + t2)) / (denom * denom);
             half_tan = (half_tan - err / deriv.max(1e-6)).clamp(0.0, 0.9999);
         }

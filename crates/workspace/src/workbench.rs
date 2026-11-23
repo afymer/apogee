@@ -102,6 +102,11 @@ impl Render for Workbench {
                     )
                     .child(self.status_bar.clone()),
             )
-            .children(self.overlays.iter().cloned().map(IntoElement::into_any_element))
+            .children(
+                self.overlays
+                    .iter()
+                    .cloned()
+                    .map(IntoElement::into_any_element),
+            )
     }
 }

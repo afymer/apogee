@@ -38,8 +38,7 @@ pub fn lookup_standard_utc_offset_minutes(latitude_deg: f64, longitude_deg: f64)
     let row = max_lat_idx.saturating_sub(r_lat.min(max_lat_idx));
     let col = (((lon + 180.0) * (GRID_SCALE as f64)).round() as usize).min(ROW_LEN - 1);
 
-    lookup_grid_cell(row, col)
-        .unwrap_or_else(|| estimate_utc_offset_minutes_from_longitude(lon))
+    lookup_grid_cell(row, col).unwrap_or_else(|| estimate_utc_offset_minutes_from_longitude(lon))
 }
 
 fn lookup_grid_cell(row: usize, col: usize) -> Option<i32> {

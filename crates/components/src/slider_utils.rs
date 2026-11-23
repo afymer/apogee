@@ -38,7 +38,11 @@ pub(crate) fn smoothstep_proximity(mouse_pos: Point<Pixels>, bounds: Bounds<Pixe
     }
 }
 
-pub(crate) fn normalized_x(position: Point<Pixels>, bounds: Bounds<Pixels>, knob_radius: f32) -> f32 {
+pub(crate) fn normalized_x(
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    knob_radius: f32,
+) -> f32 {
     let width = f32::from(bounds.size.width);
     if width <= 0.0 {
         return 0.0;

@@ -136,11 +136,7 @@ impl Slider {
         }
     }
 
-    fn handle_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         if event.click_count >= 2 {
             if let Some(default_val) = self.default_value {
                 self.is_dragging = false;
@@ -249,7 +245,11 @@ impl Render for Slider {
         .left_0();
 
         let entity_id = cx.entity_id();
-        let p = if self.is_dragging { 1.0 } else { self.proximity };
+        let p = if self.is_dragging {
+            1.0
+        } else {
+            self.proximity
+        };
 
         let track_h = 4.0 + 7.0 * p;
         let track_top = (22.0 - track_h) / 2.0;

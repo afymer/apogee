@@ -1,11 +1,11 @@
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_3, PI, TAU};
 
-use celestial::{ObservationContext, SolarSystemBody};
 use celestial::coords::{
     Angle, AngleInterval, SphericalRect, canonical_spherical_to_cartesian,
     cartesian_to_canonical_spherical, topocentric_enu_to_spherical,
 };
 use celestial::projection::{CameraProjection, ProjectionKind};
+use celestial::{ObservationContext, SolarSystemBody};
 use glam::{DMat3, DMat4, DQuat, DVec3, Mat4};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -387,7 +387,6 @@ impl PlanetariumCamera {
         self.tracking_prev_target_dir = None;
     }
 
-
     pub fn is_view_mode_transitioning(&self) -> bool {
         self.mode_transition.is_some()
     }
@@ -691,8 +690,7 @@ impl PlanetariumCamera {
 
     pub fn topocentric_to_camera_matrix(&self) -> DMat3 {
         if self.mode_transition.is_some() {
-            return self.icrs_to_camera_matrix()
-                * self.observer.topocentric_to_equatorial_matrix();
+            return self.icrs_to_camera_matrix() * self.observer.topocentric_to_equatorial_matrix();
         }
         match self.view_mode {
             ViewMode::Horizontal => self.camera_rotation_matrix(),
@@ -842,7 +840,8 @@ mod tests {
     #[test]
     fn test_compute_spherical_bounds_poles_and_wrapping() {
         // Near north pole: longitude interval becomes full circle and latitude clamps at +90 deg.
-        let north = compute_spherical_bounds(1.0, 85.0_f64.to_radians(), 20.0_f64.to_radians(), 1.0);
+        let north =
+            compute_spherical_bounds(1.0, 85.0_f64.to_radians(), 20.0_f64.to_radians(), 1.0);
         assert!((north.lon.span().radians() - TAU).abs() < 1e-10);
         assert!((north.lat.end().degrees() - 90.0).abs() < 1e-10);
 
@@ -882,11 +881,8 @@ mod tests {
         }
         assert!(!camera.is_view_mode_transitioning());
         let end = camera.icrs_to_camera_matrix();
-        let live = PlanetariumCamera::rotation_matrix_for(
-            ViewMode::Equatorial,
-            camera.yaw,
-            camera.pitch,
-        );
+        let live =
+            PlanetariumCamera::rotation_matrix_for(ViewMode::Equatorial, camera.yaw, camera.pitch);
         assert!((end - live).abs_diff_eq(DMat3::ZERO, 1e-9));
     }
 
@@ -1066,7 +1062,8 @@ mod tests {
         assert!(cam.zoom_anchor.is_none());
 
         let v_cam_target = cam.projection(aspect).unproject_ndc(ndc.0, ndc.1);
-        let best_residual = (cam.camera_rotation_matrix() * v_anchor - v_cam_target).length_squared();
+        let best_residual =
+            (cam.camera_rotation_matrix() * v_anchor - v_cam_target).length_squared();
         let eps = 1e-3;
         for sy in [-eps, 0.0, eps] {
             for sp in [-eps, 0.0, eps] {
@@ -1177,7 +1174,11 @@ mod tests {
 
         // First frame should advance smoothly (no snap).
         cam.update(1.0 / 60.0);
-        let after_first = cam.forward_direction().dot(target_dir_0).clamp(-1.0, 1.0).acos();
+        let after_first = cam
+            .forward_direction()
+            .dot(target_dir_0)
+            .clamp(-1.0, 1.0)
+            .acos();
         assert!(after_first < initial_angle);
         assert!(after_first > initial_angle * 0.5);
 

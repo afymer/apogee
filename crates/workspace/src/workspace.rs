@@ -97,30 +97,35 @@ impl Render for Workspace {
             .relative()
             .flex()
             .flex_row()
-            .on_drag_move(cx.listener(|this, e: &DragMoveEvent<DraggedDock>, _window, cx| {
-                let Some(bounds) = this.bounds.lock().ok().and_then(|g| *g) else {
-                    return;
-                };
-                let pos = e.event.position;
-                match e.drag(cx).0 {
-                    DockPosition::Left => {
-                        let width = pos.x - bounds.left();
-                        let max_w = bounds.size.width * 0.55;
-                        this.left_dock.update(cx, |dock, cx| dock.resize(width, max_w, cx));
+            .on_drag_move(
+                cx.listener(|this, e: &DragMoveEvent<DraggedDock>, _window, cx| {
+                    let Some(bounds) = this.bounds.lock().ok().and_then(|g| *g) else {
+                        return;
+                    };
+                    let pos = e.event.position;
+                    match e.drag(cx).0 {
+                        DockPosition::Left => {
+                            let width = pos.x - bounds.left();
+                            let max_w = bounds.size.width * 0.55;
+                            this.left_dock
+                                .update(cx, |dock, cx| dock.resize(width, max_w, cx));
+                        }
+                        DockPosition::Right => {
+                            let width = bounds.right() - pos.x;
+                            let max_w = bounds.size.width * 0.55;
+                            this.right_dock
+                                .update(cx, |dock, cx| dock.resize(width, max_w, cx));
+                        }
+                        DockPosition::Bottom => {
+                            let height = bounds.bottom() - pos.y;
+                            let max_h = bounds.size.height * 0.5;
+                            this.bottom_dock
+                                .update(cx, |dock, cx| dock.resize(height, max_h, cx));
+                        }
+                        DockPosition::Center => {}
                     }
-                    DockPosition::Right => {
-                        let width = bounds.right() - pos.x;
-                        let max_w = bounds.size.width * 0.55;
-                        this.right_dock.update(cx, |dock, cx| dock.resize(width, max_w, cx));
-                    }
-                    DockPosition::Bottom => {
-                        let height = bounds.bottom() - pos.y;
-                        let max_h = bounds.size.height * 0.5;
-                        this.bottom_dock.update(cx, |dock, cx| dock.resize(height, max_h, cx));
-                    }
-                    DockPosition::Center => {}
-                }
-            }))
+                }),
+            )
             .child(
                 gpui::canvas(
                     move |bounds, _window, _cx| {

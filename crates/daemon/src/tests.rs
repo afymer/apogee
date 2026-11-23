@@ -1,18 +1,20 @@
-use std::sync::Arc;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tower::ServiceExt;
 
 use controller::Controller;
 use gphoto::handle::CameraHandle;
 use gphoto::types::{CameraCommand, CameraFileRef};
-use protocol::{CameraStatus, DaemonMessage, DaemonStatus, Frame, FrameType, CaptureParams, SaveLocationConfig};
+use protocol::{
+    CameraStatus, CaptureParams, DaemonMessage, DaemonStatus, Frame, FrameType, SaveLocationConfig,
+};
 
-use crate::server::{create_router, spawn_controller_event_forwarder, ServerState};
+use crate::server::{ServerState, create_router, spawn_controller_event_forwarder};
 
 fn setup_test_controller() -> (controller::ControllerHandle, mpsc::Receiver<CameraCommand>) {
     let (cmd_tx, cmd_rx) = mpsc::channel(32);
@@ -29,7 +31,12 @@ async fn test_health_endpoint() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -45,7 +52,12 @@ async fn test_status_endpoint() {
     let app = create_router(state);
 
     let response = app
-        .oneshot(Request::builder().uri("/api/status").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -61,11 +73,18 @@ async fn test_status_endpoint() {
 async fn test_frame_cache_endpoint() {
     let (controller, _cmd_rx) = setup_test_controller();
     let state = Arc::new(ServerState::new(controller));
-    state.store_frame(42, vec![1, 2, 3, 4], "image/x-canon-cr2".into()).await;
+    state
+        .store_frame(42, vec![1, 2, 3, 4], "image/x-canon-cr2".into())
+        .await;
 
     let app = create_router(state);
     let response = app
-        .oneshot(Request::builder().uri("/api/frames/42/raw").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/frames/42/raw")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -126,9 +145,7 @@ async fn test_controller_event_forwarding() {
                     assert_eq!(url, "/api/frames/77/raw");
                     saw_frame_ready = true;
                 }
-                DaemonMessage::Status(DaemonStatus::Idle)
-                    if saw_capturing && saw_frame_ready =>
-                {
+                DaemonMessage::Status(DaemonStatus::Idle) if saw_capturing && saw_frame_ready => {
                     saw_idle = true;
                     break;
                 }

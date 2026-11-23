@@ -359,11 +359,7 @@ impl Focusable for TextField {
 
 impl TextField {
     /// Creates a new [`TextField`] initialized with `initial`.
-    pub fn new(
-        initial: impl Into<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(initial: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let blur_subscription = cx.on_blur(&focus_handle, window, |this, _window, cx| {
             this.buffer.collapse_selection();
@@ -653,20 +649,15 @@ impl Render for TextField {
                 } else {
                     px(-0.75)
                 };
-                let caret = div()
-                    .w(px(0.0))
-                    .h(px(14.0))
-                    .relative()
-                    .flex_none()
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left(caret_left)
-                            .w(px(1.5))
-                            .h(px(14.0))
-                            .bg(colors.text_accent),
-                    );
+                let caret = div().w(px(0.0)).h(px(14.0)).relative().flex_none().child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(caret_left)
+                        .w(px(1.5))
+                        .h(px(14.0))
+                        .bg(colors.text_accent),
+                );
                 h_flex()
                     .px(px(2.0))
                     .items_center()
@@ -826,11 +817,23 @@ mod tests {
 
     #[test]
     fn step_precision_maps_modifiers_to_blender_steps() {
-        assert_eq!(StepPrecision::from_modifiers(false, false), StepPrecision::Normal);
-        assert_eq!(StepPrecision::from_modifiers(true, false), StepPrecision::Fine);
-        assert_eq!(StepPrecision::from_modifiers(false, true), StepPrecision::Coarse);
+        assert_eq!(
+            StepPrecision::from_modifiers(false, false),
+            StepPrecision::Normal
+        );
+        assert_eq!(
+            StepPrecision::from_modifiers(true, false),
+            StepPrecision::Fine
+        );
+        assert_eq!(
+            StepPrecision::from_modifiers(false, true),
+            StepPrecision::Coarse
+        );
         // Shift takes precedence when combined with Ctrl.
-        assert_eq!(StepPrecision::from_modifiers(true, true), StepPrecision::Fine);
+        assert_eq!(
+            StepPrecision::from_modifiers(true, true),
+            StepPrecision::Fine
+        );
 
         assert_eq!(StepPrecision::Fine.integer_step(), 1);
         assert_eq!(StepPrecision::Normal.integer_step(), 10);

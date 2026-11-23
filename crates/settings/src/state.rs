@@ -153,7 +153,10 @@ impl SettingsModel {
 
     /// Sets whether the custom horizon & background layer is enabled and persists the change.
     pub fn set_horizon_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.update(|settings| settings.planetarium.horizon.enabled = enabled, cx);
+        self.update(
+            |settings| settings.planetarium.horizon.enabled = enabled,
+            cx,
+        );
     }
 
     /// Returns whether the extracted horizon contour line is drawn over 360° panorama images.

@@ -31,7 +31,10 @@ impl TitleBar {
             })
             .detach();
         }
-        if let Some(observer) = cx.try_global::<observer::GlobalObserver>().map(|g| g.0.clone()) {
+        if let Some(observer) = cx
+            .try_global::<observer::GlobalObserver>()
+            .map(|g| g.0.clone())
+        {
             cx.observe(&observer, |_this, _observer, cx| {
                 cx.notify();
             })
@@ -92,9 +95,7 @@ impl TitleBar {
                                         && state.daemon != protocol::DaemonStatus::Capturing
                                 });
                         if !can_capture {
-                            tracing::warn!(
-                                "Capture Frame ignored: daemon or camera is not ready"
-                            );
+                            tracing::warn!("Capture Frame ignored: daemon or camera is not ready");
                             return;
                         }
                         if let Some(sender) = cx.try_global::<client::DaemonCommandSender>() {

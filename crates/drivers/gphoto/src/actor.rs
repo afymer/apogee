@@ -315,11 +315,8 @@ impl CameraActor {
                             "Failed to select bulb shutterspeed '{b_choice}': {err}"
                         ))));
                     }
-                    match tokio::time::timeout(
-                        Duration::from_secs(5),
-                        camera.set_config(&shutter),
-                    )
-                    .await
+                    match tokio::time::timeout(Duration::from_secs(5), camera.set_config(&shutter))
+                        .await
                     {
                         Ok(Ok(())) => info!("Camera shutterspeed config updated to '{b_choice}'"),
                         Ok(Err(err)) => {
@@ -606,18 +603,18 @@ impl CameraActor {
             }
         };
 
-        let driver = match tokio::time::timeout(Duration::from_secs(5), uninit.initialize(&ctx)).await
-        {
-            Ok(Ok(driver)) => driver,
-            Ok(Err(err)) => {
-                debug!("Camera autodetect failed: {err}");
-                return None;
-            }
-            Err(_) => {
-                warn!("Timed out waiting for camera autodetect");
-                return None;
-            }
-        };
+        let driver =
+            match tokio::time::timeout(Duration::from_secs(5), uninit.initialize(&ctx)).await {
+                Ok(Ok(driver)) => driver,
+                Ok(Err(err)) => {
+                    debug!("Camera autodetect failed: {err}");
+                    return None;
+                }
+                Err(_) => {
+                    warn!("Timed out waiting for camera autodetect");
+                    return None;
+                }
+            };
 
         // Attempt to disable auto power-off if supported by camera model
         match tokio::time::timeout(
@@ -705,10 +702,7 @@ fn select_closest_iso_choice<'a>(
 
 fn parse_shutter_choice_secs(choice: &str) -> Option<f64> {
     let trimmed = choice.trim();
-    let stripped = trimmed
-        .strip_suffix(['s', 'S'])
-        .unwrap_or(trimmed)
-        .trim();
+    let stripped = trimmed.strip_suffix(['s', 'S']).unwrap_or(trimmed).trim();
     if stripped.is_empty()
         || stripped.eq_ignore_ascii_case("bulb")
         || stripped.eq_ignore_ascii_case("time")

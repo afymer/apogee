@@ -52,7 +52,10 @@ pub(crate) struct EnrichmentStats {
 }
 
 pub(crate) async fn fetch_bsc5_entries(client: &reqwest::Client) -> Result<Vec<Bsc5Entry>> {
-    info!("Downloading Yale Bright Star Catalog (BSC5) from {}...", BSC5_URL);
+    info!(
+        "Downloading Yale Bright Star Catalog (BSC5) from {}...",
+        BSC5_URL
+    );
     let bytes = client
         .get(BSC5_URL)
         .send()
@@ -160,8 +163,13 @@ pub(crate) fn parse_bsc5_text(text: &str) -> Vec<Bsc5Entry> {
             .filter(|v| v.is_finite())
             .unwrap_or(0.0);
 
-        let (ra_deg, dec_deg) =
-            propagate_j2000_arcsec(ra_j2000, dec_j2000, pmra_arcsec_yr, pmde_arcsec_yr, J2000_TO_GAIA_YEARS);
+        let (ra_deg, dec_deg) = propagate_j2000_arcsec(
+            ra_j2000,
+            dec_j2000,
+            pmra_arcsec_yr,
+            pmde_arcsec_yr,
+            J2000_TO_GAIA_YEARS,
+        );
 
         let hd = line[25..31].trim().parse::<u32>().ok();
         let bv = line[109..114]
@@ -194,8 +202,7 @@ pub(crate) fn propagate_j2000_arcsec(
 ) -> (f64, f64) {
     let cos_dec = dec_deg.to_radians().cos().abs().max(0.005);
     let prop_dec = (dec_deg + pm_de_arcsec_yr * dt_years / 3600.0).clamp(-90.0, 90.0);
-    let prop_ra =
-        (ra_deg + (pm_ra_arcsec_yr * dt_years / 3600.0) / cos_dec).rem_euclid(360.0);
+    let prop_ra = (ra_deg + (pm_ra_arcsec_yr * dt_years / 3600.0) / cos_dec).rem_euclid(360.0);
     (prop_ra, prop_dec)
 }
 
@@ -218,7 +225,9 @@ pub(crate) fn vmag_bv_to_gaia_photometry(vmag: f32, bv: Option<f32>) -> (f32, f3
         (2.10, 2.75, -1.15),
     ];
 
-    let x = bv.unwrap_or(0.60).clamp(ANCHORS[0].0, ANCHORS[ANCHORS.len() - 1].0);
+    let x = bv
+        .unwrap_or(0.60)
+        .clamp(ANCHORS[0].0, ANCHORS[ANCHORS.len() - 1].0);
     let (bp_rp, g_minus_v) = if x <= ANCHORS[0].0 {
         (ANCHORS[0].1, ANCHORS[0].2)
     } else if x >= ANCHORS[ANCHORS.len() - 1].0 {
@@ -343,7 +352,11 @@ fn slice_chars(chars: &[char], start: usize, end: usize) -> String {
         return String::new();
     }
     let end = end.min(chars.len());
-    chars[start..end].iter().collect::<String>().trim().to_string()
+    chars[start..end]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn parse_designation_ids(desig: &str) -> (Option<u16>, Option<u32>) {
@@ -445,7 +458,8 @@ fn parse_iau_csv(text: &str) -> Result<Vec<IauNameEntry>> {
             .position(|h| h.trim().eq_ignore_ascii_case(name))
     };
 
-    let name_idx = find_col("Proper Names").context("Missing \"Proper Names\" column in IAU CSV")?;
+    let name_idx =
+        find_col("Proper Names").context("Missing \"Proper Names\" column in IAU CSV")?;
     let desig_idx = find_col("Designation");
     let hip_idx = find_col("HIP");
     let bayer_idx = find_col("Bayer ID");
@@ -577,8 +591,7 @@ impl DecBandIndex {
                     continue;
                 }
                 let dmag = query.target_mag.map_or(0.0, |m| (star.g_mag - m).abs());
-                let mag_ok =
-                    dmag <= query.max_dmag || (sep < 3.0 && dmag <= query.max_dmag + 1.0);
+                let mag_ok = dmag <= query.max_dmag || (sep < 3.0 && dmag <= query.max_dmag + 1.0);
                 if !mag_ok {
                     continue;
                 }
@@ -648,8 +661,7 @@ pub(crate) fn enrich_catalog(
             max_sep_arcsec: 20.0,
             max_dmag: 2.5,
         };
-        let unclaimed_match =
-            gaia_index.find_best_match(stars, query, |s| s.metadata.hr.is_none());
+        let unclaimed_match = gaia_index.find_best_match(stars, query, |s| s.metadata.hr.is_none());
 
         if let Some(idx) = unclaimed_match {
             let star = &mut stars[idx];
@@ -666,8 +678,7 @@ pub(crate) fn enrich_catalog(
             continue;
         }
 
-        let already_claimed =
-            gaia_index.find_best_match(stars, query, |s| s.metadata.hr.is_some());
+        let already_claimed = gaia_index.find_best_match(stars, query, |s| s.metadata.hr.is_some());
 
         if already_claimed.is_some() {
             // An already-attached brighter BSC5 entry shares this unresolved Gaia star.
@@ -808,11 +819,26 @@ mod tests {
 
     #[test]
     fn bsc5_bayer_and_flamsteed_formatting() {
-        assert_eq!(format_bsc5_designation("  9Alp CMa").as_deref(), Some("α CMa"));
-        assert_eq!(format_bsc5_designation("   Gam Cas").as_deref(), Some("γ Cas"));
-        assert_eq!(format_bsc5_designation(" 34Mu 1Sco").as_deref(), Some("μ¹ Sco"));
-        assert_eq!(format_bsc5_designation("  1Pi 3Ori").as_deref(), Some("π³ Ori"));
-        assert_eq!(format_bsc5_designation(" 61    Cyg").as_deref(), Some("61 Cyg"));
+        assert_eq!(
+            format_bsc5_designation("  9Alp CMa").as_deref(),
+            Some("α CMa")
+        );
+        assert_eq!(
+            format_bsc5_designation("   Gam Cas").as_deref(),
+            Some("γ Cas")
+        );
+        assert_eq!(
+            format_bsc5_designation(" 34Mu 1Sco").as_deref(),
+            Some("μ¹ Sco")
+        );
+        assert_eq!(
+            format_bsc5_designation("  1Pi 3Ori").as_deref(),
+            Some("π³ Ori")
+        );
+        assert_eq!(
+            format_bsc5_designation(" 61    Cyg").as_deref(),
+            Some("61 Cyg")
+        );
         assert_eq!(format_bsc5_designation("          "), None);
     }
 
@@ -908,7 +934,10 @@ mod tests {
         enrich_catalog(&mut stars, &hipparcos, &bsc5, &iau, 8.0);
         assert_eq!(stars[0].metadata.proper_name.as_deref(), Some("Izar"));
         assert_eq!(stars[0].metadata.hr, Some(5506));
-        assert_eq!(stars[1].metadata.proper_name.as_deref(), Some("Pulcherrima"));
+        assert_eq!(
+            stars[1].metadata.proper_name.as_deref(),
+            Some("Pulcherrima")
+        );
         assert_eq!(stars[1].metadata.hr, Some(5505));
     }
 }

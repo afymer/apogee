@@ -11,8 +11,8 @@ use bevy::{
         render_resource::{
             BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendState, Extent3d,
             RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
-            SpecializedMeshPipeline, SpecializedMeshPipelineError, TextureDimension,
-            TextureFormat, TextureSampleType,
+            SpecializedMeshPipeline, SpecializedMeshPipelineError, TextureDimension, TextureFormat,
+            TextureSampleType,
             binding_types::{sampler, texture_2d, uniform_buffer},
         },
         sync_component::SyncComponent,
@@ -272,7 +272,10 @@ pub fn pick_solar_system_body(
         }
 
         let score = dist_px / hit_radius;
-        if best.as_ref().is_none_or(|(prev_score, _)| score < *prev_score) {
+        if best
+            .as_ref()
+            .is_none_or(|(prev_score, _)| score < *prev_score)
+        {
             best = Some((
                 score,
                 PickedSolarSystemBody {
@@ -354,7 +357,8 @@ impl CelestialSolarSystemMaterial {
             compute_moon_screen_tangent_dir(camera, projection.aspect_ratio, moon_cam, sun_cam);
         let (north_x, north_y) =
             compute_moon_screen_tangent_dir(camera, projection.aspect_ratio, moon_cam, north_cam);
-        let (sin_alpha, cos_alpha, lib_lon_rad, lib_lat_rad) = if let Some(phase) = moon.lunar_phase {
+        let (sin_alpha, cos_alpha, lib_lon_rad, lib_lat_rad) = if let Some(phase) = moon.lunar_phase
+        {
             let (s, c) = phase.phase_angle_deg.to_radians().sin_cos();
             (
                 s as f32,
@@ -411,12 +415,7 @@ impl CelestialSolarSystemMaterial {
                     sun.alt_deg as f32,
                     if moon_textures.has_textures { 1.0 } else { 0.0 },
                 ),
-                atmo_and_moon_north: Vec4::new(
-                    safe_atmo,
-                    moon.alt_deg as f32,
-                    north_x,
-                    north_y,
-                ),
+                atmo_and_moon_north: Vec4::new(safe_atmo, moon.alt_deg as f32, north_x, north_y),
                 moon_libration: Vec4::new(lib_lon_rad, lib_lat_rad, 0.0, 0.0),
             },
             moon_albedo: moon_textures.albedo.clone(),
@@ -440,10 +439,9 @@ fn compute_moon_screen_tangent_dir(
     let proj = camera.projection(aspect_ratio);
     let eps = 0.01_f64;
     let p_step = (moon_cam + t_norm * eps).normalize_or_zero();
-    if let (Some((x0, y0)), Some((x1, y1))) = (
-        proj.project_cam_dir(moon_cam),
-        proj.project_cam_dir(p_step),
-    ) {
+    if let (Some((x0, y0)), Some((x1, y1))) =
+        (proj.project_cam_dir(moon_cam), proj.project_cam_dir(p_step))
+    {
         let dx = (x1 - x0) * f64::from(aspect_ratio);
         let dy = y1 - y0;
         let len = dx.hypot(dy);

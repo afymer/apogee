@@ -202,7 +202,13 @@ impl Render for Dock {
                 .flex()
                 .flex_col()
                 .size_full()
-                .child(div().flex_1().min_h_0().overflow_hidden().child(active_handle.to_any()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(active_handle.to_any()),
+                )
                 .into_any_element();
         }
 

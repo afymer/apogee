@@ -246,7 +246,11 @@ impl StarSpatialIndex {
         let mut counts = vec![0_u32; PICK_HEALPIX_CELLS];
 
         for rec in records {
-            let dir = DVec3::new(f64::from(rec.pos[0]), f64::from(rec.pos[1]), f64::from(rec.pos[2]));
+            let dir = DVec3::new(
+                f64::from(rec.pos[0]),
+                f64::from(rec.pos[1]),
+                f64::from(rec.pos[2]),
+            );
             let (lon, lat) = cartesian_to_canonical_spherical(dir);
             let lon_rad = lon.normalize().radians();
             let lat_rad = lat
@@ -357,7 +361,10 @@ impl StarSpatialIndex {
             (cursor_ndc.0, cursor_ndc.1 + dndc_y),
             (cursor_ndc.0, cursor_ndc.1 - dndc_y),
         ] {
-            let probe = view_info.projection.unproject_ndc(px, py).normalize_or_zero();
+            let probe = view_info
+                .projection
+                .unproject_ndc(px, py)
+                .normalize_or_zero();
             if probe != DVec3::ZERO {
                 let ang = v_cam0.dot(probe).clamp(-1.0, 1.0).acos();
                 search_rad = search_rad.max(ang);
@@ -423,8 +430,8 @@ impl StarSpatialIndex {
                     continue;
                 }
 
-                let v_topo = view_info.camera_to_topo
-                    * (view_info.camera_to_icrs.transpose() * star_icrs);
+                let v_topo =
+                    view_info.camera_to_topo * (view_info.camera_to_icrs.transpose() * star_icrs);
                 let (az, alt) = topocentric_enu_to_spherical(v_topo);
                 let alt_deg = alt.degrees();
                 if occlude_below_horizon && alt_deg < 0.0 {
@@ -805,7 +812,15 @@ mod tests {
         ];
         let index = StarSpatialIndex::build(&records);
         let picked = index
-            .pick(&info, (faint_ndc_x, 0.0), viewport, 1.0, &params, false, None)
+            .pick(
+                &info,
+                (faint_ndc_x, 0.0),
+                viewport,
+                1.0,
+                &params,
+                false,
+                None,
+            )
             .expect("should pick isolated faint star");
         assert_eq!(picked.catalog_index, 1);
         assert!((picked.mag - 7.2).abs() < 0.02);
@@ -963,7 +978,15 @@ mod tests {
 
         let unnamed_ndc_x = (2.0 * 40.0) / viewport.0;
         let unnamed = index
-            .pick(&info, (unnamed_ndc_x, 0.0), viewport, 1.0, &params, false, None)
+            .pick(
+                &info,
+                (unnamed_ndc_x, 0.0),
+                viewport,
+                1.0,
+                &params,
+                false,
+                None,
+            )
             .expect("pick unnamed star");
         assert!(unnamed.metadata.is_none());
         assert_eq!(

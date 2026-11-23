@@ -624,7 +624,10 @@ mod tests {
         };
         assert_eq!(
             sirius.display_title_and_subtitle("A"),
-            ("Sirius".to_string(), Some("α CMa · HIP 32349 · A-type".to_string()))
+            (
+                "Sirius".to_string(),
+                Some("α CMa · HIP 32349 · A-type".to_string())
+            )
         );
 
         let gamma_cas = StarMetadata {
@@ -635,7 +638,10 @@ mod tests {
         };
         assert_eq!(
             gamma_cas.display_title_and_subtitle("B"),
-            ("γ Cas".to_string(), Some("HIP 4427 · HD 5394 · B-type".to_string()))
+            (
+                "γ Cas".to_string(),
+                Some("HIP 4427 · HD 5394 · B-type".to_string())
+            )
         );
 
         let hip_hd = StarMetadata {
@@ -645,7 +651,10 @@ mod tests {
         };
         assert_eq!(
             hip_hd.display_title_and_subtitle("K"),
-            ("HIP 12345".to_string(), Some("HD 67890 · K-type".to_string()))
+            (
+                "HIP 12345".to_string(),
+                Some("HD 67890 · K-type".to_string())
+            )
         );
 
         let hip_only = StarMetadata {
@@ -663,7 +672,10 @@ mod tests {
         };
         assert_eq!(
             tyc_only.display_title_and_subtitle("G"),
-            ("TYC 3663-2668-1".to_string(), Some("G-type Star".to_string()))
+            (
+                "TYC 3663-2668-1".to_string(),
+                Some("G-type Star".to_string())
+            )
         );
 
         let unnamed = StarMetadata::default();

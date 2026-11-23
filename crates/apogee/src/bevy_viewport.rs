@@ -234,11 +234,9 @@ impl QuickLayer {
             Self::AltAzGrid => rgb(0x66b5f5).into(),
             Self::EquatorialGrid => rgb(0xeb9b56).into(),
             Self::SolarSystem => rgb(0xf7c957).into(),
-            Self::Atmosphere
-            | Self::Ground
-            | Self::Horizon
-            | Self::HipsSurvey
-            | Self::Stars => default,
+            Self::Atmosphere | Self::Ground | Self::Horizon | Self::HipsSurvey | Self::Stars => {
+                default
+            }
         }
     }
 
@@ -272,7 +270,12 @@ impl QuickLayer {
         self.is_enabled(model) && self.stored_opacity(model) > 1e-3
     }
 
-    fn set_enabled(self, model: &mut SettingsModel, enabled: bool, cx: &mut Context<SettingsModel>) {
+    fn set_enabled(
+        self,
+        model: &mut SettingsModel,
+        enabled: bool,
+        cx: &mut Context<SettingsModel>,
+    ) {
         match self {
             Self::Atmosphere => model.set_atmosphere_enabled(enabled, cx),
             Self::Ground => model.set_ground_enabled(enabled, cx),
@@ -296,7 +299,12 @@ impl QuickLayer {
         }
     }
 
-    fn preview_opacity(self, model: &mut SettingsModel, value: f32, cx: &mut Context<SettingsModel>) {
+    fn preview_opacity(
+        self,
+        model: &mut SettingsModel,
+        value: f32,
+        cx: &mut Context<SettingsModel>,
+    ) {
         if !self.is_enabled(model) && value > 1e-3 {
             self.set_enabled(model, true, cx);
         }
@@ -312,7 +320,12 @@ impl QuickLayer {
         }
     }
 
-    fn commit_opacity(self, model: &mut SettingsModel, value: f32, cx: &mut Context<SettingsModel>) {
+    fn commit_opacity(
+        self,
+        model: &mut SettingsModel,
+        value: f32,
+        cx: &mut Context<SettingsModel>,
+    ) {
         if !self.is_enabled(model) && value > 1e-3 {
             self.set_enabled(model, true, cx);
         }
@@ -375,14 +388,15 @@ impl HoveredObject {
 
     fn title_and_badge(&self) -> (String, String) {
         match self {
-            Self::Star(s) => (
-                s.display_title_and_subtitle().0,
-                format!("G {:.2}", s.mag),
-            ),
+            Self::Star(s) => (s.display_title_and_subtitle().0, format!("G {:.2}", s.mag)),
             Self::SolarSystem(b) => match b.ephemeris.lunar_phase {
                 Some(phase) => (
                     b.body.name().to_string(),
-                    format!("{} ({:.0}%)", phase.phase_name(), phase.illuminated_fraction * 100.0),
+                    format!(
+                        "{} ({:.0}%)",
+                        phase.phase_name(),
+                        phase.illuminated_fraction * 100.0
+                    ),
                 ),
                 None => (
                     b.body.name().to_string(),
@@ -727,41 +741,40 @@ impl PlanetariumPanel {
             }
             let initial_scale_factor = f64::from(window.scale_factor());
 
-            let initial_selection_nonce =
-                if let Some(selection_entity) =
-                    cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone())
-                {
-                    let (initial_target, initial_nonce) = {
-                        let model = selection_entity.read(cx);
-                        (
-                            model
-                                .selected_object()
-                                .filter(|_| model.center_requested())
-                                .map(tracking_target_for_selected),
-                            Some(model.center_nonce()),
-                        )
-                    };
-                    if let Some(target) = initial_target {
-                        bridge.track_target(Some(target));
-                    }
-                    cx.observe(&selection_entity, |this: &mut Self, model, cx| {
-                        let model_ref = model.read(cx);
-                        let nonce = model_ref.center_nonce();
-                        if this.last_synced_selection_nonce != Some(nonce) {
-                            this.last_synced_selection_nonce = Some(nonce);
-                            let target = model_ref
-                                .selected_object()
-                                .filter(|_| model_ref.center_requested())
-                                .map(tracking_target_for_selected);
-                            this.bridge.track_target(target);
-                        }
-                        cx.notify();
-                    })
-                    .detach();
-                    initial_nonce
-                } else {
-                    None
+            let initial_selection_nonce = if let Some(selection_entity) =
+                cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone())
+            {
+                let (initial_target, initial_nonce) = {
+                    let model = selection_entity.read(cx);
+                    (
+                        model
+                            .selected_object()
+                            .filter(|_| model.center_requested())
+                            .map(tracking_target_for_selected),
+                        Some(model.center_nonce()),
+                    )
                 };
+                if let Some(target) = initial_target {
+                    bridge.track_target(Some(target));
+                }
+                cx.observe(&selection_entity, |this: &mut Self, model, cx| {
+                    let model_ref = model.read(cx);
+                    let nonce = model_ref.center_nonce();
+                    if this.last_synced_selection_nonce != Some(nonce) {
+                        this.last_synced_selection_nonce = Some(nonce);
+                        let target = model_ref
+                            .selected_object()
+                            .filter(|_| model_ref.center_requested())
+                            .map(tracking_target_for_selected);
+                        this.bridge.track_target(target);
+                    }
+                    cx.notify();
+                })
+                .detach();
+                initial_nonce
+            } else {
+                None
+            };
 
             cx.spawn(async move |this, cx| {
                 while let Some(()) = rx.next().await {
@@ -957,10 +970,12 @@ impl PlanetariumPanel {
                             let Some(current_bg) = current_bg else {
                                 return;
                             };
-                            let current_tag = current_bg
-                                .image_asset
-                                .as_ref()
-                                .map(|asset| (format!("{}:{asset}", current_bg.id), current_bg.image_revision));
+                            let current_tag = current_bg.image_asset.as_ref().map(|asset| {
+                                (
+                                    format!("{}:{asset}", current_bg.id),
+                                    current_bg.image_revision,
+                                )
+                            });
                             if current_tag.as_ref() != Some(&expected_tag) {
                                 return;
                             }
@@ -1105,12 +1120,12 @@ impl PlanetariumPanel {
 
         let moved_on_screen = match (self.hovered_object.as_ref(), next.as_ref()) {
             (Some(prev), Some(curr)) if prev.id() == curr.id() => {
-                let bounds_size = self
-                    .viewport_bounds
-                    .lock()
-                    .ok()
-                    .and_then(|g| *g)
-                    .map(|b| (f64::from(f32::from(b.size.width)), f64::from(f32::from(b.size.height))));
+                let bounds_size = self.viewport_bounds.lock().ok().and_then(|g| *g).map(|b| {
+                    (
+                        f64::from(f32::from(b.size.width)),
+                        f64::from(f32::from(b.size.height)),
+                    )
+                });
                 bounds_size.is_some_and(|(w, h)| {
                     let prev_ndc = prev.screen_ndc();
                     let curr_ndc = curr.screen_ndc();
@@ -1551,7 +1566,11 @@ impl Render for PlanetariumPanel {
                             .map(|s| {
                                 let fade = trajectory_edge_fade(s.hour, duration_hours, is_faded);
                                 (
-                                    [s.topo_enu.x as f32, s.topo_enu.y as f32, s.topo_enu.z as f32],
+                                    [
+                                        s.topo_enu.x as f32,
+                                        s.topo_enu.y as f32,
+                                        s.topo_enu.z as f32,
+                                    ],
                                     s.above_horizon,
                                     fade,
                                 )
@@ -1622,62 +1641,63 @@ impl Render for PlanetariumPanel {
                 if ring_fade <= 0.01 {
                     return None;
                 }
-                let inner_d = (object_radius_logical * 2.0 + SELECTION_RING_MARGIN_PX * 2.0)
-                    .clamp(SELECTION_RING_MIN_DIAMETER_PX, SELECTION_RING_MAX_DIAMETER_PX);
+                let inner_d = (object_radius_logical * 2.0 + SELECTION_RING_MARGIN_PX * 2.0).clamp(
+                    SELECTION_RING_MIN_DIAMETER_PX,
+                    SELECTION_RING_MAX_DIAMETER_PX,
+                );
                 let outer_d = inner_d + 6.0;
                 Some((selected.srgb(), sx, sy, inner_d, outer_d, ring_fade))
             });
 
-        let trajectory_overlay = selected_object
-            .as_ref()
-            .zip(trajectory_snapshot)
-            .and_then(|(selected, trajectory)| {
-                let (bw, bh) = proj_size?;
-                if bw <= 2.0 || bh <= 2.0 {
-                    return None;
-                }
-                let srgb = selected.srgb();
-                let view_info = self.latest_view_info;
-                let is_circumpolar = trajectory.visibility.circumpolar;
-
-                let mut event_badges = Vec::with_capacity(trajectory.events.len());
-                for event in &trajectory.events {
-                    let show_event = match event.kind {
-                        TrajectoryPointKind::Rise
-                        | TrajectoryPointKind::Transit
-                        | TrajectoryPointKind::Set => {
-                            event.above_horizon || !occlude_ground
-                        }
-                        TrajectoryPointKind::LowerTransit => {
-                            (is_circumpolar && event.above_horizon) || !occlude_ground
-                        }
-                    };
-                    if !show_event {
-                        continue;
+        let trajectory_overlay =
+            selected_object
+                .as_ref()
+                .zip(trajectory_snapshot)
+                .and_then(|(selected, trajectory)| {
+                    let (bw, bh) = proj_size?;
+                    if bw <= 2.0 || bh <= 2.0 {
+                        return None;
                     }
-                    let Some((nx, ny)) = view_info.project_topo_to_ndc(event.topo_enu) else {
-                        continue;
-                    };
-                    if nx.abs() > 0.98 || ny.abs() > 0.98 {
-                        continue;
-                    }
-                    let sx = (nx * 0.5 + 0.5) * bw;
-                    let sy = (0.5 - ny * 0.5) * bh;
-                    event_badges.push((*event, sx, sy));
-                }
+                    let srgb = selected.srgb();
+                    let view_info = self.latest_view_info;
+                    let is_circumpolar = trajectory.visibility.circumpolar;
 
-                Some((
-                    srgb,
-                    trajectory,
-                    view_info,
-                    (bw, bh),
-                    occlude_ground,
-                    event_badges,
-                    self.trajectory_start_local_hour,
-                    self.trajectory_duration_hours,
-                    self.trajectory_is_faded,
-                ))
-            });
+                    let mut event_badges = Vec::with_capacity(trajectory.events.len());
+                    for event in &trajectory.events {
+                        let show_event = match event.kind {
+                            TrajectoryPointKind::Rise
+                            | TrajectoryPointKind::Transit
+                            | TrajectoryPointKind::Set => event.above_horizon || !occlude_ground,
+                            TrajectoryPointKind::LowerTransit => {
+                                (is_circumpolar && event.above_horizon) || !occlude_ground
+                            }
+                        };
+                        if !show_event {
+                            continue;
+                        }
+                        let Some((nx, ny)) = view_info.project_topo_to_ndc(event.topo_enu) else {
+                            continue;
+                        };
+                        if nx.abs() > 0.98 || ny.abs() > 0.98 {
+                            continue;
+                        }
+                        let sx = (nx * 0.5 + 0.5) * bw;
+                        let sy = (0.5 - ny * 0.5) * bh;
+                        event_badges.push((*event, sx, sy));
+                    }
+
+                    Some((
+                        srgb,
+                        trajectory,
+                        view_info,
+                        (bw, bh),
+                        occlude_ground,
+                        event_badges,
+                        self.trajectory_start_local_hour,
+                        self.trajectory_duration_hours,
+                        self.trajectory_is_faded,
+                    ))
+                });
 
         let hovered_overlay = self
             .hovered_object
@@ -1696,7 +1716,10 @@ impl Render for PlanetariumPanel {
                     return None;
                 }
                 let reticle_d = (object_radius_logical * 2.0 + SELECTION_RING_MARGIN_PX * 2.0)
-                    .clamp(SELECTION_RING_MIN_DIAMETER_PX, SELECTION_RING_MAX_DIAMETER_PX);
+                    .clamp(
+                        SELECTION_RING_MIN_DIAMETER_PX,
+                        SELECTION_RING_MAX_DIAMETER_PX,
+                    );
                 let reticle_x = sx - reticle_d * 0.5;
                 let reticle_y = sy - reticle_d * 0.5;
 
@@ -1752,8 +1775,12 @@ impl Render for PlanetariumPanel {
             )
         });
 
-        let sky_pill =
-            self.render_layer_pill("layer_quick_toggles", &QuickLayer::SKY_LAYERS, pill_style, cx);
+        let sky_pill = self.render_layer_pill(
+            "layer_quick_toggles",
+            &QuickLayer::SKY_LAYERS,
+            pill_style,
+            cx,
+        );
         let grid_pill = self.render_layer_pill(
             "grid_quick_toggles",
             &QuickLayer::GRID_LAYERS,
@@ -1883,41 +1910,37 @@ impl Render for PlanetariumPanel {
                 .top_0()
                 .left_0(),
             )
-            .children(
-                self.cached_texture
-                    .as_ref()
-                    .map(|view| {
-                        // Draw at the texture's native size (top-left anchored) so a
-                        // resize snaps instead of stretching the stale frame.
-                        let surface = gpui::surface(view.clone());
-                        match texture_size {
-                            Some((tw, th)) => {
-                                let sc = scale_factor as f32;
-                                surface
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .w(px(tw as f32 / sc))
-                                    .h(px(th as f32 / sc))
-                            }
-                            None => surface.size_full(),
-                        }
-                    }),
-            )
+            .children(self.cached_texture.as_ref().map(|view| {
+                // Draw at the texture's native size (top-left anchored) so a
+                // resize snaps instead of stretching the stale frame.
+                let surface = gpui::surface(view.clone());
+                match texture_size {
+                    Some((tw, th)) => {
+                        let sc = scale_factor as f32;
+                        surface
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w(px(tw as f32 / sc))
+                            .h(px(th as f32 / sc))
+                    }
+                    None => surface.size_full(),
+                }
+            }))
             .when_some(
                 trajectory_overlay,
                 |el,
                  (
-                     srgb,
-                     trajectory,
-                     view_info,
-                     proj_dims,
-                     occlude_ground,
-                     event_badges,
-                     start_local_hour,
-                     duration_hours,
-                     is_faded,
-                 )| {
+                    srgb,
+                    trajectory,
+                    view_info,
+                    proj_dims,
+                    occlude_ground,
+                    event_badges,
+                    start_local_hour,
+                    duration_hours,
+                    is_faded,
+                )| {
                     let obj_rgb = Rgba {
                         r: srgb[0],
                         g: srgb[1],
@@ -1955,102 +1978,101 @@ impl Render for PlanetariumPanel {
                         .top_0()
                         .left_0(),
                     )
-                    .children(event_badges.into_iter().enumerate().map(
-                        |(idx, (event, sx, sy))| {
-                            let display_hour = (start_local_hour + event.hour).rem_euclid(24.0);
-                            let (icon_glyph, kind_label, detail_text) = match event.kind {
-                                TrajectoryPointKind::Transit => (
-                                    "▲",
-                                    "Transit",
-                                    format!(
-                                        "{} ({:+.0}°)",
-                                        format_local_hour_hm(display_hour),
-                                        event.alt_deg
+                    .children(
+                        event_badges
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, (event, sx, sy))| {
+                                let display_hour = (start_local_hour + event.hour).rem_euclid(24.0);
+                                let (icon_glyph, kind_label, detail_text) = match event.kind {
+                                    TrajectoryPointKind::Transit => (
+                                        "▲",
+                                        "Transit",
+                                        format!(
+                                            "{} ({:+.0}°)",
+                                            format_local_hour_hm(display_hour),
+                                            event.alt_deg
+                                        ),
                                     ),
-                                ),
-                                TrajectoryPointKind::Rise => (
-                                    "↗",
-                                    "Rise",
-                                    format_local_hour_hm(display_hour),
-                                ),
-                                TrajectoryPointKind::Set => (
-                                    "↘",
-                                    "Set",
-                                    format_local_hour_hm(display_hour),
-                                ),
-                                TrajectoryPointKind::LowerTransit => (
-                                    "▼",
-                                    "Low",
-                                    format!(
-                                        "{} ({:+.0}°)",
-                                        format_local_hour_hm(display_hour),
-                                        event.alt_deg
+                                    TrajectoryPointKind::Rise => {
+                                        ("↗", "Rise", format_local_hour_hm(display_hour))
+                                    }
+                                    TrajectoryPointKind::Set => {
+                                        ("↘", "Set", format_local_hour_hm(display_hour))
+                                    }
+                                    TrajectoryPointKind::LowerTransit => (
+                                        "▼",
+                                        "Low",
+                                        format!(
+                                            "{} ({:+.0}°)",
+                                            format_local_hour_hm(display_hour),
+                                            event.alt_deg
+                                        ),
                                     ),
-                                ),
-                            };
+                                };
 
-                            let pill_y = match event.kind {
-                                TrajectoryPointKind::Transit => (sy - 28.0).max(10.0),
-                                TrajectoryPointKind::LowerTransit => (sy + 10.0).min(bh - 30.0),
-                                TrajectoryPointKind::Rise | TrajectoryPointKind::Set => {
-                                    (sy - 24.0).clamp(10.0, (bh - 30.0).max(10.0))
-                                }
-                            };
-                            let pill_x = (sx + 10.0).clamp(10.0, (bw - 148.0).max(10.0));
-                            let jump_offset_hour = event.hour;
-                            let tip_text = format!(
-                                "{} at {} (Az {:.0}°, Alt {:+.1}°) — Click to jump",
-                                event.kind.label(),
-                                format_local_hour_hm(display_hour),
-                                event.az_deg,
-                                event.alt_deg
-                            );
+                                let pill_y = match event.kind {
+                                    TrajectoryPointKind::Transit => (sy - 28.0).max(10.0),
+                                    TrajectoryPointKind::LowerTransit => (sy + 10.0).min(bh - 30.0),
+                                    TrajectoryPointKind::Rise | TrajectoryPointKind::Set => {
+                                        (sy - 24.0).clamp(10.0, (bh - 30.0).max(10.0))
+                                    }
+                                };
+                                let pill_x = (sx + 10.0).clamp(10.0, (bw - 148.0).max(10.0));
+                                let jump_offset_hour = event.hour;
+                                let tip_text = format!(
+                                    "{} at {} (Az {:.0}°, Alt {:+.1}°) — Click to jump",
+                                    event.kind.label(),
+                                    format_local_hour_hm(display_hour),
+                                    event.az_deg,
+                                    event.alt_deg
+                                );
 
-                            h_flex()
-                                .id(("trajectory_event_badge", idx))
-                                .absolute()
-                                .left(px(pill_x as f32))
-                                .top(px(pill_y as f32))
-                                .items_center()
-                                .gap_1()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(popover_bg)
-                                .border_1()
-                                .border_color(obj_color.opacity(0.55))
-                                .shadow_md()
-                                .cursor_pointer()
-                                .hover(|s| s.border_color(obj_color.opacity(0.95)))
-                                .tooltip(Tooltip::text(tip_text))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.jump_to_trajectory_offset_hour(jump_offset_hour, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .text_size(px(9.5))
-                                        .text_color(obj_color)
-                                        .child(icon_glyph),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(text_color)
-                                        .child(kind_label),
-                                )
-                                .child(
-                                    div()
-                                        .font_buffer(cx)
-                                        .text_size(px(10.0))
-                                        .text_color(obj_color)
-                                        .child(detail_text),
-                                )
-                        },
-                    ))
+                                h_flex()
+                                    .id(("trajectory_event_badge", idx))
+                                    .absolute()
+                                    .left(px(pill_x as f32))
+                                    .top(px(pill_y as f32))
+                                    .items_center()
+                                    .gap_1()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(popover_bg)
+                                    .border_1()
+                                    .border_color(obj_color.opacity(0.55))
+                                    .shadow_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.border_color(obj_color.opacity(0.95)))
+                                    .tooltip(Tooltip::text(tip_text))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.jump_to_trajectory_offset_hour(jump_offset_hour, cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(px(9.5))
+                                            .text_color(obj_color)
+                                            .child(icon_glyph),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(text_color)
+                                            .child(kind_label),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_buffer(cx)
+                                            .text_size(px(10.0))
+                                            .text_color(obj_color)
+                                            .child(detail_text),
+                                    )
+                            }),
+                    )
                 },
             )
             .when_some(
@@ -2091,17 +2113,17 @@ impl Render for PlanetariumPanel {
                 hovered_overlay,
                 |el,
                  (
-                     hovered_id,
-                     srgb,
-                     badge_label,
-                     title,
-                     reticle_x,
-                     reticle_y,
-                     reticle_d,
-                     anchor_right,
-                     anchor_x,
-                     pill_y,
-                 )| {
+                    hovered_id,
+                    srgb,
+                    badge_label,
+                    title,
+                    reticle_x,
+                    reticle_y,
+                    reticle_d,
+                    anchor_right,
+                    anchor_x,
+                    pill_y,
+                )| {
                     let star_color: Hsla = Rgba {
                         r: srgb[0],
                         g: srgb[1],
@@ -2237,9 +2259,7 @@ impl Render for PlanetariumPanel {
                                                 .rounded_full()
                                                 .cursor_pointer()
                                                 .when(is_active, |el| el.bg(active_bg))
-                                                .when(!is_active, |el| {
-                                                    el.hover(|s| s.bg(hover_bg))
-                                                })
+                                                .when(!is_active, |el| el.hover(|s| s.bg(hover_bg)))
                                                 .tooltip(Tooltip::text(tip))
                                                 .on_click(cx.listener(
                                                     move |this, _event, _window, cx| {
@@ -2261,82 +2281,85 @@ impl Render for PlanetariumPanel {
                                     )),
                             ),
                     )
-                    .when_some(active_popover_state, |el, (layer, is_enabled, stored_pct)| {
-                        let value_label = if is_enabled {
-                            format!("{stored_pct:.0}%")
-                        } else {
-                            "Off".to_string()
-                        };
+                    .when_some(
+                        active_popover_state,
+                        |el, (layer, is_enabled, stored_pct)| {
+                            let value_label = if is_enabled {
+                                format!("{stored_pct:.0}%")
+                            } else {
+                                "Off".to_string()
+                            };
 
-                        el.child(
-                            v_flex()
-                                .id("quick_layer_opacity_popover")
-                                .w(px(212.0))
-                                .px_3()
-                                .py_2()
-                                .gap_1p5()
-                                .rounded_lg()
-                                .bg(popover_bg)
-                                .border_1()
-                                .border_color(popover_border)
-                                .shadow_lg()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_mouse_down(MouseButton::Right, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                .on_mouse_move(|_, _, cx| cx.stop_propagation())
-                                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                                    if *hovered {
-                                        this.cursor_position = None;
-                                        this.sync_status_bar(cx);
-                                        this.clear_hovered_star(cx);
-                                    }
-                                }))
-                                .child(
-                                    h_flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
-                                        .child(
-                                            h_flex()
-                                                .items_center()
-                                                .gap_1p5()
-                                                .child(
-                                                    svg()
-                                                        .data(layer.icon())
-                                                        .size(px(13.0))
-                                                        .flex_none()
-                                                        .text_color(if is_enabled {
-                                                            layer.active_icon_color(text_color)
-                                                        } else {
-                                                            muted_text
-                                                        }),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(px(12.0))
-                                                        .text_color(text_color)
-                                                        .child(layer.title()),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .font_buffer(cx)
-                                                .text_size(px(11.5))
-                                                .text_color(if is_enabled {
-                                                    text_color
-                                                } else {
-                                                    muted_text
-                                                })
-                                                .child(value_label),
-                                        ),
-                                )
-                                .child(self.opacity_slider.clone()),
-                        )
-                    }),
+                            el.child(
+                                v_flex()
+                                    .id("quick_layer_opacity_popover")
+                                    .w(px(212.0))
+                                    .px_3()
+                                    .py_2()
+                                    .gap_1p5()
+                                    .rounded_lg()
+                                    .bg(popover_bg)
+                                    .border_1()
+                                    .border_color(popover_border)
+                                    .shadow_lg()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                    .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                                    .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                                        if *hovered {
+                                            this.cursor_position = None;
+                                            this.sync_status_bar(cx);
+                                            this.clear_hovered_star(cx);
+                                        }
+                                    }))
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(
+                                                        svg()
+                                                            .data(layer.icon())
+                                                            .size(px(13.0))
+                                                            .flex_none()
+                                                            .text_color(if is_enabled {
+                                                                layer.active_icon_color(text_color)
+                                                            } else {
+                                                                muted_text
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(12.0))
+                                                            .text_color(text_color)
+                                                            .child(layer.title()),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_buffer(cx)
+                                                    .text_size(px(11.5))
+                                                    .text_color(if is_enabled {
+                                                        text_color
+                                                    } else {
+                                                        muted_text
+                                                    })
+                                                    .child(value_label),
+                                            ),
+                                    )
+                                    .child(self.opacity_slider.clone()),
+                            )
+                        },
+                    ),
             )
     }
 }
@@ -2373,9 +2396,7 @@ fn sample_trajectory_at_offset(
     }
     let t = ((offset_hour - s0.hour) / span).clamp(0.0, 1.0);
     let topo_enu = s0.topo_enu.lerp(s1.topo_enu, t).normalize_or_zero();
-    let above_horizon = if s0.above_horizon == s1.above_horizon {
-        s0.above_horizon
-    } else if t < 0.5 {
+    let above_horizon = if s0.above_horizon == s1.above_horizon || t < 0.5 {
         s0.above_horizon
     } else {
         s1.above_horizon
@@ -2461,16 +2482,51 @@ fn paint_planetarium_trajectory(
         let pt = point(px(origin_x + sx as f32), px(origin_y + sy as f32));
         match event.kind {
             TrajectoryPointKind::Transit => {
-                paint_disc(window, pt, 5.0, bright_ring.alpha(0.95), 1.4, dark_ring.alpha(0.88));
-                paint_disc(window, pt, 3.2, obj_rgb.alpha(1.0), 0.0, dark_ring.alpha(0.0));
+                paint_disc(
+                    window,
+                    pt,
+                    5.0,
+                    bright_ring.alpha(0.95),
+                    1.4,
+                    dark_ring.alpha(0.88),
+                );
+                paint_disc(
+                    window,
+                    pt,
+                    3.2,
+                    obj_rgb.alpha(1.0),
+                    0.0,
+                    dark_ring.alpha(0.0),
+                );
             }
             TrajectoryPointKind::Rise | TrajectoryPointKind::Set => {
                 paint_disc(window, pt, 4.1, crisp_color, 1.3, dark_ring.alpha(0.85));
-                paint_disc(window, pt, 2.2, dark_ring.alpha(0.9), 0.0, dark_ring.alpha(0.0));
+                paint_disc(
+                    window,
+                    pt,
+                    2.2,
+                    dark_ring.alpha(0.9),
+                    0.0,
+                    dark_ring.alpha(0.0),
+                );
             }
             TrajectoryPointKind::LowerTransit => {
-                paint_disc(window, pt, 3.7, obj_rgb.alpha(0.85), 1.3, dark_ring.alpha(0.82));
-                paint_disc(window, pt, 1.9, bright_ring.alpha(0.9), 0.0, dark_ring.alpha(0.0));
+                paint_disc(
+                    window,
+                    pt,
+                    3.7,
+                    obj_rgb.alpha(0.85),
+                    1.3,
+                    dark_ring.alpha(0.82),
+                );
+                paint_disc(
+                    window,
+                    pt,
+                    1.9,
+                    bright_ring.alpha(0.9),
+                    0.0,
+                    dark_ring.alpha(0.0),
+                );
             }
         }
     }
@@ -2538,7 +2594,8 @@ mod tests {
 
         let reference = dirs[0];
         for dir in &dirs[1..] {
-            let angular_err_arcsec = reference.dot(*dir).clamp(-1.0, 1.0).acos().to_degrees() * 3600.0;
+            let angular_err_arcsec =
+                reference.dot(*dir).clamp(-1.0, 1.0).acos().to_degrees() * 3600.0;
             assert!(
                 angular_err_arcsec < 1.0,
                 "hourly dot jittered by {angular_err_arcsec:.3}\" across window shifts"
@@ -2551,7 +2608,10 @@ mod tests {
         assert_eq!(selection_ring_fade(10.0), 1.0);
         assert_eq!(selection_ring_fade(43.0), 1.0);
         let mid = selection_ring_fade(51.0);
-        assert!(mid > 0.0 && mid < 1.0, "expected partial fade at 51px, got {mid}");
+        assert!(
+            mid > 0.0 && mid < 1.0,
+            "expected partial fade at 51px, got {mid}"
+        );
         assert_eq!(selection_ring_fade(60.0), 0.0);
         assert_eq!(selection_ring_fade(200.0), 0.0);
     }

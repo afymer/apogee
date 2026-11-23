@@ -60,12 +60,14 @@ impl GeoLocation {
     #[must_use]
     pub fn sanitized(self) -> Self {
         let lat = if self.latitude_deg.is_finite() {
-            self.latitude_deg.clamp(Self::MIN_LAT_DEG, Self::MAX_LAT_DEG)
+            self.latitude_deg
+                .clamp(Self::MIN_LAT_DEG, Self::MAX_LAT_DEG)
         } else {
             0.0
         };
         let lon = if self.longitude_deg.is_finite() {
-            self.longitude_deg.clamp(Self::MIN_LON_DEG, Self::MAX_LON_DEG)
+            self.longitude_deg
+                .clamp(Self::MIN_LON_DEG, Self::MAX_LON_DEG)
         } else {
             0.0
         };
@@ -170,9 +172,11 @@ pub fn parse_coordinate(input: &str, axis: CoordinateAxis) -> Option<f64> {
     if let Some(first) = body.chars().next() {
         if is_hemisphere_letter(first) {
             let rest = &body[first.len_utf8()..];
-            if rest.chars().next().is_some_and(|c| {
-                c.is_whitespace() || c == '+' || c == '-' || c.is_ascii_digit()
-            }) {
+            if rest
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_whitespace() || c == '+' || c == '-' || c.is_ascii_digit())
+            {
                 hemi_char = Some(first);
                 body = rest.trim_start();
             }
@@ -249,7 +253,10 @@ pub fn parse_coordinate(input: &str, axis: CoordinateAxis) -> Option<f64> {
             nums[0] + nums[1] / 60.0
         }
         3 => {
-            if nums[0].fract() != 0.0 || nums[1].fract() != 0.0 || nums[1] >= 60.0 || nums[2] >= 60.0
+            if nums[0].fract() != 0.0
+                || nums[1].fract() != 0.0
+                || nums[1] >= 60.0
+                || nums[2] >= 60.0
             {
                 return None;
             }
@@ -292,8 +299,7 @@ pub fn parse_elevation_m(input: &str) -> Option<f64> {
 
     let raw: f64 = num_str.trim().parse().ok()?;
     let meters = raw * factor;
-    if !meters.is_finite()
-        || !(GeoLocation::MIN_ELEV_M..=GeoLocation::MAX_ELEV_M).contains(&meters)
+    if !meters.is_finite() || !(GeoLocation::MIN_ELEV_M..=GeoLocation::MAX_ELEV_M).contains(&meters)
     {
         return None;
     }
@@ -792,9 +798,7 @@ impl ObserverCatalog {
             updated_at_unix_ms: now_unix_ms(),
         });
         self.active_profile_id = id;
-        self.profiles
-            .last()
-            .unwrap_or(&self.profiles[0])
+        self.profiles.last().unwrap_or(&self.profiles[0])
     }
 
     /// Deletes a profile by ID unless it is the sole remaining profile.

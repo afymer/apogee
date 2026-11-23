@@ -18,12 +18,12 @@ use bevy::{
         render_asset::RenderAssets,
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            BlendState, Buffer, BufferId, BufferSlice, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-            FragmentState, IndexFormat, MultisampleState, PipelineCache, PrimitiveState,
-            PrimitiveTopology, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-            SamplerBindingType, ShaderStages, ShaderType, SpecializedMeshPipeline,
-            SpecializedMeshPipelineError, SpecializedMeshPipelines, SpecializedRenderPipelines,
-            TextureFormat, TextureSampleType, VertexState,
+            BlendState, Buffer, BufferId, BufferSlice, CachedRenderPipelineId, ColorTargetState,
+            ColorWrites, FragmentState, IndexFormat, MultisampleState, PipelineCache,
+            PrimitiveState, PrimitiveTopology, RenderPassDescriptor, RenderPipeline,
+            RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
+            SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines,
+            SpecializedRenderPipelines, TextureFormat, TextureSampleType, VertexState,
             binding_types::{sampler, texture_2d, uniform_buffer},
         },
         renderer::{RenderContext, ViewQuery},
@@ -176,7 +176,6 @@ pub struct CelestialPipelineKey {
     pub samples: u32,
     pub topology: PrimitiveTopology,
 }
-
 
 pub fn pipeline_descriptor(
     label: &'static str,

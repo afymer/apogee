@@ -269,7 +269,10 @@ impl BindingSource {
     }
 }
 
-fn effective_binding(spec: &ShortcutSpec, settings: &AppSettings) -> (Option<String>, BindingSource) {
+fn effective_binding(
+    spec: &ShortcutSpec,
+    settings: &AppSettings,
+) -> (Option<String>, BindingSource) {
     if let Some(override_val) = settings.keymap.overrides.get(spec.id) {
         let canonical = override_val.as_deref().and_then(canonicalize_binding);
         (canonical, BindingSource::User)
@@ -404,22 +407,24 @@ impl ShortcutsWindow {
         // Intercept keystrokes when this window is active and either the Edit modal
         // or keystroke-search recording is open.
         let this_weak = cx.entity().downgrade();
-        subscriptions.push(cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
-            if window.window_handle().window_id() != window_id {
-                return;
-            }
-            let Some(entity) = this_weak.upgrade() else {
-                return;
-            };
-            let should_capture = entity.read(cx).is_capturing_keystrokes();
-            if !should_capture {
-                return;
-            }
-            cx.stop_propagation();
-            entity.update(cx, |this, cx| {
-                this.handle_captured_keystroke(&event.keystroke, cx);
-            });
-        }));
+        subscriptions.push(
+            cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
+                if window.window_handle().window_id() != window_id {
+                    return;
+                }
+                let Some(entity) = this_weak.upgrade() else {
+                    return;
+                };
+                let should_capture = entity.read(cx).is_capturing_keystrokes();
+                if !should_capture {
+                    return;
+                }
+                cx.stop_propagation();
+                entity.update(cx, |this, cx| {
+                    this.handle_captured_keystroke(&event.keystroke, cx);
+                });
+            }),
+        );
 
         subscriptions.push(cx.on_window_closed(|cx, _window_id| {
             if let Some(existing_window) = cx
@@ -476,7 +481,8 @@ impl ShortcutsWindow {
                 return;
             }
 
-            let kb_ks = KeybindingKeystroke::from_keystroke(normalize_captured_keystroke(keystroke));
+            let kb_ks =
+                KeybindingKeystroke::from_keystroke(normalize_captured_keystroke(keystroke));
             if modal.recorded.len() >= MAX_CHORD_KEYSTROKES {
                 modal.recorded.clear();
             }
@@ -499,7 +505,8 @@ impl ShortcutsWindow {
                 return;
             }
 
-            let kb_ks = KeybindingKeystroke::from_keystroke(normalize_captured_keystroke(keystroke));
+            let kb_ks =
+                KeybindingKeystroke::from_keystroke(normalize_captured_keystroke(keystroke));
             if self.keystroke_filter.len() >= MAX_CHORD_KEYSTROKES {
                 self.keystroke_filter.clear();
             }
@@ -524,7 +531,12 @@ impl ShortcutsWindow {
         cx.notify();
     }
 
-    fn open_edit_modal(&mut self, spec_index: usize, app_settings: &AppSettings, cx: &mut Context<Self>) {
+    fn open_edit_modal(
+        &mut self,
+        spec_index: usize,
+        app_settings: &AppSettings,
+        cx: &mut Context<Self>,
+    ) {
         let Some(spec) = self.specs.get(spec_index) else {
             return;
         };
@@ -653,11 +665,7 @@ impl ShortcutsWindow {
             .collect()
     }
 
-    fn render_toolbar(
-        &self,
-        has_overrides: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_toolbar(&self, has_overrides: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let has_query = !self.search_query.is_empty();
         let colors = cx.theme().colors();
 
@@ -678,9 +686,11 @@ impl ShortcutsWindow {
                             .gap_0p5()
                             .child(Label::new("Keyboard Shortcuts").size(LabelSize::Large))
                             .child(
-                                Label::new("Double-click a shortcut or click the edit icon to rebind it.")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
+                                Label::new(
+                                    "Double-click a shortcut or click the edit icon to rebind it.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                             ),
                     )
                     .when(has_overrides, |this| {
@@ -738,10 +748,12 @@ impl ShortcutsWindow {
             )
             .when(self.keystroke_search_active, |this| {
                 let recorded_el = if self.keystroke_filter.is_empty() {
-                    Label::new("Recording keystrokes… Press a key combination to filter (Esc to exit)")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .into_any_element()
+                    Label::new(
+                        "Recording keystrokes… Press a key combination to filter (Esc to exit)",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .into_any_element()
                 } else {
                     ui::KeyBinding::from_keystrokes(
                         Rc::from(self.keystroke_filter.as_slice()),
@@ -776,14 +788,19 @@ impl ShortcutsWindow {
                         )
                         .when(!self.keystroke_filter.is_empty(), |bar| {
                             bar.child(
-                                IconButton::new("shortcuts-clear-keystroke-filter", IconName::Close)
-                                    .icon_size(IconSize::Small)
-                                    .icon_color(Color::Muted)
-                                    .tooltip(Tooltip::text("Clear Keystroke Filter"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                IconButton::new(
+                                    "shortcuts-clear-keystroke-filter",
+                                    IconName::Close,
+                                )
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip(Tooltip::text("Clear Keystroke Filter"))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.keystroke_filter.clear();
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                         }),
                 )
@@ -852,11 +869,7 @@ impl ShortcutsWindow {
                 .into_any_element(),
         };
 
-        let source_color = if is_user {
-            Color::Accent
-        } else {
-            Color::Muted
-        };
+        let source_color = if is_user { Color::Accent } else { Color::Muted };
 
         let row_bg = if is_selected {
             colors.element_selected
@@ -970,9 +983,11 @@ impl ShortcutsWindow {
                                     .icon_size(IconSize::Small)
                                     .icon_color(Color::Muted)
                                     .tooltip(Tooltip::text("Unbind"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.unbind_action(spec_index, cx);
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.unbind_action(spec_index, cx);
+                                        },
+                                    )),
                                 )
                             }),
                     ),
@@ -1331,7 +1346,10 @@ mod tests {
             settings_entity.update(cx, |model, cx| {
                 model.set_keybinding_override("apogee::OpenSettings", None, cx);
             });
-            assert_eq!(keymap.borrow().bindings_for_action(&OpenSettings).count(), 0);
+            assert_eq!(
+                keymap.borrow().bindings_for_action(&OpenSettings).count(),
+                0
+            );
 
             // Reset back to default.
             settings_entity.update(cx, |model, cx| {

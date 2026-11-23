@@ -7,8 +7,8 @@ use gpui::{
     App, Bounds, ContentMask, Context, Corners, CursorStyle, Entity, FocusHandle, Focusable, Hsla,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, PathPromptOptions, Pixels, Point, Render, RenderImage, Rgba, ScrollDelta,
-    ScrollWheelEvent, TitlebarOptions, Window, WindowBounds, WindowOptions, div, fill, hsla,
-    point, prelude::*, px, rgb, size, svg,
+    ScrollWheelEvent, TitlebarOptions, Window, WindowBounds, WindowOptions, div, fill, hsla, point,
+    prelude::*, px, rgb, size, svg,
 };
 use persistence::HorizonBackground;
 use ui::{
@@ -18,9 +18,9 @@ use ui::{
 };
 
 use crate::extraction::{
-    EDITOR_PREVIEW_MAX_HEIGHT, EDITOR_PREVIEW_MAX_WIDTH, HorizonExtractionParams,
-    WorkingPanorama, decode_and_prepare_panorama, decode_for_gpui_preview,
-    decode_thumbnail_render_image, extract_horizon_from_working,
+    EDITOR_PREVIEW_MAX_HEIGHT, EDITOR_PREVIEW_MAX_WIDTH, HorizonExtractionParams, WorkingPanorama,
+    decode_and_prepare_panorama, decode_for_gpui_preview, decode_thumbnail_render_image,
+    extract_horizon_from_working,
 };
 use crate::state::GlobalHorizons;
 
@@ -358,9 +358,8 @@ impl HorizonManagerWindow {
             .map_or(0.0, |p| p.azimuth_offset_deg);
         let default_params = HorizonExtractionParams::default();
 
-        let name_input = cx.new(|cx| {
-            TextField::new(initial_name, window, cx).placeholder("Background name")
-        });
+        let name_input =
+            cx.new(|cx| TextField::new(initial_name, window, cx).placeholder("Background name"));
         let offset_slider = cx.new(|_cx| {
             Slider::new((initial_offset_deg / 360.0) as f32)
                 .default_value(0.0)
@@ -458,8 +457,10 @@ impl HorizonManagerWindow {
     }
 
     fn wire_name_input(input: &Entity<TextField>, window: &Window, cx: &mut Context<Self>) {
-        cx.subscribe_in(input, window, |this, entity, event: &TextFieldEvent, window, cx| {
-            match event {
+        cx.subscribe_in(
+            input,
+            window,
+            |this, entity, event: &TextFieldEvent, window, cx| match event {
                 TextFieldEvent::Submit(raw) | TextFieldEvent::Blur(raw) => {
                     let Some(id) = this.selected_id.clone() else {
                         return;
@@ -500,8 +501,8 @@ impl HorizonManagerWindow {
                     window.focus(&this.focus_handle, cx);
                 }
                 TextFieldEvent::Change(_) | TextFieldEvent::Step { .. } => {}
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -533,66 +534,70 @@ impl HorizonManagerWindow {
     }
 
     fn wire_offset_input(input: &Entity<TextField>, window: &Window, cx: &mut Context<Self>) {
-        cx.subscribe_in(input, window, |this, entity, event: &TextFieldEvent, window, cx| {
-            let Some(mut profile) = this.editing_profile.clone() else {
-                return;
-            };
-            match event {
-                TextFieldEvent::Submit(raw) => {
-                    if let Some(deg) = parse_offset_deg(raw) {
-                        this.push_undo_snapshot();
-                        profile.azimuth_offset_deg = deg;
-                        this.apply_profile_change(profile, true, cx);
-                        entity.update(cx, |f, cx| f.set_invalid(false, cx));
-                        window.focus(&this.focus_handle, cx);
-                    } else {
-                        entity.update(cx, |f, cx| f.set_invalid(true, cx));
-                    }
-                }
-                TextFieldEvent::Blur(raw) => {
-                    if let Some(deg) = parse_offset_deg(raw) {
-                        if (deg - profile.azimuth_offset_deg).abs() > 1e-4 {
+        cx.subscribe_in(
+            input,
+            window,
+            |this, entity, event: &TextFieldEvent, window, cx| {
+                let Some(mut profile) = this.editing_profile.clone() else {
+                    return;
+                };
+                match event {
+                    TextFieldEvent::Submit(raw) => {
+                        if let Some(deg) = parse_offset_deg(raw) {
                             this.push_undo_snapshot();
                             profile.azimuth_offset_deg = deg;
                             this.apply_profile_change(profile, true, cx);
+                            entity.update(cx, |f, cx| f.set_invalid(false, cx));
+                            window.focus(&this.focus_handle, cx);
+                        } else {
+                            entity.update(cx, |f, cx| f.set_invalid(true, cx));
+                        }
+                    }
+                    TextFieldEvent::Blur(raw) => {
+                        if let Some(deg) = parse_offset_deg(raw) {
+                            if (deg - profile.azimuth_offset_deg).abs() > 1e-4 {
+                                this.push_undo_snapshot();
+                                profile.azimuth_offset_deg = deg;
+                                this.apply_profile_change(profile, true, cx);
+                            } else {
+                                entity.update(cx, |f, cx| {
+                                    f.set_text(format!("{deg:.1}"), cx);
+                                });
+                            }
                         } else {
                             entity.update(cx, |f, cx| {
-                                f.set_text(format!("{deg:.1}"), cx);
+                                f.set_text(format!("{:.1}", profile.azimuth_offset_deg), cx);
                             });
                         }
-                    } else {
+                        entity.update(cx, |f, cx| f.set_invalid(false, cx));
+                    }
+                    TextFieldEvent::Step {
+                        direction,
+                        precision,
+                    } => {
+                        let base = parse_offset_deg(entity.read(cx).text())
+                            .unwrap_or(profile.azimuth_offset_deg);
+                        let step = match precision {
+                            StepPrecision::Fine => 0.5,
+                            StepPrecision::Normal => 1.0,
+                            StepPrecision::Coarse => 10.0,
+                        };
+                        let next = (base + f64::from(*direction) * step).rem_euclid(360.0);
+                        this.push_undo_snapshot();
+                        profile.azimuth_offset_deg = next;
+                        this.apply_profile_change(profile, true, cx);
+                    }
+                    TextFieldEvent::Cancel => {
                         entity.update(cx, |f, cx| {
                             f.set_text(format!("{:.1}", profile.azimuth_offset_deg), cx);
+                            f.set_invalid(false, cx);
                         });
+                        window.focus(&this.focus_handle, cx);
                     }
-                    entity.update(cx, |f, cx| f.set_invalid(false, cx));
+                    TextFieldEvent::Change(_) => {}
                 }
-                TextFieldEvent::Step {
-                    direction,
-                    precision,
-                } => {
-                    let base = parse_offset_deg(entity.read(cx).text())
-                        .unwrap_or(profile.azimuth_offset_deg);
-                    let step = match precision {
-                        StepPrecision::Fine => 0.5,
-                        StepPrecision::Normal => 1.0,
-                        StepPrecision::Coarse => 10.0,
-                    };
-                    let next = (base + f64::from(*direction) * step).rem_euclid(360.0);
-                    this.push_undo_snapshot();
-                    profile.azimuth_offset_deg = next;
-                    this.apply_profile_change(profile, true, cx);
-                }
-                TextFieldEvent::Cancel => {
-                    entity.update(cx, |f, cx| {
-                        f.set_text(format!("{:.1}", profile.azimuth_offset_deg), cx);
-                        f.set_invalid(false, cx);
-                    });
-                    window.focus(&this.focus_handle, cx);
-                }
-                TextFieldEvent::Change(_) => {}
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -601,8 +606,9 @@ impl HorizonManagerWindow {
         smooth_slider: &Entity<Slider>,
         cx: &mut Context<Self>,
     ) {
-        cx.subscribe(bias_slider, |this, _slider, event: &SliderEvent, cx| {
-            match *event {
+        cx.subscribe(
+            bias_slider,
+            |this, _slider, event: &SliderEvent, cx| match *event {
                 SliderEvent::Change(t) => {
                     this.extraction_params.sky_bias = (t.clamp(0.0, 1.0) * 2.0) - 1.0;
                     this.run_live_extraction(false, cx);
@@ -611,12 +617,13 @@ impl HorizonManagerWindow {
                     this.extraction_params.sky_bias = (t.clamp(0.0, 1.0) * 2.0) - 1.0;
                     this.run_live_extraction(true, cx);
                 }
-            }
-        })
+            },
+        )
         .detach();
 
-        cx.subscribe(smooth_slider, |this, _slider, event: &SliderEvent, cx| {
-            match *event {
+        cx.subscribe(
+            smooth_slider,
+            |this, _slider, event: &SliderEvent, cx| match *event {
                 SliderEvent::Change(t) => {
                     this.extraction_params.smoothness = t.clamp(0.0, 1.0);
                     this.run_live_extraction(false, cx);
@@ -625,8 +632,8 @@ impl HorizonManagerWindow {
                     this.extraction_params.smoothness = t.clamp(0.0, 1.0);
                     this.run_live_extraction(true, cx);
                 }
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -695,12 +702,7 @@ impl HorizonManagerWindow {
         cx.notify();
     }
 
-    pub fn select_background(
-        &mut self,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn select_background(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_id.as_deref() == Some(id) {
             return;
         }
@@ -753,12 +755,7 @@ impl HorizonManagerWindow {
         });
     }
 
-    fn trigger_preview_load(
-        &mut self,
-        id: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn trigger_preview_load(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(horizons) = cx.try_global::<GlobalHorizons>().map(|g| g.0.clone()) else {
             return;
         };
@@ -992,8 +989,9 @@ impl HorizonManagerWindow {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let bytes = std::fs::read(&path_clone)
-                        .map_err(|e| format!("Failed to read file {}: {e}", path_clone.display()))?;
+                    let bytes = std::fs::read(&path_clone).map_err(|e| {
+                        format!("Failed to read file {}: {e}", path_clone.display())
+                    })?;
                     let prepared = decode_and_prepare_panorama(&bytes)?;
                     let samples = extract_horizon_from_working(&prepared.working, params);
                     Ok::<_, String>((prepared, samples))
@@ -1053,7 +1051,13 @@ impl HorizonManagerWindow {
                     }
                 } else {
                     let res = horizons.update(cx, |model, cx| {
-                        model.import_prepared(&default_name, source_filename, &prepared, samples, cx)
+                        model.import_prepared(
+                            &default_name,
+                            source_filename,
+                            &prepared,
+                            samples,
+                            cx,
+                        )
                     });
                     match res {
                         Ok(new_id) => {
@@ -1177,14 +1181,13 @@ impl HorizonManagerWindow {
                         self.pan_did_drag = true;
                     }
                     if geo.pano_w > f32::from(geo.vp_bounds.size.width) + 0.5 {
-                        self.view_center_u =
-                            (self.view_center_u - dx / geo.pano_w).rem_euclid(1.0);
+                        self.view_center_u = (self.view_center_u - dx / geo.pano_w).rem_euclid(1.0);
                     }
                     let vp_h = f32::from(geo.vp_bounds.size.height);
                     if geo.pano_h > vp_h + 0.5 {
                         let max_off = 0.5 * (geo.pano_h - vp_h) / geo.pano_h;
-                        self.view_center_v =
-                            (self.view_center_v - dy / geo.pano_h).clamp(0.5 - max_off, 0.5 + max_off);
+                        self.view_center_v = (self.view_center_v - dy / geo.pano_h)
+                            .clamp(0.5 - max_off, 0.5 + max_off);
                     }
                 }
                 self.pan_last_pos = Some(event.position);
@@ -1275,10 +1278,7 @@ impl HorizonManagerWindow {
         let dy_from_center = f32::from(event.position.y) - vp_cy;
 
         let new_total = Bounds::new(
-            point(
-                geo.ruler_bounds.origin.x,
-                geo.ruler_bounds.origin.y,
-            ),
+            point(geo.ruler_bounds.origin.x, geo.ruler_bounds.origin.y),
             size(
                 geo.vp_bounds.size.width,
                 px(f32::from(geo.vp_bounds.size.height) + RULER_HEIGHT_PX),
@@ -1582,7 +1582,8 @@ impl HorizonManagerWindow {
 
         let hover_readout = self.hover_pos.and_then(|pos| {
             let tb = total_bounds_snapshot?;
-            let geo = CanvasGeometry::compute(tb, self.zoom, self.view_center_u, self.view_center_v)?;
+            let geo =
+                CanvasGeometry::compute(tb, self.zoom, self.view_center_u, self.view_center_v)?;
             if !geo.vp_bounds.contains(&pos) {
                 return None;
             }
@@ -1806,7 +1807,12 @@ impl HorizonManagerWindow {
                             let y0 = geo.alt_to_y(alt0);
                             for tile_m in geo.m_min..=geo.m_max {
                                 let x0 = geo.world_x(u0, tile_m);
-                                paint_dot(window, point(px(x0), px(y0)), 4.5, rgb(0xf6c15a).alpha(0.95));
+                                paint_dot(
+                                    window,
+                                    point(px(x0), px(y0)),
+                                    4.5,
+                                    rgb(0xf6c15a).alpha(0.95),
+                                );
                             }
                             if let Some(hpos) = hover_pos
                                 && geo.vp_bounds.contains(&hpos)
@@ -1821,7 +1827,8 @@ impl HorizonManagerWindow {
                                     let mut preview = PathBuilder::stroke(px(1.6));
                                     for step in 0..=steps {
                                         let frac = step as f64 / steps as f64;
-                                        let u_disp = (f64::from(u0) + (delta / 360.0) * frac) as f32;
+                                        let u_disp =
+                                            (f64::from(u0) + (delta / 360.0) * frac) as f32;
                                         let alt = alt0 + (alt1 - alt0) * (frac as f32);
                                         let px_x = geo.world_x(u_disp, tile_m);
                                         let px_y = geo.alt_to_y(alt);
@@ -1948,7 +1955,9 @@ impl HorizonManagerWindow {
                                     .text_size(px(11.0))
                                     .text_color(colors.text_muted)
                                     .truncate()
-                                    .child(format!("{dim_badge} · {min_alt:+.1}° to {max_alt:+.1}°")),
+                                    .child(format!(
+                                        "{dim_badge} · {min_alt:+.1}° to {max_alt:+.1}°"
+                                    )),
                             ),
                     )
                     .child(
@@ -1992,12 +2001,7 @@ impl HorizonManagerWindow {
                         .bg(bg_c)
                         .border_b_1()
                         .border_color(border_c)
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(text_c)
-                                .child(msg),
-                        )
+                        .child(div().text_size(px(11.5)).text_color(text_c).child(msg))
                         .child(
                             IconButton::new("dismiss_banner_btn", IconName::Close)
                                 .icon_size(IconSize::XSmall)
@@ -2027,9 +2031,7 @@ impl HorizonManagerWindow {
                             .items_center()
                             .child(
                                 Button::new("tool_draw_btn", "Draw")
-                                    .start_icon(
-                                        Icon::new(IconName::Pencil).size(IconSize::XSmall),
-                                    )
+                                    .start_icon(Icon::new(IconName::Pencil).size(IconSize::XSmall))
                                     .style(if self.tool_mode == DrawToolMode::Draw {
                                         ButtonStyle::Filled
                                     } else {
@@ -2314,7 +2316,9 @@ impl HorizonManagerWindow {
                                                 .size(LabelSize::XSmall)
                                                 .color(Color::Muted),
                                         )
-                                        .child(div().w(px(100.0)).child(self.smooth_slider.clone())),
+                                        .child(
+                                            div().w(px(100.0)).child(self.smooth_slider.clone()),
+                                        ),
                                 ),
                         )
                     }),

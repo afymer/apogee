@@ -556,7 +556,10 @@ pub(crate) fn hips_survey_system(
         celestial::solar::solar_altitude_deg(camera.observer.location, camera.observer.epoch)
             as f32;
     let effective_alpha = settings.alpha
-        * crate::atmosphere::compute_hips_atmosphere_visibility(sun_alt_deg, atmo_settings.strength);
+        * crate::atmosphere::compute_hips_atmosphere_visibility(
+            sun_alt_deg,
+            atmo_settings.strength,
+        );
 
     let mut target_depth = HipsGrid::target_depth(
         camera.fov_y,
