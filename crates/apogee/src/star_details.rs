@@ -9,14 +9,16 @@ use celestial::{
 use glam::DVec3;
 use gpui::{
     App, AppContext, BorderStyle, Bounds, Context, Corners, Edges, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, Rgba,
-    Window, actions, div, fill, hsla, point, prelude::*, px, rgb, svg,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, Rgba, Window, actions, div,
+    fill, hsla, point, prelude::*, px, rgb, svg,
 };
 
 actions!(planetarium, [ClearSelection]);
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_day_profile};
+pub use observer::{GlobalVisibilityGraphPrefs, VisibilityGraphCenter, VisibilityGraphPrefsModel};
+use observer::{GraphCenterToggleStyle, graph_axis_labels, graph_center_toggle};
 use planetarium::{PickedSolarSystemBody, PickedStar};
 use settings::{CenterOnSelection, ToggleObjectDetails};
 use status_bar::{format_altaz, format_radec};
@@ -52,110 +54,6 @@ const ICON_TRAJECTORY: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 
   <circle cx="5.5" cy="14" r="1.2" fill="black"/>
   <circle cx="18.5" cy="14" r="1.2" fill="black"/>
 </svg>"##;
-
-pub(crate) const ICON_GRAPH_CENTER_NOON: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <circle cx="12" cy="12" r="4.2" stroke="black" stroke-width="1.65"/>
-  <path d="M12 3V5.2M12 18.8V21M3 12H5.2M18.8 12H21M5.6 5.6L7.2 7.2M16.8 16.8L18.4 18.4M18.4 5.6L16.8 7.2M7.2 16.8L5.6 18.4" stroke="black" stroke-width="1.55" stroke-linecap="round"/>
-</svg>"##;
-
-pub(crate) const ICON_GRAPH_CENTER_MIDNIGHT: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M18.5 14.5A6.8 6.8 0 0 1 9.5 5.5A7.2 7.2 0 1 0 18.5 14.5Z" stroke="black" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>"##;
-
-/// Global horizontal centering mode shared by all 24-hour visibility graphs.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum VisibilityGraphCenter {
-    /// Noon in the middle (`00h` – `12h` – `24h`).
-    #[default]
-    Noon,
-    /// Midnight in the middle (`12h` – `00h` – `12h`).
-    Midnight,
-}
-
-impl VisibilityGraphCenter {
-    pub fn start_hour(self) -> f64 {
-        match self {
-            Self::Noon => 0.0,
-            Self::Midnight => 12.0,
-        }
-    }
-
-    /// Computes the continuous 24-hour window start timestamp (Unix seconds) containing
-    /// the observer's active local time.
-    /// - `Noon`: `[00:00 today .. 24:00 today]`
-    /// - `Midnight`: `[12:00 today .. 12:00 tomorrow]` when `local_hour_of_day >= 12.0`,
-    ///   or `[12:00 yesterday .. 12:00 today]` when `local_hour_of_day < 12.0`.
-    pub fn window_start_unix_seconds(
-        self,
-        local_midnight_unix_secs: f64,
-        local_hour_of_day: f64,
-    ) -> f64 {
-        match self {
-            Self::Noon => local_midnight_unix_secs,
-            Self::Midnight => {
-                if local_hour_of_day >= 12.0 {
-                    local_midnight_unix_secs + 12.0 * 3600.0
-                } else {
-                    local_midnight_unix_secs - 12.0 * 3600.0
-                }
-            }
-        }
-    }
-
-    /// Converts a window-relative hour offset `[0..24]` into local clock hour `[0..24)`.
-    pub fn clock_hour(self, offset_hour: f64) -> f64 {
-        (offset_hour + self.start_hour()).rem_euclid(24.0)
-    }
-
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Noon => Self::Midnight,
-            Self::Midnight => Self::Noon,
-        }
-    }
-
-    pub fn axis_labels(self) -> [&'static str; 5] {
-        match self {
-            Self::Noon => ["00h", "06h", "12h", "18h", "24h"],
-            Self::Midnight => ["12h", "18h", "00h", "06h", "12h"],
-        }
-    }
-
-    pub fn icon(self) -> &'static [u8] {
-        match self {
-            Self::Noon => ICON_GRAPH_CENTER_NOON,
-            Self::Midnight => ICON_GRAPH_CENTER_MIDNIGHT,
-        }
-    }
-
-    pub fn tooltip_text(self) -> &'static str {
-        match self {
-            Self::Noon => "Centered on noon (00h–24h) · Click to center on midnight",
-            Self::Midnight => "Centered on midnight (12h–12h) · Click to center on noon",
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct VisibilityGraphPrefsModel {
-    center: VisibilityGraphCenter,
-}
-
-impl VisibilityGraphPrefsModel {
-    pub fn center(&self) -> VisibilityGraphCenter {
-        self.center
-    }
-
-    pub fn toggle_center(&mut self, cx: &mut Context<Self>) {
-        self.center = self.center.toggle();
-        cx.notify();
-    }
-}
-
-#[derive(Clone)]
-pub struct GlobalVisibilityGraphPrefs(pub Entity<VisibilityGraphPrefsModel>);
-
-impl gpui::Global for GlobalVisibilityGraphPrefs {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SelectedObjectId {
@@ -399,24 +297,29 @@ pub fn init(cx: &mut App) {
     });
 
     cx.on_action(|_: &ToggleObjectDetails, cx| {
-        if let Some(panel) = cx.try_global::<GlobalStarDetailsPanel>().map(|g| g.0.clone()) {
+        if let Some(panel) = cx
+            .try_global::<GlobalStarDetailsPanel>()
+            .map(|g| g.0.clone())
+        {
             panel.update(cx, |this, cx| {
                 this.toggle_panel(cx);
             });
         }
     });
 
-    cx.observe_new(|workbench: &mut workspace::workbench::Workbench, window, cx| {
-        if let Some(window) = window {
-            let panel = StarDetailsPanel::build(cx);
-            cx.set_global(GlobalStarDetailsPanel(panel.clone()));
-            cx.observe(&panel, |_this, _panel, cx| {
-                cx.notify();
-            })
-            .detach();
-            workbench.add_panel(panel, window, cx);
-        }
-    })
+    cx.observe_new(
+        |workbench: &mut workspace::workbench::Workbench, window, cx| {
+            if let Some(window) = window {
+                let panel = StarDetailsPanel::build(cx);
+                cx.set_global(GlobalStarDetailsPanel(panel.clone()));
+                cx.observe(&panel, |_this, _panel, cx| {
+                    cx.notify();
+                })
+                .detach();
+                workbench.add_panel(panel, window, cx);
+            }
+        },
+    )
     .detach();
 }
 
@@ -663,7 +566,8 @@ impl StarDetailsPanel {
     }
 
     fn jump_to_window_offset_hour(&self, offset_hour: f64, cx: &mut Context<Self>) {
-        let target_unix_secs = self.cached_window_start_secs + offset_hour.clamp(0.0, 24.0) * 3600.0;
+        let target_unix_secs =
+            self.cached_window_start_secs + offset_hour.clamp(0.0, 24.0) * 3600.0;
         if let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.clone()) {
             observer.update(cx, |model, cx| {
                 model.set_manual_unix_seconds(target_unix_secs, cx);
@@ -694,9 +598,8 @@ pub(crate) fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
 #[inline]
 pub(crate) fn alt_to_y_fraction(alt_deg: f64, pad_y: f32, height: f32) -> f32 {
     let usable_h = (height - 2.0 * pad_y).max(4.0);
-    let norm =
-        ((alt_deg - GRAPH_MIN_ALT_DEG) / (GRAPH_MAX_ALT_DEG - GRAPH_MIN_ALT_DEG)).clamp(0.0, 1.0)
-            as f32;
+    let norm = ((alt_deg - GRAPH_MIN_ALT_DEG) / (GRAPH_MAX_ALT_DEG - GRAPH_MIN_ALT_DEG))
+        .clamp(0.0, 1.0) as f32;
     pad_y + usable_h * (1.0 - norm)
 }
 
@@ -905,17 +808,30 @@ pub(crate) fn rasterize_graph_overlay_with_options(
                 above_segs.push((p0, p1));
             } else if c0 < 0.0 && c1 >= 0.0 {
                 let frac = ((-c0) / (c1 - c0).max(1e-6)).clamp(0.0, 1.0) as f32;
-                let cross = (x0 + (x1 - x0) * frac, y_of(a0 + (a1 - a0) * f64::from(frac)));
+                let cross = (
+                    x0 + (x1 - x0) * frac,
+                    y_of(a0 + (a1 - a0) * f64::from(frac)),
+                );
                 above_segs.push((cross, p1));
             } else if c0 >= 0.0 && c1 < 0.0 {
                 let frac = (c0 / (c0 - c1).max(1e-6)).clamp(0.0, 1.0) as f32;
-                let cross = (x0 + (x1 - x0) * frac, y_of(a0 + (a1 - a0) * f64::from(frac)));
+                let cross = (
+                    x0 + (x1 - x0) * frac,
+                    y_of(a0 + (a1 - a0) * f64::from(frac)),
+                );
                 above_segs.push((p0, cross));
             }
         }
 
         let crisp_color = lerp_rgba(star_rgb, rgb(0xffffff), 0.25).alpha(0.96);
-        rasterize_aa_polyline(&mut buf, w, h, &all_segs, 0.75 * stroke, star_rgb.alpha(0.38));
+        rasterize_aa_polyline(
+            &mut buf,
+            w,
+            h,
+            &all_segs,
+            0.75 * stroke,
+            star_rgb.alpha(0.38),
+        );
         if !above_segs.is_empty() {
             rasterize_aa_polyline(
                 &mut buf,
@@ -980,12 +896,18 @@ pub(crate) fn rasterize_visibility_curve_only(
                 hidden_segs.push((p0, p1));
             } else if c0 < 0.0 && c1 >= 0.0 {
                 let frac = ((-c0) / (c1 - c0).max(1e-6)).clamp(0.0, 1.0) as f32;
-                let cross = (x0 + (x1 - x0) * frac, y_of(a0 + (a1 - a0) * f64::from(frac)));
+                let cross = (
+                    x0 + (x1 - x0) * frac,
+                    y_of(a0 + (a1 - a0) * f64::from(frac)),
+                );
                 hidden_segs.push((p0, cross));
                 visible_segs.push((cross, p1));
             } else {
                 let frac = (c0 / (c0 - c1).max(1e-6)).clamp(0.0, 1.0) as f32;
-                let cross = (x0 + (x1 - x0) * frac, y_of(a0 + (a1 - a0) * f64::from(frac)));
+                let cross = (
+                    x0 + (x1 - x0) * frac,
+                    y_of(a0 + (a1 - a0) * f64::from(frac)),
+                );
                 visible_segs.push((p0, cross));
                 hidden_segs.push((cross, p1));
             }
@@ -1066,7 +988,10 @@ fn paint_visibility_graph(
         ));
     }
     window.paint_quad(fill(
-        Bounds::new(point(px(origin_x), px(horizon_y)), gpui::size(px(width), px(1.0))),
+        Bounds::new(
+            point(px(origin_x), px(horizon_y)),
+            gpui::size(px(width), px(1.0)),
+        ),
         hsla(0.0, 0.0, 1.0, 0.34),
     ));
 
@@ -1213,7 +1138,9 @@ impl Render for StarDetailsPanel {
                         .justify_center()
                         .text_size(px(12.0))
                         .text_color(colors.text_muted)
-                        .child("Click a star, the Sun, or the Moon to inspect visibility and details"),
+                        .child(
+                            "Click a star, the Sun, or the Moon to inspect visibility and details",
+                        ),
                 )
                 .into_any_element();
         };
@@ -1294,7 +1221,6 @@ impl Render for StarDetailsPanel {
             .try_global::<GlobalVisibilityGraphPrefs>()
             .map(|g| g.0.read(cx).center())
             .unwrap_or_default();
-        let axis_labels = graph_center.axis_labels();
         let window_offset_hour = ((obs_ctx.epoch_unix_seconds() - self.cached_window_start_secs)
             / 3600.0)
             .clamp(0.0, 24.0);
@@ -1392,53 +1318,51 @@ impl Render for StarDetailsPanel {
                 )
         };
 
-        let rts_pill = |id: &'static str,
-                        label: &'static str,
-                        value: String,
-                        jump_hour: Option<f64>| {
-            v_flex()
-                .id(id)
-                .flex_1()
-                .min_w_0()
-                .px_2()
-                .py_1()
-                .gap_0p5()
-                .rounded_md()
-                .bg(colors.element_background.opacity(0.65))
-                .border_1()
-                .border_color(colors.border_variant)
-                .when_some(jump_hour, |el, offset_hour| {
-                    el.cursor_pointer()
-                        .hover(|s| s.bg(colors.element_hover))
-                        .tooltip(Tooltip::text(format!(
-                            "Jump to {}",
-                            format_local_hour_hm(graph_center.clock_hour(offset_hour))
-                        )))
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.jump_to_window_offset_hour(offset_hour, cx);
-                        }))
-                })
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(colors.text_muted)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .font_buffer(cx)
-                        .text_size(px(11.0))
-                        .text_color(if jump_hour.is_some() {
-                            colors.text
-                        } else {
-                            colors.text_muted
-                        })
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(value),
-                )
-        };
+        let rts_pill =
+            |id: &'static str, label: &'static str, value: String, jump_hour: Option<f64>| {
+                v_flex()
+                    .id(id)
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .gap_0p5()
+                    .rounded_md()
+                    .bg(colors.element_background.opacity(0.65))
+                    .border_1()
+                    .border_color(colors.border_variant)
+                    .when_some(jump_hour, |el, offset_hour| {
+                        el.cursor_pointer()
+                            .hover(|s| s.bg(colors.element_hover))
+                            .tooltip(Tooltip::text(format!(
+                                "Jump to {}",
+                                format_local_hour_hm(graph_center.clock_hour(offset_hour))
+                            )))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.jump_to_window_offset_hour(offset_hour, cx);
+                            }))
+                    })
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(colors.text_muted)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .font_buffer(cx)
+                            .text_size(px(11.0))
+                            .text_color(if jump_hour.is_some() {
+                                colors.text
+                            } else {
+                                colors.text_muted
+                            })
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(value),
+                    )
+            };
 
         let (rise_text, rise_jump, transit_text, transit_jump, set_text, set_jump) =
             if let Some(vis) = visibility {
@@ -1510,7 +1434,10 @@ impl Render for StarDetailsPanel {
                 h_flex()
                     .gap_3()
                     .child(metric_cell("Mag", format!("G {:.2}", star.mag)))
-                    .child(metric_cell("Class", format!("{}-type", star.spectral_class))),
+                    .child(metric_cell(
+                        "Class",
+                        format!("{}-type", star.spectral_class),
+                    )),
                 h_flex()
                     .gap_3()
                     .child(metric_cell("BP-RP", format!("{:+.2}", star.bp_rp)))
@@ -1523,7 +1450,10 @@ impl Render for StarDetailsPanel {
                 vec![
                     h_flex()
                         .gap_3()
-                        .child(metric_cell("Mag", format!("V {:.2}", eph.apparent_magnitude)))
+                        .child(metric_cell(
+                            "Mag",
+                            format!("V {:.2}", eph.apparent_magnitude),
+                        ))
                         .child(metric_cell("Diam", format!("{diam_arcmin:.1}'"))),
                     h_flex()
                         .gap_3()
@@ -1549,7 +1479,10 @@ impl Render for StarDetailsPanel {
                         .child(metric_cell("Illum", illum_label)),
                     h_flex()
                         .gap_3()
-                        .child(metric_cell("Mag", format!("V {:.2}", eph.apparent_magnitude)))
+                        .child(metric_cell(
+                            "Mag",
+                            format!("V {:.2}", eph.apparent_magnitude),
+                        ))
                         .child(metric_cell("Age", age_label)),
                     h_flex()
                         .gap_3()
@@ -1763,16 +1696,13 @@ impl Render for StarDetailsPanel {
                             .justify_between()
                             .gap_2()
                             .child(
-                                h_flex()
-                                    .items_baseline()
-                                    .gap_1p5()
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(colors.text)
-                                            .child("Visibility"),
-                                    )
+                                h_flex().items_baseline().gap_1p5().child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(colors.text)
+                                        .child("Visibility"),
+                                ),
                             )
                             .child(
                                 div()
@@ -1818,41 +1748,14 @@ impl Render for StarDetailsPanel {
                             .child(ref_label(30.0, "30°"))
                             .child(ref_label(0.0, "0°"))
                             .child(
-                                div()
-                                    .id("star_visibility_center_toggle")
-                                    .absolute()
-                                    .top(px(4.0))
-                                    .left(px(4.0))
-                                    .w(px(20.0))
-                                    .h(px(20.0))
-                                    .rounded_sm()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .bg(hsla(0.0, 0.0, 0.0, 0.28))
-                                    .hover(|h| h.bg(hsla(0.0, 0.0, 0.0, 0.52)))
-                                    .tooltip(Tooltip::text(graph_center.tooltip_text()))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(|_, _, cx| {
-                                        if let Some(prefs) = cx
-                                            .try_global::<GlobalVisibilityGraphPrefs>()
-                                            .map(|g| g.0.clone())
-                                        {
-                                            prefs.update(cx, |model, cx| {
-                                                model.toggle_center(cx);
-                                            });
-                                        }
-                                    })
-                                    .child(
-                                        svg()
-                                            .data(graph_center.icon())
-                                            .size(px(12.5))
-                                            .flex_none()
-                                            .text_color(hsla(0.0, 0.0, 1.0, 0.78)),
-                                    ),
+                                graph_center_toggle(
+                                    "star_visibility_center_toggle",
+                                    GraphCenterToggleStyle::Overlay,
+                                    cx,
+                                )
+                                .absolute()
+                                .top(px(4.0))
+                                .left(px(4.0)),
                             )
                             .when(self.cached_has_custom_horizon, |el| {
                                 let active = self.show_horizon_overlay;
@@ -1898,20 +1801,7 @@ impl Render for StarDetailsPanel {
                                 )
                             }),
                     )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .px_0p5()
-                            .font_buffer(cx)
-                            .text_size(px(9.5))
-                            .text_color(colors.text_muted)
-                            .child(axis_labels[0])
-                            .child(axis_labels[1])
-                            .child(axis_labels[2])
-                            .child(axis_labels[3])
-                            .child(axis_labels[4]),
-                    )
+                    .child(graph_axis_labels(graph_center, cx))
                     .child(
                         h_flex()
                             .w_full()

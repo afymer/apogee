@@ -17,7 +17,7 @@ use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
     FontWeight, Hsla, IntoElement, KeystrokeEvent, MouseButton, MouseDownEvent, Pixels, Render,
     RenderImage, Rgba, ScrollHandle, Subscription, Task, WeakEntity, Window, div, fill, hsla,
-    point, prelude::*, px, rgb, svg,
+    point, prelude::*, px, rgb,
 };
 use hifitime::Epoch;
 use horizon::GlobalHorizons;
@@ -612,8 +612,8 @@ fn night_sample_matrices(
         .into_iter()
         .map(|h| {
             let epoch = Epoch::from_unix_seconds(local_midnight_unix_secs + h * 3600.0);
-            let mat = ObservationContext::new(obs_ctx.location, epoch)
-                .equatorial_to_topocentric_matrix();
+            let mat =
+                ObservationContext::new(obs_ctx.location, epoch).equatorial_to_topocentric_matrix();
             (epoch, mat)
         })
         .collect()
@@ -654,8 +654,7 @@ fn execute_search(
     let eq_up_row = up_row(eq_to_topo);
     let lat_deg = obs_ctx.location.latitude_deg();
     let sin_min_alt = filters.min_alt_deg.map(|d| d.to_radians().sin());
-    let need_exact_alt_during_scan =
-        horizon.is_some() || filters.sort == SortMode::Altitude;
+    let need_exact_alt_during_scan = horizon.is_some() || filters.sort == SortMode::Altitude;
     let night_mats = if filters.visibility == VisibilityFilter::Tonight {
         night_sample_matrices(obs_ctx, local_midnight_unix_secs, solar_profile)
     } else {
@@ -819,7 +818,9 @@ fn execute_search(
                             prof.is_visible(az, alt)
                         })
                     } else {
-                        night_up_rows.iter().any(|row| row.dot(star.icrs_dir) >= 0.0)
+                        night_up_rows
+                            .iter()
+                            .any(|row| row.dot(star.icrs_dir) >= 0.0)
                     };
                     if !up_tonight {
                         continue;
@@ -1130,39 +1131,41 @@ impl SkySearchOverlay {
 
         let window_id = window.window_handle().window_id();
         let this_weak = cx.entity().downgrade();
-        subscriptions.push(cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
-            if window.window_handle().window_id() != window_id {
-                return;
-            }
-            let Some(entity) = this_weak.upgrade() else {
-                return;
-            };
-            if !entity.read(cx).is_open {
-                return;
-            }
-            if event.keystroke.modifiers.modified() {
-                return;
-            }
-            match event.keystroke.key.as_str() {
-                "escape" => {
-                    cx.stop_propagation();
-                    entity.update(cx, |this, cx| this.close(cx));
+        subscriptions.push(
+            cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
+                if window.window_handle().window_id() != window_id {
+                    return;
                 }
-                "up" => {
-                    cx.stop_propagation();
-                    entity.update(cx, |this, cx| this.move_selection(-1, cx));
+                let Some(entity) = this_weak.upgrade() else {
+                    return;
+                };
+                if !entity.read(cx).is_open {
+                    return;
                 }
-                "down" => {
-                    cx.stop_propagation();
-                    entity.update(cx, |this, cx| this.move_selection(1, cx));
+                if event.keystroke.modifiers.modified() {
+                    return;
                 }
-                "enter" => {
-                    cx.stop_propagation();
-                    entity.update(cx, |this, cx| this.confirm_selected(cx));
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        cx.stop_propagation();
+                        entity.update(cx, |this, cx| this.close(cx));
+                    }
+                    "up" => {
+                        cx.stop_propagation();
+                        entity.update(cx, |this, cx| this.move_selection(-1, cx));
+                    }
+                    "down" => {
+                        cx.stop_propagation();
+                        entity.update(cx, |this, cx| this.move_selection(1, cx));
+                    }
+                    "enter" => {
+                        cx.stop_propagation();
+                        entity.update(cx, |this, cx| this.confirm_selected(cx));
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-        }));
+            }),
+        );
 
         subscriptions.push(cx.subscribe_in(
             &query_input,
@@ -1192,25 +1195,26 @@ impl SkySearchOverlay {
             },
         ));
 
-        subscriptions.push(cx.subscribe(
-            &mag_slider,
-            |this, _, event: &DoubleSliderEvent, cx| match *event {
-                DoubleSliderEvent::Change { min, max } => {
-                    let min_m = mag_from_slider(min);
-                    let max_m = mag_from_slider(max);
-                    this.filters.min_mag = if min <= 0.005 { None } else { Some(min_m) };
-                    this.filters.max_mag = if max >= 0.995 { None } else { Some(max_m) };
-                    this.selected_index = 0;
-                    this.scroll_handle.set_offset(point(px(0.0), px(0.0)));
-                    this.schedule_search(Some(SLIDER_DEBOUNCE), cx);
-                    cx.notify();
-                }
-            },
-        ));
+        subscriptions.push(
+            cx.subscribe(
+                &mag_slider,
+                |this, _, event: &DoubleSliderEvent, cx| match *event {
+                    DoubleSliderEvent::Change { min, max } => {
+                        let min_m = mag_from_slider(min);
+                        let max_m = mag_from_slider(max);
+                        this.filters.min_mag = if min <= 0.005 { None } else { Some(min_m) };
+                        this.filters.max_mag = if max >= 0.995 { None } else { Some(max_m) };
+                        this.selected_index = 0;
+                        this.scroll_handle.set_offset(point(px(0.0), px(0.0)));
+                        this.schedule_search(Some(SLIDER_DEBOUNCE), cx);
+                        cx.notify();
+                    }
+                },
+            ),
+        );
 
-        subscriptions.push(cx.subscribe(
-            &min_alt_slider,
-            |this, _, event: &SliderEvent, cx| {
+        subscriptions.push(
+            cx.subscribe(&min_alt_slider, |this, _, event: &SliderEvent, cx| {
                 let (val, debounce) = match *event {
                     SliderEvent::Change(v) => (v, Some(SLIDER_DEBOUNCE)),
                     SliderEvent::Commit(v) => (v, None),
@@ -1221,12 +1225,11 @@ impl SkySearchOverlay {
                 this.scroll_handle.set_offset(point(px(0.0), px(0.0)));
                 this.schedule_search(debounce, cx);
                 cx.notify();
-            },
-        ));
+            }),
+        );
 
-        subscriptions.push(cx.subscribe(
-            &min_peak_slider,
-            |this, _, event: &SliderEvent, cx| {
+        subscriptions.push(
+            cx.subscribe(&min_peak_slider, |this, _, event: &SliderEvent, cx| {
                 let (val, debounce) = match *event {
                     SliderEvent::Change(v) => (v, Some(SLIDER_DEBOUNCE)),
                     SliderEvent::Commit(v) => (v, None),
@@ -1237,8 +1240,8 @@ impl SkySearchOverlay {
                 this.scroll_handle.set_offset(point(px(0.0), px(0.0)));
                 this.schedule_search(debounce, cx);
                 cx.notify();
-            },
-        ));
+            }),
+        );
 
         if let Some(catalog) = cx.try_global::<GlobalSkyCatalog>().map(|g| g.0.clone()) {
             subscriptions.push(cx.observe(&catalog, |this, _, cx| {
@@ -1625,42 +1628,11 @@ impl SkySearchOverlay {
             ));
         }
 
-        let graph_center = cx
-            .try_global::<GlobalVisibilityGraphPrefs>()
-            .map(|g| g.0.read(cx).center())
-            .unwrap_or_default();
-
-        let center_toggle = div()
-            .id("sky_search_graph_center_toggle")
-            .w(px(22.0))
-            .h(px(22.0))
-            .rounded_sm()
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .border_1()
-            .bg(element_background.opacity(0.45))
-            .border_color(border_variant)
-            .hover(|s| s.bg(element_hover))
-            .tooltip(Tooltip::text(graph_center.tooltip_text()))
-            .on_click(|_, _, cx| {
-                if let Some(prefs) = cx
-                    .try_global::<GlobalVisibilityGraphPrefs>()
-                    .map(|g| g.0.clone())
-                {
-                    prefs.update(cx, |model, cx| {
-                        model.toggle_center(cx);
-                    });
-                }
-            })
-            .child(
-                svg()
-                    .data(graph_center.icon())
-                    .size(px(12.5))
-                    .flex_none()
-                    .text_color(text_muted),
-            );
+        let center_toggle = observer::graph_center_toggle(
+            "sky_search_graph_center_toggle",
+            observer::GraphCenterToggleStyle::Inline,
+            cx,
+        );
 
         let advanced_count = self.filters.advanced_active_count();
         let filters_label = if advanced_count > 0 {
@@ -1704,15 +1676,13 @@ impl SkySearchOverlay {
                 this.filters_expanded = !this.filters_expanded;
                 cx.notify();
             }))
-            .child(
-                Icon::new(IconName::Filter)
-                    .size(IconSize::XSmall)
-                    .color(if self.filters_expanded || advanced_count > 0 {
-                        ui::Color::Accent
-                    } else {
-                        ui::Color::Muted
-                    }),
-            )
+            .child(Icon::new(IconName::Filter).size(IconSize::XSmall).color(
+                if self.filters_expanded || advanced_count > 0 {
+                    ui::Color::Accent
+                } else {
+                    ui::Color::Muted
+                },
+            ))
             .child(filters_label)
             .child(
                 Icon::new(if self.filters_expanded {
@@ -1793,27 +1763,33 @@ impl SkySearchOverlay {
                 Some(deg) => format!("≥ {deg:+.0}°"),
             };
 
-            let slider_card = |label: &'static str, readout: String, active: bool, control: gpui::AnyElement| {
-                v_flex()
-                    .flex_1()
-                    .min_w(px(170.0))
-                    .gap_0p5()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .child(div().text_size(px(10.5)).text_color(text_muted).child(label))
-                            .child(
-                                div()
-                                    .font_buffer(cx)
-                                    .text_size(px(10.5))
-                                    .text_color(if active { text_accent } else { text_muted })
-                                    .child(readout),
-                            ),
-                    )
-                    .child(control)
-            };
+            let slider_card =
+                |label: &'static str, readout: String, active: bool, control: gpui::AnyElement| {
+                    v_flex()
+                        .flex_1()
+                        .min_w(px(170.0))
+                        .gap_0p5()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(text_muted)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .font_buffer(cx)
+                                        .text_size(px(10.5))
+                                        .text_color(if active { text_accent } else { text_muted })
+                                        .child(readout),
+                                ),
+                        )
+                        .child(control)
+                };
 
             Some(
                 v_flex()
@@ -2098,7 +2074,11 @@ impl SkySearchOverlay {
                             .min_w_0()
                             .font_buffer(cx)
                             .text_size(px(10.5))
-                            .child(div().text_color(colors.text_muted).child(item.mag_label.clone()))
+                            .child(
+                                div()
+                                    .text_color(colors.text_muted)
+                                    .child(item.mag_label.clone()),
+                            )
                             .child(div().text_color(colors.border).child("·"))
                             .child(
                                 div()
@@ -2249,14 +2229,7 @@ fn paint_mini_visibility_graph(
         0.7,
         rgb(0x090d1a).alpha(0.75),
     );
-    paint_disc(
-        window,
-        dot_pt,
-        1.7,
-        dot_fill,
-        0.0,
-        rgb(0x090d1a).alpha(0.0),
-    );
+    paint_disc(window, dot_pt, 1.7, dot_fill, 0.0, rgb(0x090d1a).alpha(0.0));
 }
 
 impl Render for SkySearchOverlay {
@@ -2297,22 +2270,22 @@ impl Render for SkySearchOverlay {
         }
         let colors = cx.theme().colors();
 
-        let match_summary = if !catalog_ready && self.filters.category != CategoryFilter::SolarSystem
-        {
-            "Indexing star catalog…".to_string()
-        } else if self.total_matches == 0 {
-            "No matching objects".to_string()
-        } else if self.total_matches > self.results.len() {
-            format!(
-                "Showing {} of {} matches",
-                self.results.len(),
-                self.total_matches
-            )
-        } else if self.total_matches == 1 {
-            "1 object".to_string()
-        } else {
-            format!("{} objects", self.total_matches)
-        };
+        let match_summary =
+            if !catalog_ready && self.filters.category != CategoryFilter::SolarSystem {
+                "Indexing star catalog…".to_string()
+            } else if self.total_matches == 0 {
+                "No matching objects".to_string()
+            } else if self.total_matches > self.results.len() {
+                format!(
+                    "Showing {} of {} matches",
+                    self.results.len(),
+                    self.total_matches
+                )
+            } else if self.total_matches == 1 {
+                "1 object".to_string()
+            } else {
+                format!("{} objects", self.total_matches)
+            };
 
         gpui::deferred(
             div()
@@ -2803,7 +2776,8 @@ mod tests {
         let paris = GeodeticPosition::from_degrees(48.8566, 2.3522, 35.0);
         // 2026-11-22 18:30 UTC -> Midnight-centered window spans 2026-11-22 12:00 .. 2026-11-23 12:00
         let local_midnight = Epoch::from_gregorian_utc(2026, 11, 22, 0, 0, 0, 0).to_unix_seconds();
-        let window_start = VisibilityGraphCenter::Midnight.window_start_unix_seconds(local_midnight, 18.5);
+        let window_start =
+            VisibilityGraphCenter::Midnight.window_start_unix_seconds(local_midnight, 18.5);
         assert!((window_start - (local_midnight + 12.0 * 3600.0)).abs() < 1e-6);
 
         let track = sample_day_solar_system_track(paris, window_start, SolarSystemBody::Moon, 97);

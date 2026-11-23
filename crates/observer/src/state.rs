@@ -10,6 +10,8 @@ use chrono::{
     TimeZone, Timelike, Utc,
 };
 use gpui::{App, AppContext, Context, Entity, Global};
+
+use crate::graph_center::VisibilityGraphCenter;
 use persistence::{
     DocumentStore, GeoLocation, MergeOutcome, ObservatoryIcon, ObservatoryProfile, ObserverCatalog,
     TimezoneConfig, TimezoneMode,
@@ -261,6 +263,48 @@ impl ObserverModel {
             self.local_midnight_unix_seconds(),
             samples,
         )
+    }
+
+    /// Unix timestamp where the active 24-hour graph window starts for the given centering.
+    ///
+    /// Noon centering uses the active local calendar day; midnight centering spans
+    /// `12:00 day n .. 12:00 day n+1`, anchored so the window stays stable while the
+    /// observation time moves inside it.
+    pub fn graph_window_start_unix_seconds(&self, center: VisibilityGraphCenter) -> f64 {
+        center
+            .window_start_unix_seconds(self.local_midnight_unix_seconds(), self.local_hour_of_day())
+    }
+
+    /// Samples solar altitude across the active centered 24-hour graph window.
+    pub fn solar_window_profile(&self, center: VisibilityGraphCenter, samples: usize) -> Vec<f64> {
+        sample_day_solar_profile(
+            self.geodetic_position(),
+            self.graph_window_start_unix_seconds(center),
+            samples,
+        )
+    }
+
+    /// Hours elapsed since the start of the centered graph window, in `[0.0, 24.0]`.
+    pub fn graph_window_offset_hour(&self, center: VisibilityGraphCenter) -> f64 {
+        ((self.effective_unix_seconds() - self.graph_window_start_unix_seconds(center)) / 3600.0)
+            .clamp(0.0, 24.0)
+    }
+
+    /// Pins observation time to `offset_hour` hours after the centered graph window start.
+    /// With midnight centering this may move the active date to day n+1.
+    pub fn set_graph_window_offset_hour(
+        &mut self,
+        center: VisibilityGraphCenter,
+        offset_hour: f64,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = if offset_hour.is_finite() {
+            offset_hour.clamp(0.0, 23.9997)
+        } else {
+            0.0
+        };
+        let target = self.graph_window_start_unix_seconds(center) + (offset * 3600.0).round();
+        self.set_manual_unix_seconds(target, cx);
     }
 
     /// Switches the active observatory profile and persists the selection.

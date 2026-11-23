@@ -5,18 +5,23 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Rgba, Size, Window, div,
     fill, hsla, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, size,
 };
-use ui::{ActiveTheme, StyledTypography, h_flex, v_flex};
+use ui::{ActiveTheme, v_flex};
+
+use crate::graph_center::{
+    GraphCenterToggleStyle, VisibilityGraphCenter, graph_axis_labels, graph_center_toggle,
+};
 
 /// Events emitted by [`SkyTimeSlider`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SkyTimeSliderEvent {
     /// Emitted when the user clicks or drags across the 24-hour sky ribbon.
-    Scrub { hour_of_day: f64 },
+    /// `window_offset_hour` is measured from the left edge of the centered window.
+    Scrub { window_offset_hour: f64 },
 }
 
 /// Interactive 24-hour solar-twilight sky arc scrubber.
 pub struct SkyTimeSlider {
-    hour_of_day: f64,
+    window_offset_hour: f64,
     is_live: bool,
     solar_profile: Vec<f64>,
     is_dragging: bool,
@@ -26,9 +31,9 @@ pub struct SkyTimeSlider {
 impl EventEmitter<SkyTimeSliderEvent> for SkyTimeSlider {}
 
 impl SkyTimeSlider {
-    pub fn new(hour_of_day: f64, is_live: bool, solar_profile: Vec<f64>) -> Self {
+    pub fn new(window_offset_hour: f64, is_live: bool, solar_profile: Vec<f64>) -> Self {
         Self {
-            hour_of_day: hour_of_day.clamp(0.0, 23.9997),
+            window_offset_hour: window_offset_hour.clamp(0.0, 24.0),
             is_live,
             solar_profile,
             is_dragging: false,
@@ -37,18 +42,19 @@ impl SkyTimeSlider {
     }
 
     pub fn build(
-        hour_of_day: f64,
+        window_offset_hour: f64,
         is_live: bool,
         solar_profile: Vec<f64>,
         cx: &mut App,
     ) -> Entity<Self> {
-        cx.new(|_cx| Self::new(hour_of_day, is_live, solar_profile))
+        cx.new(|_cx| Self::new(window_offset_hour, is_live, solar_profile))
     }
 
     /// Updates the displayed sky curve and playhead without interrupting active dragging.
+    /// `solar_profile` must span the centered window starting at its left edge.
     pub fn sync(
         &mut self,
-        hour_of_day: f64,
+        window_offset_hour: f64,
         is_live: bool,
         solar_profile: Vec<f64>,
         cx: &mut Context<Self>,
@@ -57,15 +63,19 @@ impl SkyTimeSlider {
         self.is_live = is_live;
         self.solar_profile = solar_profile;
         if !self.is_dragging {
-            let clamped = hour_of_day.clamp(0.0, 23.9997);
-            if (self.hour_of_day - clamped).abs() > 1e-4 {
-                self.hour_of_day = clamped;
+            let clamped = window_offset_hour.clamp(0.0, 24.0);
+            if (self.window_offset_hour - clamped).abs() > 1e-4 {
+                self.window_offset_hour = clamped;
                 changed = true;
             }
         }
         if changed {
             cx.notify();
         }
+    }
+
+    fn graph_center(cx: &App) -> VisibilityGraphCenter {
+        VisibilityGraphCenter::current(cx)
     }
 
     fn scrub_to_position(
@@ -81,14 +91,15 @@ impl SkyTimeSlider {
         }
         let t = ((f32::from(pos.x) - f32::from(bounds.origin.x)) / width).clamp(0.0, 1.0) as f64;
         let step_mins = if shift_held { 15.0 } else { 1.0 };
-        let total_mins = (t * 24.0 * 60.0 / step_mins).round() * step_mins;
-        let snapped_hour = (total_mins / 60.0).clamp(0.0, 23.0 + 59.0 / 60.0);
+        let max_mins = 23.0 * 60.0 + 59.0;
+        let window_mins = ((t * 24.0 * 60.0 / step_mins).round() * step_mins).min(max_mins);
+        let snapped_hour = window_mins / 60.0;
 
-        if (self.hour_of_day - snapped_hour).abs() > 1e-5 || self.is_live {
-            self.hour_of_day = snapped_hour;
+        if (self.window_offset_hour - snapped_hour).abs() > 1e-5 || self.is_live {
+            self.window_offset_hour = snapped_hour;
             self.is_live = false;
             cx.emit(SkyTimeSliderEvent::Scrub {
-                hour_of_day: snapped_hour,
+                window_offset_hour: snapped_hour,
             });
             cx.notify();
         }
@@ -280,9 +291,10 @@ pub fn paint_twilight_backdrop(bounds: Bounds<Pixels>, solar_profile: &[f64], wi
     paint_twilight_backdrop_with_start_hour(bounds, solar_profile, 0.0, window);
 }
 
+/// `solar_profile` spans the centered 24-hour window; `window_hour` is the playhead offset in it.
 fn paint_sky_canvas(
     bounds: Bounds<Pixels>,
-    hour_of_day: f64,
+    window_hour: f64,
     solar_profile: &[f64],
     window: &mut Window,
 ) {
@@ -377,9 +389,9 @@ fn paint_sky_canvas(
     }
 
     // 5. Subtle playhead beam and fixed-size bordered orb filled with the active sky color.
-    let t = (hour_of_day / 24.0).clamp(0.0, 1.0) as f32;
+    let t = (window_hour / 24.0).clamp(0.0, 1.0) as f32;
     let playhead_x = origin_x + t * width;
-    let current_alt = sample_day_profile(solar_profile, hour_of_day);
+    let current_alt = sample_day_profile(solar_profile, window_hour);
     let handle_y = alt_to_y(current_alt, bounds);
     let handle_pt = point(px(playhead_x), px(handle_y));
     let sky_color = solar_altitude_to_sky_color(current_alt);
@@ -401,7 +413,8 @@ impl Render for SkyTimeSlider {
         let colors = cx.theme().colors();
         let bounds_store = self.track_bounds.clone();
         let entity = cx.entity().clone();
-        let hour_of_day = self.hour_of_day;
+        let window_hour = self.window_offset_hour;
+        let center = Self::graph_center(cx);
         let solar_profile = self.solar_profile.clone();
 
         let sky_canvas = gpui::canvas(
@@ -411,7 +424,7 @@ impl Render for SkyTimeSlider {
                 }
             },
             move |bounds, (), window, _cx| {
-                paint_sky_canvas(bounds, hour_of_day, &solar_profile, window);
+                paint_sky_canvas(bounds, window_hour, &solar_profile, window);
 
                 let e = entity.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
@@ -478,21 +491,18 @@ impl Render for SkyTimeSlider {
                             cx.stop_propagation();
                         }),
                     )
-                    .child(sky_canvas),
+                    .child(sky_canvas)
+                    .child(
+                        graph_center_toggle(
+                            "sky_time_slider_center_toggle",
+                            GraphCenterToggleStyle::Overlay,
+                            cx,
+                        )
+                        .absolute()
+                        .top(px(4.0))
+                        .left(px(4.0)),
+                    ),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .px_0p5()
-                    .font_buffer(cx)
-                    .text_size(px(9.5))
-                    .text_color(colors.text_muted)
-                    .child("00h")
-                    .child("06h")
-                    .child("12h")
-                    .child("18h")
-                    .child("24h"),
-            )
+            .child(graph_axis_labels(center, cx))
     }
 }
