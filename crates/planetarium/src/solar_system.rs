@@ -28,7 +28,7 @@ use glam::{DMat4, DVec3};
 use tracing::{info, warn};
 
 use crate::{
-    ViewportDimensions,
+    BevyBridge, ViewportDimensions,
     atmosphere::AtmosphereSettings,
     camera::{PlanetariumCamera, PlanetariumViewInfo, ProjectionParams},
     ground::GroundSettings,
@@ -144,35 +144,147 @@ fn generate_uranus_ring_strip() -> image::RgbaImage {
     })
 }
 
+/// Downsamples an RGBA8 image by 2x along each axis > 1 using an exact 2x2 (or 2x1 / 1x2) box filter.
+fn downsample_rgba_2x(src: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let nw = (width / 2).max(1);
+    let nh = (height / 2).max(1);
+    let w = width as usize;
+    let h = height as usize;
+    let nw_usize = nw as usize;
+    let nh_usize = nh as usize;
+    let mut dst = vec![0u8; nw_usize * nh_usize * 4];
+
+    if w >= 2 && h >= 2 {
+        let src_stride = w * 4;
+        let dst_stride = nw_usize * 4;
+        for y in 0..nh_usize {
+            let row0 = &src[(2 * y) * src_stride..(2 * y + 1) * src_stride];
+            let row1 = &src[(2 * y + 1) * src_stride..(2 * y + 2) * src_stride];
+            let dst_row = &mut dst[y * dst_stride..(y + 1) * dst_stride];
+            let (r0_chunks, _) = row0.as_chunks::<8>();
+            let (r1_chunks, _) = row1.as_chunks::<8>();
+            let (dst_chunks, _) = dst_row.as_chunks_mut::<4>();
+            for ((p0, p1), out) in r0_chunks.iter().zip(r1_chunks).zip(dst_chunks) {
+                out[0] = ((u16::from(p0[0])
+                    + u16::from(p0[4])
+                    + u16::from(p1[0])
+                    + u16::from(p1[4])
+                    + 2)
+                    >> 2) as u8;
+                out[1] = ((u16::from(p0[1])
+                    + u16::from(p0[5])
+                    + u16::from(p1[1])
+                    + u16::from(p1[5])
+                    + 2)
+                    >> 2) as u8;
+                out[2] = ((u16::from(p0[2])
+                    + u16::from(p0[6])
+                    + u16::from(p1[2])
+                    + u16::from(p1[6])
+                    + 2)
+                    >> 2) as u8;
+                out[3] = ((u16::from(p0[3])
+                    + u16::from(p0[7])
+                    + u16::from(p1[3])
+                    + u16::from(p1[7])
+                    + 2)
+                    >> 2) as u8;
+            }
+        }
+    } else if w >= 2 {
+        let (src_chunks, _) = src.as_chunks::<8>();
+        let (dst_chunks, _) = dst.as_chunks_mut::<4>();
+        for (p, out) in src_chunks.iter().zip(dst_chunks) {
+            out[0] = ((u16::from(p[0]) + u16::from(p[4]) + 1) >> 1) as u8;
+            out[1] = ((u16::from(p[1]) + u16::from(p[5]) + 1) >> 1) as u8;
+            out[2] = ((u16::from(p[2]) + u16::from(p[6]) + 1) >> 1) as u8;
+            out[3] = ((u16::from(p[3]) + u16::from(p[7]) + 1) >> 1) as u8;
+        }
+    } else if h >= 2 {
+        for y in 0..nh_usize {
+            let p0 = &src[(2 * y) * 4..(2 * y + 1) * 4];
+            let p1 = &src[(2 * y + 1) * 4..(2 * y + 2) * 4];
+            let out = &mut dst[y * 4..(y + 1) * 4];
+            out[0] = ((u16::from(p0[0]) + u16::from(p1[0]) + 1) >> 1) as u8;
+            out[1] = ((u16::from(p0[1]) + u16::from(p1[1]) + 1) >> 1) as u8;
+            out[2] = ((u16::from(p0[2]) + u16::from(p1[2]) + 1) >> 1) as u8;
+            out[3] = ((u16::from(p0[3]) + u16::from(p1[3]) + 1) >> 1) as u8;
+        }
+    } else {
+        let len = dst.len();
+        dst.copy_from_slice(&src[..len]);
+    }
+
+    (dst, nw, nh)
+}
+
+fn mip_chain_byte_len(width: u32, height: u32, mip_count: u32) -> usize {
+    (0..mip_count)
+        .map(|m| {
+            let w = (width as usize >> m).max(1);
+            let h = (height as usize >> m).max(1);
+            w * h * 4
+        })
+        .sum()
+}
+
+fn build_layer_mip_chain(layer: &image::RgbaImage, mip_count: u32) -> Vec<u8> {
+    let (mut w, mut h) = layer.dimensions();
+    let mut out = Vec::with_capacity(mip_chain_byte_len(w, h, mip_count));
+    out.extend_from_slice(layer.as_raw());
+    if mip_count <= 1 {
+        return out;
+    }
+    let (mut level, nw, nh) = downsample_rgba_2x(layer.as_raw(), w, h);
+    w = nw;
+    h = nh;
+    for mip in 1..mip_count {
+        out.extend_from_slice(&level);
+        if mip + 1 < mip_count {
+            let (next, nw, nh) = downsample_rgba_2x(&level, w, h);
+            level = next;
+            w = nw;
+            h = nh;
+        }
+    }
+    out
+}
+
 /// Builds a mipmapped `texture_2d_array` image from equally sized RGBA layers.
 fn build_mipmapped_array_image(layers: &[image::RgbaImage]) -> Image {
     let (width, height) = layers[0].dimensions();
     let mip_count = 32 - width.max(height).leading_zeros();
-    let mut data = Vec::new();
-    for layer in layers {
-        let mut level = layer.clone();
-        for mip in 0..mip_count {
-            data.extend_from_slice(level.as_raw());
-            if mip + 1 < mip_count {
-                let (w, h) = level.dimensions();
-                level = image::imageops::resize(
-                    &level,
-                    (w / 2).max(1),
-                    (h / 2).max(1),
-                    image::imageops::FilterType::Triangle,
-                );
-            }
-        }
+    let per_layer = mip_chain_byte_len(width, height, mip_count);
+    let layer_chains: Vec<Vec<u8>> = if layers.len() > 1 && per_layer > 4096 {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = layers
+                .iter()
+                .map(|layer| s.spawn(move || build_layer_mip_chain(layer, mip_count)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("mipmap worker panicked"))
+                .collect()
+        })
+    } else {
+        layers
+            .iter()
+            .map(|layer| build_layer_mip_chain(layer, mip_count))
+            .collect()
+    };
+
+    let mut data = Vec::with_capacity(per_layer * layers.len());
+    for chain in layer_chains {
+        data.extend_from_slice(&chain);
     }
-    let base_len = (width * height * 4) as usize * layers.len();
-    let mut img = Image::new(
+
+    let mut img = Image::new_uninit(
         Extent3d {
             width,
             height,
             depth_or_array_layers: layers.len() as u32,
         },
         TextureDimension::D2,
-        vec![0; base_len],
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
@@ -229,31 +341,54 @@ const PLANET_TEXTURE_FILES: [(&str, &str); TEXTURED_PLANET_COUNT] = [
     ),
 ];
 
-/// Loads the planet albedo array and ring profiles. Returns `None` when any file is missing.
-fn load_planet_arrays(images: &mut Assets<Image>) -> Option<(Handle<Image>, Handle<Image>)> {
-    let mut planets = Vec::with_capacity(TEXTURED_PLANET_COUNT);
-    for (env_var, rel_path) in PLANET_TEXTURE_FILES {
-        let mut img = load_rgba_image(env_var, rel_path)?;
-        if img.dimensions() != (2048, 1024) {
-            img = image::imageops::resize(&img, 2048, 1024, image::imageops::FilterType::Triangle);
-        }
-        planets.push(img);
-    }
-    let saturn_ring = load_rgba_image(
-        "APOGEE_SATURN_RING_TEXTURE_PATH",
-        "assets/textures/planets/saturn_ring_alpha.png",
-    )?;
-    let saturn_strip = image::imageops::resize(
-        &saturn_ring,
-        RING_STRIP_WIDTH,
-        RING_STRIP_HEIGHT,
-        image::imageops::FilterType::Triangle,
-    );
-    let rings = [saturn_strip, generate_uranus_ring_strip()];
-    Some((
-        images.add(build_mipmapped_array_image(&planets)),
-        images.add(build_mipmapped_array_image(&rings)),
-    ))
+/// Decodes the planet albedo array and ring profiles into GPU-ready `Image`s in parallel.
+/// Returns `None` when any file is missing.
+fn load_planet_array_images() -> Option<(Image, Image)> {
+    let (planet_results, ring_result) = std::thread::scope(|s| {
+        let planet_handles: Vec<_> = PLANET_TEXTURE_FILES
+            .iter()
+            .map(|&(env_var, rel_path)| {
+                s.spawn(move || {
+                    let mut img = load_rgba_image(env_var, rel_path)?;
+                    if img.dimensions() != (2048, 1024) {
+                        img = image::imageops::resize(
+                            &img,
+                            2048,
+                            1024,
+                            image::imageops::FilterType::Triangle,
+                        );
+                    }
+                    Some(img)
+                })
+            })
+            .collect();
+        let ring_handle = s.spawn(|| {
+            let saturn_ring = load_rgba_image(
+                "APOGEE_SATURN_RING_TEXTURE_PATH",
+                "assets/textures/planets/saturn_ring_alpha.png",
+            )?;
+            let saturn_strip = image::imageops::resize(
+                &saturn_ring,
+                RING_STRIP_WIDTH,
+                RING_STRIP_HEIGHT,
+                image::imageops::FilterType::Triangle,
+            );
+            let rings = [saturn_strip, generate_uranus_ring_strip()];
+            Some(build_mipmapped_array_image(&rings))
+        });
+
+        let planets: Vec<Option<image::RgbaImage>> = planet_handles
+            .into_iter()
+            .map(|h| h.join().ok().flatten())
+            .collect();
+        let rings = ring_handle.join().ok().flatten();
+        (planets, rings)
+    });
+
+    let planets: Option<Vec<image::RgbaImage>> = planet_results.into_iter().collect();
+    let planets = planets?;
+    let ring_image = ring_result?;
+    Some((build_mipmapped_array_image(&planets), ring_image))
 }
 
 fn moon_sampler() -> ImageSampler {
@@ -285,12 +420,7 @@ fn discover_texture_path(env_var: &str, rel_path: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-fn load_rgba_texture(
-    images: &mut Assets<Image>,
-    env_var: &str,
-    rel_path: &str,
-    format: TextureFormat,
-) -> Option<Handle<Image>> {
+fn decode_rgba_bevy_image(env_var: &str, rel_path: &str, format: TextureFormat) -> Option<Image> {
     let path = discover_texture_path(env_var, rel_path)?;
     match image::open(&path) {
         Ok(img) => {
@@ -309,13 +439,34 @@ fn load_rgba_texture(
             );
             bevy_img.sampler = moon_sampler();
             info!("Loaded Moon texture {}x{} from {:?}", width, height, path);
-            Some(images.add(bevy_img))
+            Some(bevy_img)
         }
         Err(err) => {
             warn!("Failed to decode Moon texture at {:?}: {}", path, err);
             None
         }
     }
+}
+
+fn load_moon_image_pair() -> Option<(Image, Image)> {
+    let (albedo, normal) = std::thread::scope(|s| {
+        let a = s.spawn(|| {
+            decode_rgba_bevy_image(
+                "APOGEE_MOON_ALBEDO_PATH",
+                "assets/textures/moon_albedo.webp",
+                TextureFormat::Rgba8UnormSrgb,
+            )
+        });
+        let n = s.spawn(|| {
+            decode_rgba_bevy_image(
+                "APOGEE_MOON_NORMAL_PATH",
+                "assets/textures/moon_normal_height.png",
+                TextureFormat::Rgba8Unorm,
+            )
+        });
+        (a.join().ok().flatten(), n.join().ok().flatten())
+    });
+    Some((albedo?, normal?))
 }
 
 fn create_fallback_texture(
@@ -338,53 +489,171 @@ fn create_fallback_texture(
     images.add(img)
 }
 
-/// Discovers and uploads NASA LROC albedo and LOLA normal+height Moon textures, falling back
-/// to neutral 1x1 placeholders when texture assets are unavailable.
-pub fn load_moon_textures(images: &mut Assets<Image>) -> MoonTextureHandles {
-    let albedo_opt = load_rgba_texture(
-        images,
-        "APOGEE_MOON_ALBEDO_PATH",
-        "assets/textures/moon_albedo.webp",
-        TextureFormat::Rgba8UnormSrgb,
-    );
-    let normal_opt = load_rgba_texture(
-        images,
-        "APOGEE_MOON_NORMAL_PATH",
-        "assets/textures/moon_normal_height.png",
-        TextureFormat::Rgba8Unorm,
-    );
-    let has_textures = albedo_opt.is_some() && normal_opt.is_some();
-    if !has_textures {
-        warn!("Moon textures not found on disk; falling back to procedural lunar shading");
-    }
-    let albedo = albedo_opt.unwrap_or_else(|| {
-        create_fallback_texture(images, [220, 215, 205, 255], TextureFormat::Rgba8UnormSrgb)
-    });
-    let normal = normal_opt.unwrap_or_else(|| {
-        create_fallback_texture(images, [128, 128, 255, 128], TextureFormat::Rgba8Unorm)
-    });
-
-    let planet_arrays = load_planet_arrays(images);
-    if planet_arrays.is_none() {
-        warn!("Planet textures not found on disk; planets fall back to flat shading");
-    }
-    let has_planet_textures = planet_arrays.is_some();
-    let (planet_albedo, ring_profiles) = planet_arrays.unwrap_or_else(|| {
-        let blank = [image::RgbaImage::new(1, 1)];
-        (
-            images.add(build_mipmapped_array_image(&blank)),
-            images.add(build_mipmapped_array_image(&blank)),
-        )
-    });
-
+/// Creates lightweight 1x1 placeholder textures immediately so the planetarium can render its
+/// first frame without waiting for disk I/O, image decoding, or mipmap generation.
+pub fn fallback_moon_textures(images: &mut Assets<Image>) -> MoonTextureHandles {
+    let albedo =
+        create_fallback_texture(images, [220, 215, 205, 255], TextureFormat::Rgba8UnormSrgb);
+    let normal = create_fallback_texture(images, [128, 128, 255, 128], TextureFormat::Rgba8Unorm);
+    let blank = [image::RgbaImage::new(1, 1)];
+    let planet_albedo = images.add(build_mipmapped_array_image(&blank));
+    let ring_profiles = images.add(build_mipmapped_array_image(&blank));
     MoonTextureHandles {
         albedo,
         normal,
-        has_textures,
+        has_textures: false,
         planet_albedo,
         ring_profiles,
-        has_planet_textures,
+        has_planet_textures: false,
     }
+}
+
+enum LoadedSolarSystemTextures {
+    Moon {
+        albedo: Image,
+        normal: Image,
+    },
+    Planets {
+        planet_albedo: Image,
+        ring_profiles: Image,
+    },
+}
+
+/// Loads Moon and planet surface textures off the renderer thread and notifies [`BevyBridge`]
+/// when each texture set is ready to swap in.
+#[derive(Resource)]
+pub struct SolarSystemTextureLoader {
+    rx: Option<crossbeam_channel::Receiver<LoadedSolarSystemTextures>>,
+}
+
+impl SolarSystemTextureLoader {
+    pub fn spawn(bridge: BevyBridge) -> Self {
+        let (tx, rx) = crossbeam_channel::bounded(2);
+        let spawn_result = std::thread::Builder::new()
+            .name("solar-system-textures".to_string())
+            .spawn(move || {
+                std::thread::scope(|s| {
+                    let tx_moon = tx.clone();
+                    let bridge_moon = bridge.clone();
+                    s.spawn(move || {
+                        let start = std::time::Instant::now();
+                        if let Some((albedo, normal)) = load_moon_image_pair() {
+                            info!(
+                                "Decoded Moon textures asynchronously in {:.1}ms",
+                                start.elapsed().as_secs_f64() * 1000.0
+                            );
+                            if tx_moon
+                                .send(LoadedSolarSystemTextures::Moon { albedo, normal })
+                                .is_ok()
+                            {
+                                bridge_moon.request_frame();
+                            }
+                        } else {
+                            warn!(
+                                "Moon textures not found on disk; falling back to procedural lunar shading"
+                            );
+                        }
+                    });
+
+                    let tx_planets = tx;
+                    let bridge_planets = bridge;
+                    s.spawn(move || {
+                        let start = std::time::Instant::now();
+                        if let Some((planet_albedo, ring_profiles)) = load_planet_array_images() {
+                            info!(
+                                "Decoded & mipmapped planet textures asynchronously in {:.1}ms",
+                                start.elapsed().as_secs_f64() * 1000.0
+                            );
+                            if tx_planets
+                                .send(LoadedSolarSystemTextures::Planets {
+                                    planet_albedo,
+                                    ring_profiles,
+                                })
+                                .is_ok()
+                            {
+                                bridge_planets.request_frame();
+                            }
+                        } else {
+                            warn!(
+                                "Planet textures not found on disk; planets fall back to flat shading"
+                            );
+                        }
+                    });
+                });
+            });
+
+        if let Err(err) = spawn_result {
+            warn!("Failed to spawn solar-system texture loader thread: {err}");
+            return Self { rx: None };
+        }
+        Self { rx: Some(rx) }
+    }
+}
+
+/// Polls completed background texture loads and swaps them into [`MoonTextureHandles`].
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn poll_solar_system_textures_system(
+    mut loader: ResMut<SolarSystemTextureLoader>,
+    mut images: ResMut<Assets<Image>>,
+    mut moon_textures: ResMut<MoonTextureHandles>,
+) {
+    let mut disconnected = false;
+    if let Some(rx) = loader.rx.as_ref() {
+        loop {
+            match rx.try_recv() {
+                Ok(LoadedSolarSystemTextures::Moon { albedo, normal }) => {
+                    moon_textures.albedo = images.add(albedo);
+                    moon_textures.normal = images.add(normal);
+                    moon_textures.has_textures = true;
+                }
+                Ok(LoadedSolarSystemTextures::Planets {
+                    planet_albedo,
+                    ring_profiles,
+                }) => {
+                    moon_textures.planet_albedo = images.add(planet_albedo);
+                    moon_textures.ring_profiles = images.add(ring_profiles);
+                    moon_textures.has_planet_textures = true;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+    }
+    if disconnected {
+        loader.rx = None;
+    }
+}
+
+/// Discovers and uploads NASA LROC albedo and LOLA normal+height Moon textures plus planet and
+/// ring arrays synchronously, falling back to neutral 1x1 placeholders when assets are unavailable.
+pub fn load_moon_textures(images: &mut Assets<Image>) -> MoonTextureHandles {
+    let (moon_pair, planet_arrays) = std::thread::scope(|s| {
+        let m = s.spawn(load_moon_image_pair);
+        let p = s.spawn(load_planet_array_images);
+        (m.join().ok().flatten(), p.join().ok().flatten())
+    });
+
+    let mut handles = fallback_moon_textures(images);
+    if let Some((albedo, normal)) = moon_pair {
+        handles.albedo = images.add(albedo);
+        handles.normal = images.add(normal);
+        handles.has_textures = true;
+    } else {
+        warn!("Moon textures not found on disk; falling back to procedural lunar shading");
+    }
+
+    if let Some((planet_albedo, ring_profiles)) = planet_arrays {
+        handles.planet_albedo = images.add(planet_albedo);
+        handles.ring_profiles = images.add(ring_profiles);
+        handles.has_planet_textures = true;
+    } else {
+        warn!("Planet textures not found on disk; planets fall back to flat shading");
+    }
+
+    handles
 }
 
 /// Computes the rendered disc radius (in physical pixels) for a [`SolarSystemBody`],
@@ -1090,6 +1359,82 @@ mod tests {
         );
         let rings = images.get(&handles.ring_profiles).expect("ring array");
         assert_eq!(rings.texture_descriptor.size.depth_or_array_layers, 2);
+    }
+
+    #[test]
+    fn downsample_rgba_2x_averages_2x2_and_1d_blocks() {
+        // 2x2 -> 1x1
+        let src_2x2: [u8; 16] = [
+            10, 20, 30, 40, // (0,0)
+            50, 60, 70, 80, // (1,0)
+            90, 100, 110, 120, // (0,1)
+            130, 140, 150, 160, // (1,1)
+        ];
+        let (out, nw, nh) = downsample_rgba_2x(&src_2x2, 2, 2);
+        assert_eq!((nw, nh), (1, 1));
+        assert_eq!(out, vec![70, 80, 90, 100]);
+
+        // 4x1 -> 2x1
+        let src_4x1: [u8; 16] = [
+            0, 100, 200, 255, // (0,0)
+            100, 200, 100, 255, // (1,0)
+            20, 40, 60, 80, // (2,0)
+            40, 60, 80, 100, // (3,0)
+        ];
+        let (out, nw, nh) = downsample_rgba_2x(&src_4x1, 4, 1);
+        assert_eq!((nw, nh), (2, 1));
+        assert_eq!(out, vec![50, 150, 150, 255, 30, 50, 70, 90]);
+
+        // 1x2 -> 1x1
+        let src_1x2: [u8; 8] = [10, 20, 30, 40, 30, 40, 50, 60];
+        let (out, nw, nh) = downsample_rgba_2x(&src_1x2, 1, 2);
+        assert_eq!((nw, nh), (1, 1));
+        assert_eq!(out, vec![20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn fallback_textures_are_instant_and_async_loader_populates_handles() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>();
+        let t0 = std::time::Instant::now();
+        let fallback = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            fallback_moon_textures(&mut images)
+        };
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(50),
+            "fallback texture init must be instant"
+        );
+        assert!(!fallback.has_textures);
+        assert!(!fallback.has_planet_textures);
+
+        let bridge = BevyBridge::new(|| {});
+        app.insert_resource(fallback);
+        app.insert_resource(SolarSystemTextureLoader::spawn(bridge));
+        app.add_systems(Update, poll_solar_system_textures_system);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.update();
+            let handles = app.world().resource::<MoonTextureHandles>();
+            if handles.has_textures && handles.has_planet_textures {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for async solar-system textures"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let handles = app.world().resource::<MoonTextureHandles>().clone();
+        let images = app.world().resource::<Assets<Image>>();
+        let planets = images.get(&handles.planet_albedo).expect("planet array");
+        assert_eq!(
+            planets.texture_descriptor.size.depth_or_array_layers as usize,
+            TEXTURED_PLANET_COUNT
+        );
+        assert_eq!(planets.texture_descriptor.mip_level_count, 12);
     }
 
     #[test]

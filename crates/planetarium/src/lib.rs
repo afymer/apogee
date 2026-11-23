@@ -1378,11 +1378,14 @@ impl PlanetariumRenderer {
                 app.init_resource::<stars::StarSettings>();
                 app.init_resource::<solar_system::SolarSystemRenderSettings>();
                 let moon_textures = {
-                    let _span = tracing::info_span!("load_moon_textures").entered();
+                    let _span = tracing::info_span!("init_fallback_moon_textures").entered();
                     let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-                    solar_system::load_moon_textures(&mut images)
+                    solar_system::fallback_moon_textures(&mut images)
                 };
                 app.insert_resource(moon_textures.clone());
+                app.insert_resource(solar_system::SolarSystemTextureLoader::spawn(
+                    bridge.clone(),
+                ));
                 app.init_resource::<grids::CoordinateGridSettings>();
                 let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
                 app.insert_resource(tile_loader);
@@ -1523,6 +1526,7 @@ impl PlanetariumRenderer {
                     (
                         camera_movement_and_interpolation_system,
                         sky::sky_system,
+                        solar_system::poll_solar_system_textures_system,
                         solar_system::solar_system_system,
                         landscape::landscape_system,
                         hips::hips_survey_system,
