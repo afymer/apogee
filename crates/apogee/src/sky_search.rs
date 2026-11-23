@@ -1352,7 +1352,7 @@ impl SkySearchOverlay {
         }
         if let Some(selection) = cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone()) {
             selection.update(cx, |model, cx| {
-                model.select_object(object, cx);
+                model.select_and_center(object, cx);
             });
         }
         self.close(cx);

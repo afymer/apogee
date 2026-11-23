@@ -18,7 +18,7 @@ actions!(planetarium, [ClearSelection]);
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_day_profile};
 use planetarium::{PickedSolarSystemBody, PickedStar};
-use settings::ToggleObjectDetails;
+use settings::{CenterOnSelection, ToggleObjectDetails};
 use status_bar::{format_altaz, format_radec};
 use ui::{
     ActiveTheme, ButtonCommon, Clickable, IconButton, IconName, IconSize, StyledTypography,
@@ -270,6 +270,10 @@ impl SelectedObject {
 pub struct StarSelectionModel {
     selected: Option<SelectedObject>,
     activation_nonce: u64,
+    /// Bumped whenever the viewport's tracking should be re-evaluated.
+    center_nonce: u64,
+    /// Whether the viewport should center & follow the selection at `center_nonce`.
+    center_requested: bool,
     show_trajectory: bool,
 }
 
@@ -278,6 +282,8 @@ impl Default for StarSelectionModel {
         Self {
             selected: None,
             activation_nonce: 0,
+            center_nonce: 0,
+            center_requested: false,
             show_trajectory: true,
         }
     }
@@ -288,12 +294,27 @@ impl StarSelectionModel {
         self.selected = Some(object);
         self.show_trajectory = true;
         self.activation_nonce = self.activation_nonce.wrapping_add(1);
+        // Selecting without centering releases any tracking of the previous object.
+        self.center_nonce = self.center_nonce.wrapping_add(1);
+        self.center_requested = false;
         cx.notify();
     }
 
+    /// Selects the object and also asks the viewport to center and follow it.
+    pub fn select_and_center(&mut self, object: SelectedObject, cx: &mut Context<Self>) {
+        self.selected = Some(object);
+        self.show_trajectory = true;
+        self.activation_nonce = self.activation_nonce.wrapping_add(1);
+        self.center_nonce = self.center_nonce.wrapping_add(1);
+        self.center_requested = true;
+        cx.notify();
+    }
+
+    /// Asks the viewport to center and follow the current selection.
     pub fn recenter(&mut self, cx: &mut Context<Self>) {
         if self.selected.is_some() {
-            self.activation_nonce = self.activation_nonce.wrapping_add(1);
+            self.center_nonce = self.center_nonce.wrapping_add(1);
+            self.center_requested = true;
             cx.notify();
         }
     }
@@ -320,6 +341,8 @@ impl StarSelectionModel {
         if self.selected.take().is_some() {
             self.show_trajectory = true;
             self.activation_nonce = self.activation_nonce.wrapping_add(1);
+            self.center_nonce = self.center_nonce.wrapping_add(1);
+            self.center_requested = false;
             cx.notify();
         }
     }
@@ -330,6 +353,14 @@ impl StarSelectionModel {
 
     pub fn activation_nonce(&self) -> u64 {
         self.activation_nonce
+    }
+
+    pub fn center_nonce(&self) -> u64 {
+        self.center_nonce
+    }
+
+    pub fn center_requested(&self) -> bool {
+        self.center_requested
     }
 }
 
@@ -355,6 +386,14 @@ pub fn init(cx: &mut App) {
         if let Some(selection) = cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone()) {
             selection.update(cx, |model, cx| {
                 model.clear(cx);
+            });
+        }
+    });
+
+    cx.on_action(|_: &CenterOnSelection, cx| {
+        if let Some(selection) = cx.try_global::<GlobalStarSelection>().map(|g| g.0.clone()) {
+            selection.update(cx, |model, cx| {
+                model.recenter(cx);
             });
         }
     });
@@ -1644,7 +1683,7 @@ impl Render for StarDetailsPanel {
                                     .rounded_sm()
                                     .cursor_pointer()
                                     .hover(|s| s.bg(colors.ghost_element_hover))
-                                    .tooltip(Tooltip::text("Center & follow object"))
+                                    .tooltip(Tooltip::text("Center & follow object (C)"))
                                     .on_click(cx.listener(|_this, _event, _window, cx| {
                                         if let Some(selection) = cx
                                             .try_global::<GlobalStarSelection>()

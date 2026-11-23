@@ -33,6 +33,8 @@ actions!(
         OpenSkySearch,
         /// Toggles the Object Details side panel.
         ToggleObjectDetails,
+        /// Centers the view on the selected object and follows it.
+        CenterOnSelection,
     ]
 );
 
@@ -82,6 +84,17 @@ pub fn shortcut_specs() -> Vec<ShortcutSpec> {
             description: "Show or hide the Object Details side panel.",
             default_binding: Some("secondary-b"),
             make_binding: |binding| KeyBinding::new(binding, ToggleObjectDetails, None),
+        },
+        ShortcutSpec {
+            id: "apogee::CenterOnSelection",
+            title: "Center on Selected Object",
+            category: "Planetarium",
+            description: "Center the view on the selected object and follow it.",
+            default_binding: Some("c"),
+            // Scoped to the viewport so typing `c` in text fields is unaffected.
+            make_binding: |binding| {
+                KeyBinding::new(binding, CenterOnSelection, Some("PlanetariumViewport"))
+            },
         },
     ]
 }

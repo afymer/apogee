@@ -724,8 +724,11 @@ impl PlanetariumPanel {
                     let (initial_target, initial_nonce) = {
                         let model = selection_entity.read(cx);
                         (
-                            model.selected_object().map(tracking_target_for_selected),
-                            model.selected_object().map(|_| model.activation_nonce()),
+                            model
+                                .selected_object()
+                                .filter(|_| model.center_requested())
+                                .map(tracking_target_for_selected),
+                            Some(model.center_nonce()),
                         )
                     };
                     if let Some(target) = initial_target {
@@ -733,20 +736,14 @@ impl PlanetariumPanel {
                     }
                     cx.observe(&selection_entity, |this: &mut Self, model, cx| {
                         let model_ref = model.read(cx);
-                        match model_ref.selected_object() {
-                            Some(selected) => {
-                                let nonce = model_ref.activation_nonce();
-                                if this.last_synced_selection_nonce != Some(nonce) {
-                                    this.last_synced_selection_nonce = Some(nonce);
-                                    this.bridge
-                                        .track_target(Some(tracking_target_for_selected(selected)));
-                                }
-                            }
-                            None => {
-                                if this.last_synced_selection_nonce.take().is_some() {
-                                    this.bridge.track_target(None);
-                                }
-                            }
+                        let nonce = model_ref.center_nonce();
+                        if this.last_synced_selection_nonce != Some(nonce) {
+                            this.last_synced_selection_nonce = Some(nonce);
+                            let target = model_ref
+                                .selected_object()
+                                .filter(|_| model_ref.center_requested())
+                                .map(tracking_target_for_selected);
+                            this.bridge.track_target(target);
                         }
                         cx.notify();
                     })
@@ -1771,6 +1768,7 @@ impl Render for PlanetariumPanel {
 
         div()
             .id("planetarium_viewport")
+            .key_context("PlanetariumViewport")
             .track_focus(&self.focus_handle)
             .size_full()
             .overflow_hidden()
