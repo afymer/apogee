@@ -4,7 +4,7 @@ pub mod window;
 
 pub use shortcuts::{
     CenterOnSelection, OpenKeyboardShortcuts, OpenSettings, OpenSkySearch, ShortcutSpec, ShortcutsWindow,
-    ToggleObjectDetails, open_shortcuts_window,
+    ToggleObjectDetails, ToggleViewMode, open_shortcuts_window,
 };
 pub use state::{GlobalSettings, SettingsModel, init, init_with_store};
 pub use window::{

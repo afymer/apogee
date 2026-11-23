@@ -26,7 +26,7 @@ use planetarium::{
     TrackingTarget, TrajectoryRenderData, ViewMode, pick_solar_system_body,
     rendered_solar_system_disc_radius_px,
 };
-use settings::{GlobalSettings, SettingsModel};
+use settings::{GlobalSettings, SettingsModel, ToggleViewMode};
 use status_bar::{
     CursorSkyCoords, GlobalPlanetariumStatus, PlanetariumTelemetry, TelemetryCoordMode,
 };
@@ -1770,6 +1770,13 @@ impl Render for PlanetariumPanel {
             .id("planetarium_viewport")
             .key_context("PlanetariumViewport")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &ToggleViewMode, _window, cx| {
+                let next = match this.latest_view_info.view_mode {
+                    ViewMode::Horizontal => ViewMode::Equatorial,
+                    ViewMode::Equatorial => ViewMode::Horizontal,
+                };
+                this.set_view_mode(next, cx);
+            }))
             .size_full()
             .overflow_hidden()
             .bg(rgb(0x000000))

@@ -35,6 +35,8 @@ actions!(
         ToggleObjectDetails,
         /// Centers the view on the selected object and follows it.
         CenterOnSelection,
+        /// Toggles between Alt/Az and RA/Dec view modes.
+        ToggleViewMode,
     ]
 );
 
@@ -94,6 +96,16 @@ pub fn shortcut_specs() -> Vec<ShortcutSpec> {
             // Scoped to the viewport so typing `c` in text fields is unaffected.
             make_binding: |binding| {
                 KeyBinding::new(binding, CenterOnSelection, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::ToggleViewMode",
+            title: "Toggle Coordinate Mode",
+            category: "Planetarium",
+            description: "Switch the view between Alt/Az (horizontal) and RA/Dec (equatorial).",
+            default_binding: Some("m"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, ToggleViewMode, Some("PlanetariumViewport"))
             },
         },
     ]
