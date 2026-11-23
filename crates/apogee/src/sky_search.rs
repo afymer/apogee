@@ -2640,7 +2640,7 @@ mod tests {
             &solar,
             None,
         );
-        assert_eq!(solar_only.len(), 2);
+        assert_eq!(solar_only.len(), SolarSystemBody::ALL.len());
 
         // Spectral class M -> Betelgeuse only
         let (m_stars, _) = execute_search(
@@ -2831,16 +2831,19 @@ mod tests {
         cx.run_until_parked();
         assert!(overlay.read_with(cx, |o, _| o.is_open));
 
-        // 2. Up/down arrows saturate at first and last elements (Sun & Moon -> 2 results)
+        // 2. Up/down arrows saturate at first and last elements (all solar-system bodies)
+        let last_index = SolarSystemBody::ALL.len() - 1;
         overlay.update(cx, |this, cx| {
             assert_eq!(this.selected_index, 0);
             this.move_selection(-1, cx);
             assert_eq!(this.selected_index, 0, "up arrow should saturate at 0");
             this.move_selection(1, cx);
             assert_eq!(this.selected_index, 1);
-            this.move_selection(1, cx);
+            for _ in 0..SolarSystemBody::ALL.len() + 2 {
+                this.move_selection(1, cx);
+            }
             assert_eq!(
-                this.selected_index, 1,
+                this.selected_index, last_index,
                 "down arrow should saturate at last element"
             );
         });

@@ -4,6 +4,7 @@
 
 const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
+const POINT_BODY_COUNT: u32 = 11u;
 
 struct CelestialSolarSystemUniforms {
     camera_to_topo: mat4x4<f32>,
@@ -20,14 +21,26 @@ struct CelestialSolarSystemUniforms {
     render_scales: vec4<f32>,
     // x = atmosphere_strength [0..1], y = moon_alt_deg, zw = 2D unit lunar-North direction on Moon disc
     atmo_and_moon_north: vec4<f32>,
-    // x = optical libration lon (rad), y = optical libration lat (rad), zw = unused
+    // x = optical libration lon (rad), y = optical libration lat (rad), z = has_planet_textures (0 or 1), w = unused
     moon_libration: vec4<f32>,
+    // Point-like bodies (planets, satellites): xyz = unit camera-space direction, w = disc radius (physical px)
+    point_cam_and_disc_px: array<vec4<f32>, 11>,
+    // rgb = sRGB tint, w = glow strength [0..1]
+    point_tint_and_strength: array<vec4<f32>, 11>,
+    // xy = 2D unit bright-limb direction, z = sin(phase_angle), w = cos(phase_angle)
+    point_light: array<vec4<f32>, 11>,
+    // xy = 2D unit screen direction of the north rotation pole, z = sub-observer lon (rad, east +), w = sub-observer lat (rad)
+    point_axis: array<vec4<f32>, 11>,
+    // x = ring inner radius, y = ring outer radius (planet radii; 0 = no rings), z = ring profile layer
+    point_ring: array<vec4<f32>, 11>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: CelestialSolarSystemUniforms;
 @group(0) @binding(1) var moon_albedo_texture: texture_2d<f32>;
 @group(0) @binding(2) var moon_normal_texture: texture_2d<f32>;
 @group(0) @binding(3) var moon_sampler: sampler;
+@group(0) @binding(4) var planet_albedo_texture: texture_2d_array<f32>;
+@group(0) @binding(5) var ring_texture: texture_2d_array<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -40,6 +53,7 @@ struct VertexOutput {
     @location(1) ndc: vec2<f32>,
     @location(2) @interpolate(flat) body_kind: u32,
     @location(3) @interpolate(flat) disc_px: f32,
+    @location(4) @interpolate(flat) quad_px: f32,
 }
 
 @vertex
@@ -48,7 +62,8 @@ fn vertex(input: VertexInput) -> VertexOutput {
     let body_kind = input.instance_index;
     let layer_opacity = clamp(uniforms.viewport_and_opacity.z, 0.0, 1.0);
 
-    if (body_kind > 1u || layer_opacity <= 1e-4) {
+    out.quad_px = 1.0;
+    if (body_kind > 1u + POINT_BODY_COUNT || layer_opacity <= 1e-4) {
         out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
         out.uv = vec2<f32>(0.0);
         out.ndc = vec2<f32>(0.0);
@@ -58,10 +73,22 @@ fn vertex(input: VertexInput) -> VertexOutput {
     }
 
     let is_sun = body_kind == 0u;
-    let v_cam = select(uniforms.moon_cam_and_disc_px.xyz, uniforms.sun_cam_and_disc_px.xyz, is_sun);
-    let disc_px = select(uniforms.moon_cam_and_disc_px.w, uniforms.sun_cam_and_disc_px.w, is_sun);
+    var v_cam = select(uniforms.moon_cam_and_disc_px.xyz, uniforms.sun_cam_and_disc_px.xyz, is_sun);
+    var disc_px = select(uniforms.moon_cam_and_disc_px.w, uniforms.sun_cam_and_disc_px.w, is_sun);
     let quad_scale = select(uniforms.render_scales.y, uniforms.render_scales.x, is_sun);
-    let quad_radius_px = disc_px * quad_scale;
+    var quad_radius_px = disc_px * quad_scale;
+    if (body_kind >= 2u) {
+        let slot = body_kind - 2u;
+        let point_body = uniforms.point_cam_and_disc_px[slot];
+        v_cam = point_body.xyz;
+        disc_px = point_body.w;
+        let strength = uniforms.point_tint_and_strength[slot].w;
+        // Room for the glow: grows with brightness, never smaller than the disc itself.
+        quad_radius_px = disc_px * 1.6 + 5.0 + 22.0 * strength;
+        // Rings extend well beyond the disc
+        quad_radius_px = max(quad_radius_px, disc_px * uniforms.point_ring[slot].y * 1.04);
+    }
+    out.quad_px = quad_radius_px;
 
     let v_len = length(v_cam);
     let v_cam_z = select(0.0, v_cam.z / v_len, v_len > 1e-6);
@@ -99,6 +126,164 @@ fn vertex(input: VertexInput) -> VertexOutput {
     out.disc_px = disc_px;
     return out;
 }
+
+const PLANET_TEXTURED_COUNT: u32 = 7u;
+
+// Radial ring profile (rgb + alpha) at planet-radii distance `rho`, or transparent outside the ring.
+fn ring_profile(ring: vec4<f32>, rho: f32, disc_px: f32, sin_lat: f32) -> vec4<f32> {
+    let t = (rho - ring.x) / max(ring.y - ring.x, 1e-4);
+    if (t <= 0.0 || t >= 1.0) {
+        return vec4<f32>(0.0);
+    }
+    // Radial texels covered by one screen pixel (the ring is foreshortened by sin(lat))
+    let footprint = 1.0 / (max(disc_px, 1.0) * max(abs(sin_lat), 0.15));
+    let lod = max(log2(2048.0 * footprint / max(ring.y - ring.x, 1e-4)), 0.0);
+    return textureSampleLevel(ring_texture, moon_sampler, vec2<f32>(t, 0.5), i32(ring.z), lod);
+}
+
+// Planets and satellites: a textured, phase-shaded disc with optional rings, inside a brightness-scaled glow.
+fn point_body_color(input: VertexOutput, r: f32, layer_opacity: f32, atmo_strength: f32, sun_alt: f32) -> vec4<f32> {
+    let slot = input.body_kind - 2u;
+    let tint_s = uniforms.point_tint_and_strength[slot];
+    let light = uniforms.point_light[slot];
+    let axis = uniforms.point_axis[slot];
+    let ring = uniforms.point_ring[slot];
+    let center_cam = uniforms.point_cam_and_disc_px[slot].xyz;
+    let disc_px = max(input.disc_px, 0.5);
+    let d_px = r * input.quad_px;
+    let strength = tint_s.w;
+
+    // Atmospheric extinction and reddening toward the horizon
+    let enu = (uniforms.camera_to_topo * vec4<f32>(center_cam, 0.0)).xyz;
+    let mu = max(enu.z / max(length(enu), 1e-6), 0.0);
+    let airmass = 1.0 / (mu + 0.055);
+    let k = max(airmass - 1.0, 0.0) * atmo_strength;
+    let trans = exp(-vec3<f32>(0.06, 0.14, 0.34) * k * 0.28);
+    let dim = exp(-0.06 * k);
+
+    // Sunlit planets are lost in the daytime sky unless the sky layer is disabled
+    let day_veil = atmo_strength * smoothstep(-5.0, 6.0, sun_alt);
+    let visibility = 1.0 - 0.97 * day_veil;
+
+    let tint_lin = pow(tint_s.rgb, vec3<f32>(2.2)) * trans;
+    let edge_fade = pow(max(1e-5, 1.0 - r), 2.0);
+
+    // Frame: x = planet east (screen right when north is up), y = planet north, z = toward observer
+    let raw_north = axis.xy;
+    let north_len = length(raw_north);
+    let north_dir = select(vec2<f32>(0.0, 1.0), raw_north / north_len, north_len > 1e-4);
+    let east_dir = vec2<f32>(north_dir.y, -north_dir.x);
+    let p_screen = input.uv * input.quad_px / disc_px;
+    let q = vec2<f32>(dot(p_screen, east_dir), dot(p_screen, north_dir));
+    let q2 = dot(q, q);
+    let inside = q2 <= 1.0;
+    let pz = sqrt(max(0.0, 1.0 - min(q2, 1.0)));
+    let nm = vec3<f32>(q, pz);
+
+    let light_screen = normalize(vec3<f32>(light.xy * light.z, light.w));
+    let lm = normalize(vec3<f32>(dot(light_screen.xy, east_dir), dot(light_screen.xy, north_dir), light_screen.z));
+
+    let lon_c = axis.z;
+    let lat_c = axis.w;
+    let sin_lat = sin(lat_c);
+    let cos_lat = cos(lat_c);
+    let pole_axis = vec3<f32>(0.0, cos_lat, sin_lat);
+
+    // Ring shadow on the planet: trace from the surface toward the Sun and test the ring plane
+    var ring_shadow = 0.0;
+    let has_ring = ring.y > 0.0 && uniforms.moon_libration.z > 0.5;
+    let ring_scale = smoothstep(1.5, 4.0, disc_px);
+    if (has_ring && inside) {
+        let l_dot_a = dot(lm, pole_axis);
+        if (abs(l_dot_a) > 1e-3) {
+            let t_hit = -dot(nm, pole_axis) / l_dot_a;
+            if (t_hit > 0.0) {
+                let hit = nm + lm * t_hit;
+                ring_shadow = ring_profile(ring, length(hit), disc_px, sin_lat).a * ring_scale;
+            }
+        }
+    }
+
+    // Disc: phase shading, limb darkening, and the surface texture when available
+    let aa = 0.75;
+    let disc_mask = 1.0 - smoothstep(max(disc_px - aa, 0.0), disc_px + aa, d_px);
+    let term_aa = max(0.05, 1.2 / disc_px);
+    let ndotl = dot(nm, lm);
+    let lit = smoothstep(-term_aa, term_aa, ndotl);
+    let lambert = mix(0.0, pow(clamp(ndotl, 0.0, 1.0), 0.75), lit);
+    var albedo = tint_lin;
+    let resolved = smoothstep(2.5, 7.0, disc_px);
+    if (uniforms.moon_libration.z > 0.5 && slot < PLANET_TEXTURED_COUNT && inside) {
+        let sin_b = sin(lat_c);
+        let cos_b = cos(lat_c);
+        let sin_l = sin(lon_c);
+        let cos_l = cos(lon_c);
+        let n_b = vec3<f32>(nm.x, nm.y * cos_b + nm.z * sin_b, -nm.y * sin_b + nm.z * cos_b);
+        let n_sel = normalize(vec3<f32>(n_b.x * cos_l + n_b.z * sin_l, n_b.y, -n_b.x * sin_l + n_b.z * cos_l));
+        let lon = select(0.0, atan2(n_sel.x, n_sel.z), abs(n_sel.x) + abs(n_sel.z) > 1e-5);
+        let lat = asin(clamp(n_sel.y, -1.0, 1.0));
+        let tex_uv = vec2<f32>(fract(0.5 + lon / TAU), clamp(0.5 - lat / PI, 0.001, 0.999));
+        // Texels covered by one screen pixel at the disc center (2048 texels around 2*pi radians)
+        let lod = max(log2(326.0 / disc_px) + 0.4, 0.0);
+        let tex = textureSampleLevel(planet_albedo_texture, moon_sampler, tex_uv, i32(slot), lod).rgb;
+        albedo = mix(tint_lin, tex * trans, resolved);
+    }
+    let limb = 0.62 + 0.38 * sqrt(pz);
+    let shade = (0.03 + 0.97 * lambert) * limb * (1.0 - 0.85 * ring_shadow);
+    // Tiny discs are effectively unresolved: keep them fully bright
+    let disc_shade = mix(1.0, shade, resolved);
+    let disc_rgb = albedo * (0.85 + 0.6 * strength) * 1.55 * disc_shade;
+
+    // Glow: tight core plus a broader halo, both scaled by apparent brightness
+    let glow_core = exp(-d_px / (1.2 + 2.6 * strength));
+    let glow_halo = exp(-d_px / (4.0 + 10.0 * strength)) * 0.22;
+    let glow = (glow_core * 0.55 + glow_halo) * strength * strength * edge_fade * dim;
+    let glow_rgb = mix(tint_lin, vec3<f32>(1.0), 0.35) * glow;
+
+    // Rings: intersect the pixel ray with the ring plane (normal = pole axis)
+    var ring_rgb = vec3<f32>(0.0);
+    var ring_a = 0.0;
+    var ring_front = false;
+    if (has_ring) {
+        let s = select(-max(abs(sin_lat), 0.004), max(abs(sin_lat), 0.004), sin_lat >= 0.0);
+        let depth = -q.y / s;
+        let rho = length(vec2<f32>(q.x, depth));
+        let profile = ring_profile(ring, rho, disc_px, sin_lat);
+        let ring_z = depth * cos_lat;
+        let p_ring = vec3<f32>(q.x, q.y, ring_z);
+        let pl = dot(p_ring, lm);
+        // Planet shadow cast onto the ring
+        let miss = sqrt(max(dot(p_ring, p_ring) - pl * pl, 0.0));
+        let shadow = select(0.0, 1.0 - smoothstep(0.97, 1.03, miss), pl < 0.0);
+        // Lit face is the one toward the Sun; the far face only shows faint transmitted light
+        let lit_face = select(0.10, 1.0, dot(lm, pole_axis) * sin_lat > 0.0);
+        let thin = smoothstep(0.004, 0.03, abs(sin_lat));
+        ring_a = profile.a * ring_scale * thin;
+        ring_rgb = profile.rgb * trans * 1.8 * lit_face * (1.0 - 0.92 * shadow);
+        ring_front = !inside || ring_z > pz;
+    }
+
+    let planet_a = disc_mask;
+    let planet_pm = disc_rgb * disc_mask * dim;
+    let ring_pm = ring_rgb * ring_a * dim;
+    var rgb: vec3<f32>;
+    var alpha: f32;
+    if (ring_front) {
+        rgb = ring_pm + planet_pm * (1.0 - ring_a);
+        alpha = ring_a + planet_a * (1.0 - ring_a);
+    } else {
+        rgb = planet_pm + ring_pm * (1.0 - planet_a);
+        alpha = planet_a + ring_a * (1.0 - planet_a);
+    }
+    rgb += glow_rgb * (1.0 - planet_a) * (1.0 - ring_a);
+    rgb = rgb * visibility * layer_opacity;
+    alpha = clamp(alpha * visibility * layer_opacity * 0.95, 0.0, 1.0);
+    if (alpha <= 1e-4 && max(rgb.r, max(rgb.g, rgb.b)) <= 1e-5) {
+        discard;
+    }
+    return vec4<f32>(rgb, alpha);
+}
+
 
 fn hash21(p: vec2<f32>) -> f32 {
     let q = fract(p * vec2<f32>(123.34, 456.21));
@@ -227,6 +412,10 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
     let atmo_strength = clamp(uniforms.atmo_and_moon_north.x, 0.0, 1.0);
     let sun_alt = uniforms.render_scales.z;
     let r = sqrt(r2);
+
+    if (input.body_kind >= 2u) {
+        return point_body_color(input, r, layer_opacity, atmo_strength, sun_alt);
+    }
 
     if (input.body_kind == 0u) {
         // Sun: atmospheric beam transmittance, zoom-adaptive photosphere, and luminous aureole

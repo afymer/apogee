@@ -1139,7 +1139,7 @@ impl Render for StarDetailsPanel {
                         .text_size(px(12.0))
                         .text_color(colors.text_muted)
                         .child(
-                            "Click a star, the Sun, or the Moon to inspect visibility and details",
+                            "Click a star, planet, moon, or the Sun to inspect visibility and details",
                         ),
                 )
                 .into_any_element();
@@ -1488,6 +1488,29 @@ impl Render for StarDetailsPanel {
                         .gap_3()
                         .child(metric_cell("Diam", format!("{diam_arcmin:.1}'")))
                         .child(metric_cell("Dist", format!("{:.0} km", eph.distance_km))),
+                ]
+            }
+            (SelectedObject::SolarSystem(_), Some(eph)) => {
+                let au = eph.distance_km / 149_597_870.7;
+                let diam_arcsec = eph.angular_radius_deg * 2.0 * 3600.0;
+                vec![
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell(
+                            "Mag",
+                            format!("V {:.2}", eph.apparent_magnitude),
+                        ))
+                        .child(metric_cell("Diam", format!("{diam_arcsec:.1}\""))),
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell(
+                            "Illum",
+                            format!("{:.0}%", eph.illuminated_fraction * 100.0),
+                        ))
+                        .child(metric_cell("Elong", format!("{:.1}°", eph.elongation_deg))),
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell("Dist", format!("{au:.3} AU"))),
                 ]
             }
             (SelectedObject::SolarSystem(_), None) => Vec::new(),

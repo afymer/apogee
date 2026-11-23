@@ -11,16 +11,18 @@ use bevy::{
         render_resource::{
             BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendState, Extent3d,
             RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
-            SpecializedMeshPipeline, SpecializedMeshPipelineError, TextureDimension, TextureFormat,
-            TextureSampleType,
-            binding_types::{sampler, texture_2d, uniform_buffer},
+            SpecializedMeshPipeline, SpecializedMeshPipelineError, TextureDataOrder,
+            TextureDimension, TextureFormat, TextureSampleType, TextureViewDescriptor,
+            TextureViewDimension,
+            binding_types::{sampler, texture_2d, texture_2d_array, uniform_buffer},
         },
         sync_component::SyncComponent,
     },
     shader::Shader,
 };
 use celestial::{
-    HorizonProfile, SolarSystemBody, SolarSystemEphemeris, solar_ephemeris, solar_system_ephemeris,
+    HorizonProfile, ObservationContext, SolarSystemBody, SolarSystemEphemeris, solar_ephemeris,
+    solar_system_ephemeris,
 };
 use glam::{DMat4, DVec3};
 use tracing::{info, warn};
@@ -38,6 +40,13 @@ use crate::{
 pub const SUN_QUAD_SCALE: f32 = 6.5;
 pub const MOON_QUAD_SCALE: f32 = 2.4;
 
+/// Number of point-like bodies (planets and satellites) drawn by the solar-system layer.
+pub const POINT_BODY_COUNT: usize = SolarSystemBody::POINT_BODIES.len();
+
+/// Minimum on-screen separation (physical px) between a satellite and its planet for the
+/// satellite to be drawn and pickable; closer than this it is lost in the planet's glow.
+pub const SATELLITE_MIN_SEPARATION_PX: f32 = 6.0;
+
 /// Renderer-side solar-system bodies (Sun and Moon) layer configuration controlled via [`crate::ViewportCommand`].
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct SolarSystemRenderSettings {
@@ -50,12 +59,201 @@ impl Default for SolarSystemRenderSettings {
     }
 }
 
-/// GPU image handles for the Moon's equirectangular albedo and tangent-space normal/height textures.
+/// GPU image handles for the Moon's equirectangular albedo and tangent-space normal/height
+/// textures, plus the planet surface-texture array and ring-profile array.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct MoonTextureHandles {
     pub albedo: Handle<Image>,
     pub normal: Handle<Image>,
     pub has_textures: bool,
+    /// Mipmapped `texture_2d_array` of equirectangular planet albedo maps, indexed by point slot
+    /// (Mercury, Venus, Mars, Jupiter, Saturn, Uranus, Neptune).
+    pub planet_albedo: Handle<Image>,
+    /// Mipmapped `texture_2d_array` of radial ring profiles (see [`ring_spec`]).
+    pub ring_profiles: Handle<Image>,
+    pub has_planet_textures: bool,
+}
+
+/// Number of planets with a surface texture; they occupy the first point slots.
+pub const TEXTURED_PLANET_COUNT: usize = 7;
+
+/// Ring system of a planet: radial extent in planet equatorial radii and profile-array layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RingSpec {
+    pub inner_radii: f32,
+    pub outer_radii: f32,
+    pub layer: u32,
+}
+
+/// Saturn's ring profile strip spans 74,500 km (C ring) to 140,220 km (F ring).
+const SATURN_RING_INNER_KM: f32 = 74_500.0;
+const SATURN_RING_OUTER_KM: f32 = 140_220.0;
+const SATURN_RADIUS_KM: f32 = 60_268.0;
+/// Uranus' generated ring strip spans 40,000 km to 52,500 km from the planet's center.
+const URANUS_RING_INNER_KM: f32 = 40_000.0;
+const URANUS_RING_OUTER_KM: f32 = 52_500.0;
+const URANUS_RADIUS_KM: f32 = 25_559.0;
+
+/// Rings that are rendered. Jupiter's and Neptune's rings are far too faint to be visible.
+pub fn ring_spec(body: SolarSystemBody) -> Option<RingSpec> {
+    match body {
+        SolarSystemBody::Saturn => Some(RingSpec {
+            inner_radii: SATURN_RING_INNER_KM / SATURN_RADIUS_KM,
+            outer_radii: SATURN_RING_OUTER_KM / SATURN_RADIUS_KM,
+            layer: 0,
+        }),
+        SolarSystemBody::Uranus => Some(RingSpec {
+            inner_radii: URANUS_RING_INNER_KM / URANUS_RADIUS_KM,
+            outer_radii: URANUS_RING_OUTER_KM / URANUS_RADIUS_KM,
+            layer: 1,
+        }),
+        _ => None,
+    }
+}
+
+const RING_STRIP_WIDTH: u32 = 2048;
+const RING_STRIP_HEIGHT: u32 = 16;
+
+/// Uranus' narrow dark rings (6, 5, 4, alpha, beta, eta, gamma, delta, epsilon) as
+/// `(radius_km, width_km, opacity)`.
+const URANUS_RINGS: [(f32, f32, f32); 9] = [
+    (41_837.0, 2.0, 0.55),
+    (42_234.0, 3.0, 0.55),
+    (42_570.0, 3.0, 0.55),
+    (44_718.0, 10.0, 0.6),
+    (45_661.0, 9.0, 0.6),
+    (47_176.0, 3.0, 0.5),
+    (47_627.0, 3.0, 0.5),
+    (48_300.0, 4.0, 0.55),
+    (51_149.0, 40.0, 0.75),
+];
+
+fn generate_uranus_ring_strip() -> image::RgbaImage {
+    let km_per_px = (URANUS_RING_OUTER_KM - URANUS_RING_INNER_KM) / RING_STRIP_WIDTH as f32;
+    image::RgbaImage::from_fn(RING_STRIP_WIDTH, RING_STRIP_HEIGHT, |x, _| {
+        let r_km = URANUS_RING_INNER_KM + (x as f32 + 0.5) * km_per_px;
+        let opacity = URANUS_RINGS
+            .iter()
+            .map(|&(center, width, o)| {
+                let half = 0.5 * width.max(km_per_px * 1.5);
+                let t = ((r_km - center).abs() / half).min(1.0);
+                o * (1.0 - t * t)
+            })
+            .fold(0.0_f32, f32::max);
+        image::Rgba([70, 70, 74, (opacity * 255.0) as u8])
+    })
+}
+
+/// Builds a mipmapped `texture_2d_array` image from equally sized RGBA layers.
+fn build_mipmapped_array_image(layers: &[image::RgbaImage]) -> Image {
+    let (width, height) = layers[0].dimensions();
+    let mip_count = 32 - width.max(height).leading_zeros();
+    let mut data = Vec::new();
+    for layer in layers {
+        let mut level = layer.clone();
+        for mip in 0..mip_count {
+            data.extend_from_slice(level.as_raw());
+            if mip + 1 < mip_count {
+                let (w, h) = level.dimensions();
+                level = image::imageops::resize(
+                    &level,
+                    (w / 2).max(1),
+                    (h / 2).max(1),
+                    image::imageops::FilterType::Triangle,
+                );
+            }
+        }
+    }
+    let base_len = (width * height * 4) as usize * layers.len();
+    let mut img = Image::new(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: layers.len() as u32,
+        },
+        TextureDimension::D2,
+        vec![0; base_len],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.data = Some(data);
+    img.data_order = TextureDataOrder::LayerMajor;
+    img.texture_descriptor.mip_level_count = mip_count;
+    img.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    img.sampler = moon_sampler();
+    img
+}
+
+fn load_rgba_image(env_var: &str, rel_path: &str) -> Option<image::RgbaImage> {
+    let path = discover_texture_path(env_var, rel_path)?;
+    match image::open(&path) {
+        Ok(img) => Some(img.to_rgba8()),
+        Err(err) => {
+            warn!("Failed to decode planet texture at {:?}: {}", path, err);
+            None
+        }
+    }
+}
+
+const PLANET_TEXTURE_FILES: [(&str, &str); TEXTURED_PLANET_COUNT] = [
+    (
+        "APOGEE_MERCURY_TEXTURE_PATH",
+        "assets/textures/planets/mercury.jpg",
+    ),
+    (
+        "APOGEE_VENUS_TEXTURE_PATH",
+        "assets/textures/planets/venus_atmosphere.jpg",
+    ),
+    (
+        "APOGEE_MARS_TEXTURE_PATH",
+        "assets/textures/planets/mars.jpg",
+    ),
+    (
+        "APOGEE_JUPITER_TEXTURE_PATH",
+        "assets/textures/planets/jupiter.jpg",
+    ),
+    (
+        "APOGEE_SATURN_TEXTURE_PATH",
+        "assets/textures/planets/saturn.jpg",
+    ),
+    (
+        "APOGEE_URANUS_TEXTURE_PATH",
+        "assets/textures/planets/uranus.jpg",
+    ),
+    (
+        "APOGEE_NEPTUNE_TEXTURE_PATH",
+        "assets/textures/planets/neptune.jpg",
+    ),
+];
+
+/// Loads the planet albedo array and ring profiles. Returns `None` when any file is missing.
+fn load_planet_arrays(images: &mut Assets<Image>) -> Option<(Handle<Image>, Handle<Image>)> {
+    let mut planets = Vec::with_capacity(TEXTURED_PLANET_COUNT);
+    for (env_var, rel_path) in PLANET_TEXTURE_FILES {
+        let mut img = load_rgba_image(env_var, rel_path)?;
+        if img.dimensions() != (2048, 1024) {
+            img = image::imageops::resize(&img, 2048, 1024, image::imageops::FilterType::Triangle);
+        }
+        planets.push(img);
+    }
+    let saturn_ring = load_rgba_image(
+        "APOGEE_SATURN_RING_TEXTURE_PATH",
+        "assets/textures/planets/saturn_ring_alpha.png",
+    )?;
+    let saturn_strip = image::imageops::resize(
+        &saturn_ring,
+        RING_STRIP_WIDTH,
+        RING_STRIP_HEIGHT,
+        image::imageops::FilterType::Triangle,
+    );
+    let rings = [saturn_strip, generate_uranus_ring_strip()];
+    Some((
+        images.add(build_mipmapped_array_image(&planets)),
+        images.add(build_mipmapped_array_image(&rings)),
+    ))
 }
 
 fn moon_sampler() -> ImageSampler {
@@ -166,10 +364,26 @@ pub fn load_moon_textures(images: &mut Assets<Image>) -> MoonTextureHandles {
         create_fallback_texture(images, [128, 128, 255, 128], TextureFormat::Rgba8Unorm)
     });
 
+    let planet_arrays = load_planet_arrays(images);
+    if planet_arrays.is_none() {
+        warn!("Planet textures not found on disk; planets fall back to flat shading");
+    }
+    let has_planet_textures = planet_arrays.is_some();
+    let (planet_albedo, ring_profiles) = planet_arrays.unwrap_or_else(|| {
+        let blank = [image::RgbaImage::new(1, 1)];
+        (
+            images.add(build_mipmapped_array_image(&blank)),
+            images.add(build_mipmapped_array_image(&blank)),
+        )
+    });
+
     MoonTextureHandles {
         albedo,
         normal,
         has_textures,
+        planet_albedo,
+        ring_profiles,
+        has_planet_textures,
     }
 }
 
@@ -190,16 +404,61 @@ pub fn rendered_solar_system_disc_radius_px(
         .max(1e-6);
     let true_disc_px = (ang_rad.tan() / half_fov_tan) * (0.5 * vh);
 
-    let base_min_px = match body {
-        SolarSystemBody::Sun => 8.5_f32,
-        SolarSystemBody::Moon => 7.8_f32,
+    let (base_min_px, floor_px) = match body {
+        SolarSystemBody::Sun => (8.5_f32, 4.0_f32),
+        SolarSystemBody::Moon => (7.8, 4.0),
+        _ if body.is_planet() => (1.6, 1.2),
+        _ => (1.2, 1.0),
     };
     let zoom_boost = (1.8_f32 / fov).powf(0.18).clamp(0.85, 1.75);
     let wide_disc_px = base_min_px * zoom_boost;
 
     (true_disc_px * true_disc_px + wide_disc_px * wide_disc_px)
         .sqrt()
-        .clamp(4.0, vh * 4096.0)
+        .clamp(floor_px, vh * 4096.0)
+}
+
+/// On-screen separation in physical pixels between a satellite and its parent planet.
+pub fn satellite_separation_px(
+    satellite: &SolarSystemEphemeris,
+    parent: &SolarSystemEphemeris,
+    fov_y_rad: f32,
+    viewport_height_px: f32,
+) -> f32 {
+    let sep_rad = satellite
+        .icrs_dir
+        .dot(parent.icrs_dir)
+        .clamp(-1.0, 1.0)
+        .acos() as f32;
+    let half_fov_tan = (0.5 * fov_y_rad.max(1e-6))
+        .min(std::f32::consts::FRAC_PI_2 - 1e-4)
+        .tan()
+        .max(1e-6);
+    (sep_rad.tan() / half_fov_tan) * (0.5 * viewport_height_px.max(1.0))
+}
+
+/// Returns `true` when `body` should be drawn/picked at the current zoom. Satellites collapse
+/// into their planet's glow at wide fields of view and are hidden there.
+pub fn point_body_resolvable(
+    body: SolarSystemBody,
+    eph: &SolarSystemEphemeris,
+    observer: &ObservationContext,
+    fov_y_rad: f32,
+    viewport_height_px: f32,
+) -> bool {
+    let Some(parent) = body.parent() else {
+        return true;
+    };
+    let parent_eph = solar_system_ephemeris(parent, observer.location, observer.epoch);
+    satellite_separation_px(eph, &parent_eph, fov_y_rad, viewport_height_px)
+        >= SATELLITE_MIN_SEPARATION_PX
+}
+
+/// Glow strength `[0.18, 1.0]` of a point-like body derived from its apparent magnitude.
+pub fn point_body_strength(apparent_magnitude: f32) -> f32 {
+    10.0_f32
+        .powf(-0.2 * (apparent_magnitude + 1.0))
+        .clamp(0.18, 1.0)
 }
 
 /// Picking result for a solar-system body (Sun or Moon) under the cursor.
@@ -237,6 +496,9 @@ pub fn pick_solar_system_body(
     for body in SolarSystemBody::ALL {
         let eph = solar_system_ephemeris(body, loc, epoch);
         if occlude_below_horizon && eph.alt_deg < 0.0 {
+            continue;
+        }
+        if !point_body_resolvable(body, &eph, &view_info.observer, fov_y_rad, physical_h) {
             continue;
         }
         if let Some(horizon) = occlude_horizon {
@@ -302,8 +564,21 @@ pub struct CelestialSolarSystemUniforms {
     pub render_scales: Vec4,
     /// x = atmosphere_strength [0..1], y = moon_alt_deg, zw = 2D unit lunar-North direction on Moon disc
     pub atmo_and_moon_north: Vec4,
-    /// x = optical libration lon (rad), y = optical libration lat (rad), z = unused, w = unused
+    /// x = optical libration lon (rad), y = optical libration lat (rad), z = has_planet_textures (0 or 1), w = unused
     pub moon_libration: Vec4,
+    /// Per point-like body (planets and satellites): xyz = unit camera-space direction,
+    /// w = disc radius in physical px (`0` hides the body).
+    pub point_cam_and_disc_px: [Vec4; POINT_BODY_COUNT],
+    /// Per point-like body: rgb = linear-ish sRGB tint, w = glow strength `[0, 1]`.
+    pub point_tint_and_strength: [Vec4; POINT_BODY_COUNT],
+    /// Per point-like body: xy = 2D unit bright-limb direction, z = sin(phase angle), w = cos(phase angle).
+    pub point_light: [Vec4; POINT_BODY_COUNT],
+    /// Per point-like body: xy = 2D unit screen direction of the rotation-axis north pole,
+    /// z = sub-observer longitude (rad, east positive), w = sub-observer latitude (rad).
+    pub point_axis: [Vec4; POINT_BODY_COUNT],
+    /// Per point-like body: x = ring inner radius, y = ring outer radius (planet radii, `0` = no
+    /// rings), z = ring profile array layer.
+    pub point_ring: [Vec4; POINT_BODY_COUNT],
 }
 
 #[derive(Component, Debug, Clone)]
@@ -311,6 +586,8 @@ pub struct CelestialSolarSystemMaterial {
     pub uniforms: CelestialSolarSystemUniforms,
     pub moon_albedo: Handle<Image>,
     pub moon_normal: Handle<Image>,
+    pub planet_albedo: Handle<Image>,
+    pub ring_profiles: Handle<Image>,
 }
 
 impl CelestialSolarSystemMaterial {
@@ -370,6 +647,60 @@ impl CelestialSolarSystemMaterial {
             (0.0, 1.0, 0.0, 0.0)
         };
 
+        let fov_y = projection.fov_y;
+        let mut point_cam_and_disc_px = [Vec4::ZERO; POINT_BODY_COUNT];
+        let mut point_tint_and_strength = [Vec4::ZERO; POINT_BODY_COUNT];
+        let mut point_light = [Vec4::new(0.0, 1.0, 0.0, 1.0); POINT_BODY_COUNT];
+        let mut point_axis = [Vec4::new(0.0, 1.0, 0.0, 0.0); POINT_BODY_COUNT];
+        let mut point_ring = [Vec4::ZERO; POINT_BODY_COUNT];
+        for (slot, body) in SolarSystemBody::POINT_BODIES.iter().copied().enumerate() {
+            let eph = solar_system_ephemeris(body, loc, epoch);
+            let cam = (icrs_to_cam * eph.icrs_dir).normalize_or_zero();
+            let resolvable =
+                point_body_resolvable(body, &eph, &camera.observer, fov_y, viewport_size.y);
+            let disc_px = if resolvable {
+                rendered_solar_system_disc_radius_px(
+                    body,
+                    eph.angular_radius_deg,
+                    fov_y,
+                    viewport_size.y,
+                )
+            } else {
+                0.0
+            };
+            let srgb = body.srgb();
+            point_cam_and_disc_px[slot] =
+                Vec4::new(cam.x as f32, cam.y as f32, cam.z as f32, disc_px);
+            point_tint_and_strength[slot] = Vec4::new(
+                srgb[0],
+                srgb[1],
+                srgb[2],
+                point_body_strength(eph.apparent_magnitude),
+            );
+            let sun_dir_cam = (icrs_to_cam * eph.sun_icrs_dir).normalize_or_zero();
+            let (lx, ly) =
+                compute_moon_screen_tangent_dir(camera, projection.aspect_ratio, cam, sun_dir_cam);
+            let cos_alpha = (2.0 * eph.illuminated_fraction - 1.0).clamp(-1.0, 1.0);
+            let sin_alpha = (1.0 - cos_alpha * cos_alpha).max(0.0).sqrt();
+            point_light[slot] = Vec4::new(lx, ly, sin_alpha as f32, cos_alpha as f32);
+
+            if let Some(orientation) = eph.orientation(epoch) {
+                let pole_cam = (icrs_to_cam * orientation.north_pole_icrs).normalize_or_zero();
+                let (nx, ny) =
+                    compute_moon_screen_tangent_dir(camera, projection.aspect_ratio, cam, pole_cam);
+                point_axis[slot] = Vec4::new(
+                    nx,
+                    ny,
+                    orientation.sub_observer_lon_deg.to_radians() as f32,
+                    orientation.sub_observer_lat_deg.to_radians() as f32,
+                );
+            }
+            if let Some(ring) = ring_spec(body) {
+                point_ring[slot] =
+                    Vec4::new(ring.inner_radii, ring.outer_radii, ring.layer as f32, 0.0);
+            }
+        }
+
         let safe_opacity = if opacity.is_finite() {
             opacity.clamp(0.0, 1.0)
         } else {
@@ -416,10 +747,26 @@ impl CelestialSolarSystemMaterial {
                     if moon_textures.has_textures { 1.0 } else { 0.0 },
                 ),
                 atmo_and_moon_north: Vec4::new(safe_atmo, moon.alt_deg as f32, north_x, north_y),
-                moon_libration: Vec4::new(lib_lon_rad, lib_lat_rad, 0.0, 0.0),
+                moon_libration: Vec4::new(
+                    lib_lon_rad,
+                    lib_lat_rad,
+                    if moon_textures.has_planet_textures {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                ),
+                point_cam_and_disc_px,
+                point_tint_and_strength,
+                point_light,
+                point_axis,
+                point_ring,
             },
             moon_albedo: moon_textures.albedo.clone(),
             moon_normal: moon_textures.normal.clone(),
+            planet_albedo: moon_textures.planet_albedo.clone(),
+            ring_profiles: moon_textures.ring_profiles.clone(),
         }
     }
 }
@@ -463,6 +810,8 @@ pub struct CelestialSolarSystemDraw {
     pub mesh: AssetId<Mesh>,
     pub moon_albedo: AssetId<Image>,
     pub moon_normal: AssetId<Image>,
+    pub planet_albedo: AssetId<Image>,
+    pub ring_profiles: AssetId<Image>,
 }
 
 impl SyncComponent for CelestialSolarSystemMaterial {
@@ -490,6 +839,8 @@ impl ExtractComponent for CelestialSolarSystemMaterial {
                 mesh: mesh.id(),
                 moon_albedo: material.moon_albedo.id(),
                 moon_normal: material.moon_normal.id(),
+                planet_albedo: material.planet_albedo.id(),
+                ring_profiles: material.ring_profiles.id(),
             },
         ))
     }
@@ -512,6 +863,8 @@ impl CelestialSolarSystemPipeline {
                     texture_2d(TextureSampleType::Float { filterable: true }),
                     texture_2d(TextureSampleType::Float { filterable: true }),
                     sampler(SamplerBindingType::Filtering),
+                    texture_2d_array(TextureSampleType::Float { filterable: true }),
+                    texture_2d_array(TextureSampleType::Float { filterable: true }),
                 ),
             ),
         );
@@ -711,6 +1064,48 @@ mod tests {
             r_2,
             r_20
         );
+    }
+
+    #[test]
+    fn bundled_planet_textures_load_into_mipmapped_arrays() {
+        let mut images = Assets::<Image>::default();
+        let handles = load_moon_textures(&mut images);
+        assert!(
+            handles.has_planet_textures,
+            "planet textures must be bundled"
+        );
+        let planets = images.get(&handles.planet_albedo).expect("planet array");
+        assert_eq!(
+            planets.texture_descriptor.size.depth_or_array_layers as usize,
+            TEXTURED_PLANET_COUNT
+        );
+        assert_eq!(planets.texture_descriptor.mip_level_count, 12);
+        // Each layer stores its full mip chain: 2048x1024 down to 1x1.
+        let per_layer: usize = (0..12)
+            .map(|m| ((2048usize >> m).max(1)) * ((1024usize >> m).max(1)) * 4)
+            .sum();
+        assert_eq!(
+            planets.data.as_ref().map(Vec::len),
+            Some(per_layer * TEXTURED_PLANET_COUNT)
+        );
+        let rings = images.get(&handles.ring_profiles).expect("ring array");
+        assert_eq!(rings.texture_descriptor.size.depth_or_array_layers, 2);
+    }
+
+    #[test]
+    fn ring_specs_cover_saturn_and_uranus_only() {
+        let saturn = ring_spec(SolarSystemBody::Saturn).unwrap();
+        assert!((saturn.inner_radii - 1.236).abs() < 0.01);
+        assert!((saturn.outer_radii - 2.327).abs() < 0.01);
+        assert!(ring_spec(SolarSystemBody::Uranus).is_some());
+        for body in SolarSystemBody::ALL {
+            if !matches!(body, SolarSystemBody::Saturn | SolarSystemBody::Uranus) {
+                assert!(ring_spec(body).is_none(), "{body:?}");
+            }
+        }
+        let strip = generate_uranus_ring_strip();
+        assert!(strip.pixels().any(|p| p.0[3] > 100));
+        assert!(strip.pixels().any(|p| p.0[3] == 0));
     }
 
     #[test]

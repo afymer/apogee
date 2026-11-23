@@ -7,22 +7,102 @@ use crate::coords::{
     topocentric_enu_to_spherical,
 };
 use crate::observer::ObservationContext;
+use crate::planets::{PlanetOrientation, galilean_ephemeris, planet_ephemeris, planet_orientation};
 
 /// Solar-system bodies rendered and tracked in the planetarium (distinct category from catalog stars).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SolarSystemBody {
     Sun,
     Moon,
+    Mercury,
+    Venus,
+    Mars,
+    Jupiter,
+    Saturn,
+    Uranus,
+    Neptune,
+    Io,
+    Europa,
+    Ganymede,
+    Callisto,
 }
 
 impl SolarSystemBody {
-    pub const ALL: [Self; 2] = [Self::Sun, Self::Moon];
+    pub const ALL: [Self; 13] = [
+        Self::Sun,
+        Self::Moon,
+        Self::Mercury,
+        Self::Venus,
+        Self::Mars,
+        Self::Jupiter,
+        Self::Saturn,
+        Self::Uranus,
+        Self::Neptune,
+        Self::Io,
+        Self::Europa,
+        Self::Ganymede,
+        Self::Callisto,
+    ];
+
+    /// Bodies rendered as point-like glows with small discs (everything except the Sun and Moon,
+    /// which have dedicated renderers). The order defines the renderer's slot indices.
+    pub const POINT_BODIES: [Self; 11] = [
+        Self::Mercury,
+        Self::Venus,
+        Self::Mars,
+        Self::Jupiter,
+        Self::Saturn,
+        Self::Uranus,
+        Self::Neptune,
+        Self::Io,
+        Self::Europa,
+        Self::Ganymede,
+        Self::Callisto,
+    ];
+
+    /// Renderer slot of a point-like body in [`Self::POINT_BODIES`].
+    pub fn point_slot(self) -> Option<usize> {
+        Self::POINT_BODIES.iter().position(|b| *b == self)
+    }
+
+    /// `true` for the seven planets other than Earth.
+    pub fn is_planet(self) -> bool {
+        matches!(
+            self,
+            Self::Mercury
+                | Self::Venus
+                | Self::Mars
+                | Self::Jupiter
+                | Self::Saturn
+                | Self::Uranus
+                | Self::Neptune
+        )
+    }
+
+    /// The planet a natural satellite orbits (`None` for the Sun, planets and the Moon).
+    pub fn parent(self) -> Option<Self> {
+        match self {
+            Self::Io | Self::Europa | Self::Ganymede | Self::Callisto => Some(Self::Jupiter),
+            _ => None,
+        }
+    }
 
     /// Primary display name.
     pub fn name(self) -> &'static str {
         match self {
             Self::Sun => "Sun",
             Self::Moon => "Moon",
+            Self::Mercury => "Mercury",
+            Self::Venus => "Venus",
+            Self::Mars => "Mars",
+            Self::Jupiter => "Jupiter",
+            Self::Saturn => "Saturn",
+            Self::Uranus => "Uranus",
+            Self::Neptune => "Neptune",
+            Self::Io => "Io",
+            Self::Europa => "Europa",
+            Self::Ganymede => "Ganymede",
+            Self::Callisto => "Callisto",
         }
     }
 
@@ -36,6 +116,10 @@ impl SolarSystemBody {
         match self {
             Self::Sun => "G2V Star",
             Self::Moon => "Natural Satellite",
+            Self::Mercury | Self::Venus | Self::Mars => "Terrestrial Planet",
+            Self::Jupiter | Self::Saturn => "Gas Giant",
+            Self::Uranus | Self::Neptune => "Ice Giant",
+            Self::Io | Self::Europa | Self::Ganymede | Self::Callisto => "Jovian Satellite",
         }
     }
 
@@ -44,6 +128,17 @@ impl SolarSystemBody {
         match self {
             Self::Sun => [1.0, 0.84, 0.32],
             Self::Moon => [0.86, 0.90, 0.98],
+            Self::Mercury => [0.80, 0.77, 0.72],
+            Self::Venus => [1.0, 0.95, 0.80],
+            Self::Mars => [1.0, 0.52, 0.34],
+            Self::Jupiter => [0.98, 0.86, 0.68],
+            Self::Saturn => [0.95, 0.86, 0.60],
+            Self::Uranus => [0.62, 0.90, 0.92],
+            Self::Neptune => [0.42, 0.58, 1.0],
+            Self::Io => [1.0, 0.88, 0.50],
+            Self::Europa => [0.94, 0.92, 0.86],
+            Self::Ganymede => [0.80, 0.76, 0.70],
+            Self::Callisto => [0.60, 0.56, 0.52],
         }
     }
 
@@ -124,9 +219,18 @@ pub struct SolarSystemEphemeris {
     pub sun_icrs_dir: DVec3,
     /// Lunar phase metadata when `body == SolarSystemBody::Moon`.
     pub lunar_phase: Option<LunarPhaseInfo>,
+    /// Illuminated fraction of the disc `[0, 1]` as seen by the observer.
+    pub illuminated_fraction: f64,
+    /// Angular separation from the Sun in degrees `[0, 180]`.
+    pub elongation_deg: f64,
 }
 
 impl SolarSystemEphemeris {
+    /// Pole and sub-observer point of a planet at `epoch` (`None` for the Sun, Moon and satellites).
+    pub fn orientation(&self, epoch: Epoch) -> Option<PlanetOrientation> {
+        planet_orientation(self.body, epoch, self.icrs_dir, self.distance_km)
+    }
+
     /// Returns the primary display title and category/phase subtitle for hover and details UI.
     pub fn display_title_and_subtitle(&self) -> (String, String) {
         let title = self.body.name().to_string();
@@ -153,6 +257,15 @@ impl SolarSystemEphemeris {
                     self.body.kind_label()
                 )
             }
+            (body, _) => match body.parent() {
+                Some(parent) => format!(
+                    "{} · {} of {}",
+                    body.category_label(),
+                    body.kind_label(),
+                    parent.name()
+                ),
+                None => format!("{} · {}", body.category_label(), body.kind_label()),
+            },
         };
         (title, subtitle)
     }
@@ -415,6 +528,8 @@ pub fn solar_ephemeris(location: GeodeticPosition, epoch: Epoch) -> SolarSystemE
         apparent_magnitude,
         sun_icrs_dir: icrs_dir,
         lunar_phase: None,
+        illuminated_fraction: 1.0,
+        elongation_deg: 0.0,
     }
 }
 
@@ -543,6 +658,8 @@ pub fn lunar_ephemeris(location: GeodeticPosition, epoch: Epoch) -> SolarSystemE
         apparent_magnitude: mag.clamp(-13.0, -1.5) as f32,
         sun_icrs_dir,
         lunar_phase: Some(lunar_phase),
+        illuminated_fraction,
+        elongation_deg: psi_rad.to_degrees(),
     }
 }
 
@@ -555,6 +672,11 @@ pub fn solar_system_ephemeris(
     match body {
         SolarSystemBody::Sun => solar_ephemeris(location, epoch),
         SolarSystemBody::Moon => lunar_ephemeris(location, epoch),
+        SolarSystemBody::Io
+        | SolarSystemBody::Europa
+        | SolarSystemBody::Ganymede
+        | SolarSystemBody::Callisto => galilean_ephemeris(body, location, epoch),
+        _ => planet_ephemeris(body, location, epoch),
     }
 }
 
@@ -835,7 +957,9 @@ mod tests {
                 "ICRS <-> ENU mismatch for {body:?}: {roundtrip_enu:?} vs {:?}",
                 eph.topo_enu
             );
-            assert!(eph.angular_radius_deg > 0.22 && eph.angular_radius_deg < 0.30);
+            if matches!(body, SolarSystemBody::Sun | SolarSystemBody::Moon) {
+                assert!(eph.angular_radius_deg > 0.22 && eph.angular_radius_deg < 0.30);
+            }
         }
 
         // Check lunar phase progression over a synodic month (~29.53 days)

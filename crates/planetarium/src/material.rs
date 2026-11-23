@@ -48,7 +48,7 @@ use crate::{
     },
     solar_system::{
         CelestialSolarSystemDraw, CelestialSolarSystemMaterial, CelestialSolarSystemPipeline,
-        CelestialSolarSystemUniforms,
+        CelestialSolarSystemUniforms, POINT_BODY_COUNT,
     },
     stars::{
         CelestialStarDraw, CelestialStarMaterial, CelestialStarPipeline, CelestialStarUniforms,
@@ -743,11 +743,15 @@ fn draw_celestial(
                 Some((vertex_buffer, geometry)),
                 Some(albedo_img),
                 Some(normal_img),
+                Some(planet_img),
+                Some(ring_img),
             ) = (
                 pipeline_cache.get_render_pipeline(pipeline_id.0),
                 locate_mesh(draw.mesh, &meshes, &allocator),
                 images.get(draw.moon_albedo),
                 images.get(draw.moon_normal),
+                images.get(draw.planet_albedo),
+                images.get(draw.ring_profiles),
             )
             else {
                 continue;
@@ -760,6 +764,8 @@ fn draw_celestial(
                     &albedo_img.texture_view,
                     &normal_img.texture_view,
                     &albedo_img.sampler,
+                    &planet_img.texture_view,
+                    &ring_img.texture_view,
                 )),
             );
             items.push(DrawItem {
@@ -768,7 +774,7 @@ fn draw_celestial(
                 uniform_offset: uniform_index.index(),
                 vertex_buffer: Some(vertex_buffer),
                 geometry,
-                instances: 0..2,
+                instances: 0..(2 + POINT_BODY_COUNT as u32),
             });
         }
     }

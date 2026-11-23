@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod coords;
 pub mod horizon;
 pub mod observer;
+pub mod planets;
 pub mod projection;
 pub mod solar;
 pub mod visibility;
@@ -15,6 +16,7 @@ pub use horizon::{
     DEFAULT_HORIZON_SAMPLES, HorizonProfile, MAX_HORIZON_ALT_DEG, MIN_HORIZON_ALT_DEG,
 };
 pub use observer::ObservationContext;
+pub use planets::PlanetOrientation;
 pub use projection::{CameraProjection, ProjectionKind};
 pub use solar::{
     LunarPhaseInfo, SkyPhase, SolarSystemBody, SolarSystemEphemeris, lunar_ephemeris,
