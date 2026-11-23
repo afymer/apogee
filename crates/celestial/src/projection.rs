@@ -40,6 +40,20 @@ impl CameraProjection {
         }
     }
 
+    /// Creates the standard Planetarium blended projection for a vertical FOV in radians:
+    /// stereographic above 60°, perspective below 20°, and smoothly blended in between.
+    pub fn for_fov(fov_y_rad: f64, aspect_ratio: f32) -> Self {
+        let fov_deg = fov_y_rad.to_degrees();
+        let kind = if fov_deg >= 60.0 {
+            ProjectionKind::Stereographic
+        } else if fov_deg <= 20.0 {
+            ProjectionKind::Perspective
+        } else {
+            ProjectionKind::Blended((60.0 - fov_deg) / 40.0)
+        };
+        Self::new(Angle::from_radians(fov_y_rad), f64::from(aspect_ratio), kind)
+    }
+
     /// Blend between Stereographic (0.0) and Perspective (1.0)
     #[inline]
     pub fn blend_factor(&self) -> f64 {

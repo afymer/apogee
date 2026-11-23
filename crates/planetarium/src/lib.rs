@@ -58,8 +58,13 @@ use grids::{create_altaz_grid_mesh, create_equatorial_grid_mesh, create_horizon_
 pub use material::{CelestialLineMaterial, CelestialLineUniforms, init_celestial_materials};
 
 pub use crate::viewport::{
-    ObserverClockSpec, ObserverUpdate, TrajectoryRenderData, ViewportCommand,
+    MountCameraOverride, ObserverClockSpec, ObserverUpdate, TrajectoryRenderData, ViewportCommand,
 };
+
+/// Callback executed inside the same `wgpu::CommandEncoder` right after Bevy renders the sky.
+/// Returns `true` if another animation frame is needed (e.g. smooth mount telemetry filtering).
+pub type OverlayRenderCallback =
+    Box<dyn FnMut(&mut wgpu::CommandEncoder, &wgpu::TextureView, u32, u32) -> bool + Send>;
 
 #[derive(Default, Component, Clone, Copy)]
 struct PlanetariumCameraMarker;
@@ -72,6 +77,7 @@ pub struct BridgeSnapshot {
     pub last_size: Option<(u32, u32)>,
     pub texture_size: Option<(u32, u32)>,
     pub view_info: PlanetariumViewInfo,
+    pub is_mount_frame: bool,
 }
 
 #[derive(Default)]
@@ -85,6 +91,8 @@ pub struct BevyBridgeState {
     pub view_info: PlanetariumViewInfo,
     pub star_index: Option<Arc<StarSpatialIndex>>,
     pub pending_commands: Vec<ViewportCommand>,
+    pub overlay_active: bool,
+    pub texture_is_mount_mode: bool,
 }
 
 impl BevyBridgeState {
@@ -93,10 +101,16 @@ impl BevyBridgeState {
     }
 }
 
+/// Handle returned by [`BevyBridge::add_frame_listener`] so callers can unsubscribe on drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FrameListenerId(u64);
+
 struct BridgeInner {
     state: Mutex<BevyBridgeState>,
     cvar: Condvar,
-    notify_ui_fn: Box<dyn Fn() + Send + Sync>,
+    next_listener_id: std::sync::atomic::AtomicU64,
+    notify_listeners: Mutex<Vec<(FrameListenerId, Box<dyn Fn() + Send + Sync>)>>,
+    overlay_pass: Mutex<Option<OverlayRenderCallback>>,
 }
 
 #[derive(Clone, Resource)]
@@ -118,11 +132,93 @@ impl BevyBridge {
                     view_info: PlanetariumViewInfo::default(),
                     star_index: None,
                     pending_commands: Vec::new(),
+                    overlay_active: false,
+                    texture_is_mount_mode: false,
                 }),
                 cvar: Condvar::new(),
-                notify_ui_fn: Box::new(notify_ui),
+                next_listener_id: std::sync::atomic::AtomicU64::new(1),
+                notify_listeners: Mutex::new(vec![(FrameListenerId(0), Box::new(notify_ui))]),
+                overlay_pass: Mutex::new(None),
             }),
         }
+    }
+
+    pub fn add_frame_listener(
+        &self,
+        listener: impl Fn() + Send + Sync + 'static,
+    ) -> FrameListenerId {
+        let id = FrameListenerId(
+            self.inner
+                .next_listener_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
+        let mut guard = self
+            .inner
+            .notify_listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.push((id, Box::new(listener)));
+        id
+    }
+
+    pub fn remove_frame_listener(&self, id: FrameListenerId) {
+        let mut guard = self
+            .inner
+            .notify_listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.retain(|(entry_id, _)| *entry_id != id);
+    }
+
+    pub fn set_overlay_pass(&self, pass: Option<OverlayRenderCallback>) {
+        let mut guard = self
+            .inner
+            .overlay_pass
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = pass;
+    }
+
+    pub fn is_mount_camera_active(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .overlay_active
+    }
+
+    pub fn set_mount_camera(&self, override_cam: Option<MountCameraOverride>) {
+        self.set_mount_camera_with_size(override_cam, None);
+    }
+
+    /// Atomically updates mount camera mode and (optionally) resizes the render target in the
+    /// same command batch so workspace switches never render an intermediate frame at the old size.
+    pub fn set_mount_camera_with_size(
+        &self,
+        override_cam: Option<MountCameraOverride>,
+        size: Option<(u32, u32)>,
+    ) {
+        {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some((width, height)) = size {
+                let w = width.max(1);
+                let h = height.max(1);
+                if guard.last_size != Some((w, h)) {
+                    guard.last_size = Some((w, h));
+                    guard.pending_commands.push(ViewportCommand::Resize(w, h));
+                }
+            }
+            guard.overlay_active = override_cam.is_some();
+            guard
+                .pending_commands
+                .push(ViewportCommand::SetMountCamera(override_cam));
+            guard.is_dirty = true;
+        }
+        self.inner.cvar.notify_one();
     }
 
     pub fn snapshot(&self) -> BridgeSnapshot {
@@ -136,6 +232,7 @@ impl BevyBridge {
             last_size: guard.last_size,
             texture_size: guard.texture_size,
             view_info: guard.view_info,
+            is_mount_frame: guard.texture_is_mount_mode,
         }
     }
 
@@ -358,7 +455,14 @@ impl BevyBridge {
     }
 
     pub fn notify_frame_ready(&self) {
-        (self.inner.notify_ui_fn)();
+        let guard = self
+            .inner
+            .notify_listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for (_, listener) in guard.iter() {
+            listener();
+        }
     }
 
     pub fn shutdown(&self) {
@@ -463,6 +567,7 @@ struct PendingCommands(Vec<ViewportCommand>);
 struct CameraSyncState {
     view_info: PlanetariumViewInfo,
     is_interpolating: bool,
+    is_mount_mode: bool,
     idle_update_interval: Duration,
 }
 
@@ -471,6 +576,7 @@ impl Default for CameraSyncState {
         Self {
             view_info: PlanetariumViewInfo::default(),
             is_interpolating: false,
+            is_mount_mode: false,
             idle_update_interval: Duration::from_secs(5),
         }
     }
@@ -533,6 +639,10 @@ fn camera_movement_and_interpolation_system(
                 camera.set_tracking_target(target);
                 moved = true;
             }
+            ViewportCommand::SetMountCamera(override_cam) => {
+                camera.set_mount_override(override_cam);
+                moved = true;
+            }
             ViewportCommand::Resize(_, _) => {
                 moved = true;
             }
@@ -562,6 +672,7 @@ fn camera_movement_and_interpolation_system(
         time.delta().as_secs_f64().min(1.0 / 60.0)
     };
     camera.update(dt);
+    camera_sync.is_mount_mode = camera.is_mount_override_active();
 
     let yaw_diff = (camera.yaw - prev_yaw).abs();
     let pitch_diff = (camera.pitch - prev_pitch).abs();
@@ -1646,6 +1757,7 @@ impl PlanetariumRenderer {
                     // Bevy's next frame cannot overwrite the texture while GPUI is still drawing
                     // overlays projected from this frame's `view_info`.
                     let mut new_texture_view = None;
+                    let mut rendered_with_overlay = false;
                     let mut submitted_copy = false;
                     {
                         let _span = tracing::info_span!("extract_texture_view").entered();
@@ -1682,7 +1794,8 @@ impl PlanetariumRenderer {
                                                                 wgpu::TextureFormat::Bgra8UnormSrgb,
                                                             usage:
                                                                 wgpu::TextureUsages::TEXTURE_BINDING
-                                                                    | wgpu::TextureUsages::COPY_DST,
+                                                                    | wgpu::TextureUsages::COPY_DST
+                                                                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
                                                             view_formats: &[],
                                                         },
                                                     );
@@ -1709,10 +1822,35 @@ impl PlanetariumRenderer {
                                             slot.texture.as_image_copy(),
                                             copy_extent,
                                         );
+                                        // Determine whether THIS rendered frame used the mount camera
+                                        // from Bevy's world state (avoids racing with UI-thread toggles).
+                                        let overlay_active = app
+                                            .world()
+                                            .get_resource::<CameraSyncState>()
+                                            .is_some_and(|s| s.is_mount_mode);
+                                        let mut overlay_needs_frame = false;
+                                        if overlay_active {
+                                            if let Ok(mut pass_guard) =
+                                                bridge.inner.overlay_pass.lock()
+                                            {
+                                                if let Some(pass) = pass_guard.as_mut() {
+                                                    overlay_needs_frame = pass(
+                                                        &mut encoder,
+                                                        &slot.view,
+                                                        current_size.0,
+                                                        current_size.1,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        if overlay_needs_frame {
+                                            frames_remaining = frames_remaining.max(1);
+                                        }
                                         last_submission = Some(
                                             sync_queue.submit(std::iter::once(encoder.finish())),
                                         );
                                         submitted_copy = true;
+                                        rendered_with_overlay = overlay_active;
                                         new_texture_view = Some(slot.view.clone());
                                     }
                                 }
@@ -1757,6 +1895,7 @@ impl PlanetariumRenderer {
                         if let Some(texture) = new_texture_view {
                             guard.latest_texture = Some(texture);
                             guard.texture_size = present_size;
+                            guard.texture_is_mount_mode = rendered_with_overlay;
                             guard.view_info = view_info;
                         }
                         if is_interpolating || needs_frame_dirty {

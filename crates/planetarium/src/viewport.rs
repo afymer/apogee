@@ -24,6 +24,17 @@ pub struct TrajectoryRenderData {
     pub occlude_ground: bool,
 }
 
+/// Camera override used when the Mount 3D workspace renders over the shared Planetarium sky.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MountCameraOverride {
+    /// Horizontal look azimuth in radians (`0` = North, `π/2` = East).
+    pub az_rad: f64,
+    /// Horizontal look altitude in radians (`-π/2..=π/2`).
+    pub alt_rad: f64,
+    /// Vertical perspective field of view in radians.
+    pub fov_y_rad: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewportCommand {
     Resize(u32, u32),
@@ -52,4 +63,5 @@ pub enum ViewportCommand {
     SetHorizonLineVisible(bool),
     SetTrajectory(Option<TrajectoryRenderData>),
     TrackTarget(Option<TrackingTarget>),
+    SetMountCamera(Option<MountCameraOverride>),
 }

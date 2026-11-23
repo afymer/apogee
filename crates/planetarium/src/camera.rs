@@ -4,7 +4,7 @@ use celestial::coords::{
     Angle, AngleInterval, SphericalRect, canonical_spherical_to_cartesian,
     cartesian_to_canonical_spherical, topocentric_enu_to_spherical,
 };
-use celestial::projection::{CameraProjection, ProjectionKind};
+use celestial::projection::CameraProjection;
 use celestial::{ObservationContext, SolarSystemBody};
 use glam::{DMat3, DMat4, DQuat, DVec3, Mat4};
 
@@ -181,6 +181,8 @@ pub struct PlanetariumCamera {
     pub(crate) tracking_locked: bool,
     pub(crate) tracking_prev_target_dir: Option<DVec3>,
     pub(crate) mode_transition: Option<ViewModeTransition>,
+    pub(crate) mount_override: Option<crate::viewport::MountCameraOverride>,
+    pub(crate) saved_explore_view: Option<(ViewMode, f64, f64, f64)>,
 }
 
 impl Default for PlanetariumCamera {
@@ -201,6 +203,8 @@ impl Default for PlanetariumCamera {
             tracking_locked: false,
             tracking_prev_target_dir: None,
             mode_transition: None,
+            mount_override: None,
+            saved_explore_view: None,
         }
     }
 }
@@ -535,7 +539,51 @@ impl PlanetariumCamera {
         };
     }
 
+    pub fn is_mount_override_active(&self) -> bool {
+        self.mount_override.is_some()
+    }
+
+    pub fn set_mount_override(
+        &mut self,
+        override_cam: Option<crate::viewport::MountCameraOverride>,
+    ) {
+        match override_cam {
+            Some(ov) => {
+                if self.saved_explore_view.is_none() {
+                    self.saved_explore_view =
+                        Some((self.view_mode, self.yaw, self.pitch, self.fov_y));
+                }
+                self.mount_override = Some(ov);
+                self.view_mode = ViewMode::Horizontal;
+                self.yaw = ov.az_rad.rem_euclid(TAU);
+                self.pitch = ov.alt_rad.clamp(-FRAC_PI_2 + 1e-4, FRAC_PI_2 - 1e-4);
+                self.fov_y = ov.fov_y_rad.clamp(Self::MIN_FOV_RAD, Self::MAX_FOV_RAD);
+                self.target_yaw = self.yaw;
+                self.target_pitch = self.pitch;
+                self.target_fov_y = self.fov_y;
+                self.mode_transition = None;
+                self.zoom_anchor = None;
+            }
+            None => {
+                if self.mount_override.take().is_some() {
+                    if let Some((mode, yaw, pitch, fov_y)) = self.saved_explore_view.take() {
+                        self.view_mode = mode;
+                        self.yaw = yaw;
+                        self.pitch = pitch;
+                        self.fov_y = fov_y;
+                        self.target_yaw = yaw;
+                        self.target_pitch = pitch;
+                        self.target_fov_y = fov_y;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn update(&mut self, dt_seconds: f64) {
+        if self.mount_override.is_some() {
+            return;
+        }
         let dt = dt_seconds.clamp(0.0, 0.1);
         let factor = 1.0 - (-12.0 * dt).exp();
 
@@ -734,16 +782,7 @@ impl PlanetariumCamera {
     }
 
     pub fn projection_for_fov(fov_y: f64, aspect_ratio: f32) -> CameraProjection {
-        let fov_deg = fov_y.to_degrees();
-        let kind = if fov_deg >= 60.0 {
-            ProjectionKind::Stereographic
-        } else if fov_deg <= 20.0 {
-            ProjectionKind::Perspective
-        } else {
-            ProjectionKind::Blended((60.0 - fov_deg) / 40.0)
-        };
-
-        CameraProjection::new(Angle::from_radians(fov_y), aspect_ratio as f64, kind)
+        CameraProjection::for_fov(fov_y, aspect_ratio)
     }
 
     pub fn projection(&self, aspect_ratio: f32) -> CameraProjection {
@@ -1267,5 +1306,34 @@ mod tests {
         cam.pan(25.0, -10.0, 900.0);
         assert!(!cam.is_tracking());
         assert!(!cam.is_tracking_locked());
+    }
+
+    #[test]
+    fn set_mount_override_saves_and_restores_explore_view() {
+        let mut camera = PlanetariumCamera {
+            view_mode: ViewMode::Equatorial,
+            yaw: 1.2,
+            pitch: 0.5,
+            fov_y: 60.0_f64.to_radians(),
+            ..Default::default()
+        };
+
+        camera.set_mount_override(Some(crate::viewport::MountCameraOverride {
+            az_rad: 2.0,
+            alt_rad: -0.3,
+            fov_y_rad: 42.0_f64.to_radians(),
+        }));
+        assert!(camera.is_mount_override_active());
+        assert_eq!(camera.view_mode, ViewMode::Horizontal);
+        assert!((camera.yaw - 2.0).abs() < 1e-6);
+        assert!((camera.pitch + 0.3).abs() < 1e-6);
+
+        // Clearing mount override restores the saved Explore view
+        camera.set_mount_override(None);
+        assert!(!camera.is_mount_override_active());
+        assert_eq!(camera.view_mode, ViewMode::Equatorial);
+        assert!((camera.yaw - 1.2).abs() < 1e-6);
+        assert!((camera.pitch - 0.5).abs() < 1e-6);
+        assert!((camera.fov_y - 60.0_f64.to_radians()).abs() < 1e-6);
     }
 }

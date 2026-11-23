@@ -341,3 +341,143 @@ pub fn topocentric_enu_to_spherical(v: glam::DVec3) -> (Angle, Angle) {
     let az = Angle::from_radians_normalized(norm.x.atan2(norm.y));
     (az, alt)
 }
+
+/// Parses a Right Ascension string into normalized degrees `[0, 360)`.
+///
+/// Accepts:
+/// - Decimal degrees (`"83.82"`, `"350.5"`)
+/// - Sexagesimal hours (`"05:35:17"`, `"5h 35m 17.3s"`, `"5 35 17"`, `"12h"`)
+pub fn parse_ra_degrees(raw: &str) -> Option<f64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let has_hms_unit = s.contains(['h', 'H', 'm', 'M', 's', 'S', ':']);
+    if !has_hms_unit {
+        if let Ok(deg) = s.parse::<f64>() {
+            if deg.is_finite() {
+                return Some(deg.rem_euclid(360.0));
+            }
+            return None;
+        }
+    }
+    let cleaned = s.replace(['h', 'H', 'm', 'M', 's', 'S', ':'], " ");
+    let parts: Vec<&str> = cleaned.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let h: f64 = parts[0].parse().ok()?;
+    let m: f64 = if parts.len() >= 2 {
+        parts[1].parse().ok()?
+    } else {
+        0.0
+    };
+    let sec: f64 = if parts.len() == 3 {
+        parts[2].parse().ok()?
+    } else {
+        0.0
+    };
+    if !h.is_finite() || !m.is_finite() || !sec.is_finite() {
+        return None;
+    }
+    if !(0.0..24.0).contains(&h) || !(0.0..60.0).contains(&m) || !(0.0..60.0).contains(&sec) {
+        return None;
+    }
+    Some(((h + m / 60.0 + sec / 3600.0) * 15.0).rem_euclid(360.0))
+}
+
+/// Parses a Declination string into degrees `[-90, 90]`.
+///
+/// Accepts decimal degrees (`"-5.39"`, `"+41.27"`) or sexagesimal DMS
+/// (`"-05:23:28"`, `"+41° 16' 09\""`, `"-00 30 00"`).
+pub fn parse_dec_degrees(raw: &str) -> Option<f64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
+        (-1.0, r.trim_start())
+    } else if let Some(r) = s.strip_prefix('+') {
+        (1.0, r.trim_start())
+    } else {
+        (1.0, s)
+    };
+    // Reject double signs such as "--10:00:00" or "+-5".
+    if rest.starts_with(['+', '-']) || rest.is_empty() {
+        return None;
+    }
+
+    let has_dms_unit = rest.contains(['°', 'd', 'D', '\'', '"', 'm', 'M', 's', 'S', ':']);
+    if !has_dms_unit {
+        if let Ok(deg) = rest.parse::<f64>() {
+            if deg.is_finite() && (0.0..=90.0).contains(&deg) {
+                return Some(sign * deg);
+            }
+            return None;
+        }
+    }
+
+    let cleaned = rest.replace(['°', 'd', 'D', '\'', '"', 'm', 'M', 's', 'S', ':'], " ");
+    let parts: Vec<&str> = cleaned.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let d: f64 = parts[0].parse().ok()?;
+    let m: f64 = if parts.len() >= 2 {
+        parts[1].parse().ok()?
+    } else {
+        0.0
+    };
+    let sec: f64 = if parts.len() == 3 {
+        parts[2].parse().ok()?
+    } else {
+        0.0
+    };
+    if !d.is_finite() || !m.is_finite() || !sec.is_finite() {
+        return None;
+    }
+    if !(0.0..=90.0).contains(&d) || !(0.0..60.0).contains(&m) || !(0.0..60.0).contains(&sec) {
+        return None;
+    }
+    let val = sign * (d + m / 60.0 + sec / 3600.0);
+    if (-90.0..=90.0).contains(&val) {
+        Some(val)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ra_degrees_handles_formats_and_rejects_invalid() {
+        assert!((parse_ra_degrees("06:00:00").unwrap() - 90.0).abs() < 1e-6);
+        assert!((parse_ra_degrees("5h 35m 17.3s").unwrap() - 83.822083).abs() < 1e-3);
+        assert!((parse_ra_degrees("12h").unwrap() - 180.0).abs() < 1e-6);
+        assert!((parse_ra_degrees("123.45").unwrap() - 123.45).abs() < 1e-6);
+        assert!(parse_ra_degrees("").is_none());
+        assert!(parse_ra_degrees("NaN").is_none());
+        assert!(parse_ra_degrees("NaN:00:00").is_none());
+        assert!(parse_ra_degrees("00:NaN:00").is_none());
+        assert!(parse_ra_degrees("inf:00:00").is_none());
+        assert!(parse_ra_degrees("24:00:00").is_none());
+        assert!(parse_ra_degrees("12:60:00").is_none());
+    }
+
+    #[test]
+    fn parse_dec_degrees_handles_formats_and_rejects_invalid() {
+        assert!((parse_dec_degrees("-05:23:28").unwrap() - (-5.391111)).abs() < 1e-3);
+        assert!((parse_dec_degrees("-00:30:00").unwrap() - (-0.5)).abs() < 1e-6);
+        assert!((parse_dec_degrees("+41° 16' 09\"").unwrap() - 41.269167).abs() < 1e-3);
+        assert!((parse_dec_degrees("+41.27").unwrap() - 41.27).abs() < 1e-6);
+        assert!(parse_dec_degrees("").is_none());
+        assert!(parse_dec_degrees("--10:00:00").is_none());
+        assert!(parse_dec_degrees("+-10:00:00").is_none());
+        assert!(parse_dec_degrees("NaN").is_none());
+        assert!(parse_dec_degrees("NaN:00:00").is_none());
+        assert!(parse_dec_degrees("91:00:00").is_none());
+        assert!(parse_dec_degrees("90:01:00").is_none());
+    }
+}
