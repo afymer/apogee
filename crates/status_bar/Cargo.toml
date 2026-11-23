@@ -10,6 +10,7 @@ theme.workspace = true
 protocol.workspace = true
 client.workspace = true
 components.workspace = true
+settings.workspace = true
 
 [lib]
 name = "status_bar"

@@ -1,4 +1,5 @@
 mod bevy_viewport;
+mod logs_panel;
 mod sky_search;
 mod star_details;
 mod theme_loader;
@@ -96,6 +97,10 @@ fn main() {
         {
             let _span = ::tracing::info_span!("bevy_viewport_init").entered();
             bevy_viewport::init(cx);
+        }
+        {
+            let _span = ::tracing::info_span!("logs_panel_init").entered();
+            logs_panel::init(cx);
         }
         {
             let _span = ::tracing::info_span!("raw_viewer_init").entered();

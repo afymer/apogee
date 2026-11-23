@@ -33,6 +33,8 @@ actions!(
         OpenSkySearch,
         /// Toggles the Object Details side panel.
         ToggleObjectDetails,
+        /// Toggles the Logs bottom panel.
+        ToggleLogs,
         /// Centers the view on the selected object and follows it.
         CenterOnSelection,
         /// Toggles between Alt/Az and RA/Dec view modes.
@@ -102,6 +104,14 @@ pub fn shortcut_specs() -> Vec<ShortcutSpec> {
             description: "Show or hide the Object Details side panel.",
             default_binding: Some("secondary-b"),
             make_binding: |binding| KeyBinding::new(binding, ToggleObjectDetails, None),
+        },
+        ShortcutSpec {
+            id: "apogee::ToggleLogs",
+            title: "Toggle Logs",
+            category: "Application",
+            description: "Show or hide the Logs panel.",
+            default_binding: Some("secondary-j"),
+            make_binding: |binding| KeyBinding::new(binding, ToggleLogs, None),
         },
         ShortcutSpec {
             id: "apogee::CenterOnSelection",

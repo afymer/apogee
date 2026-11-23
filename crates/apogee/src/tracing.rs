@@ -1,3 +1,5 @@
+use crate::logs_panel::LogCaptureLayer;
+
 #[cfg(all(debug_assertions, feature = "tracy"))]
 pub(crate) fn init_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
@@ -9,6 +11,7 @@ pub(crate) fn init_tracing() {
     tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
+        .with(LogCaptureLayer)
         .with(tracing_tracy::TracyLayer::default())
         .init();
 
@@ -26,5 +29,6 @@ pub(crate) fn init_tracing() {
     tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
+        .with(LogCaptureLayer)
         .init();
 }

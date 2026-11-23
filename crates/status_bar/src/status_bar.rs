@@ -2,7 +2,11 @@ use client::GlobalDaemonState;
 use components::{LogicState, StatusIndicator};
 use gpui::{App, Context, Entity, Global, SharedString, div, px};
 use protocol::{CameraStatus, ConnectionState};
-use ui::{Divider, StyledTypography, prelude::*};
+use settings::ToggleLogs;
+use ui::{
+    ButtonSize, Divider, FixedWidth, IconButton, IconName, IconSize, StyledTypography, Tooltip,
+    prelude::*,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TelemetryCoordMode {
@@ -368,11 +372,25 @@ impl Render for StatusBar {
                     .child(StatusIndicator::new(camera_logic, camera_text)),
             )
             .child(
-                right_items.child(
-                    Button::new("status_button", "Apogee")
-                        .label_size(LabelSize::Small)
-                        .style(ButtonStyle::Subtle),
-                ),
+                right_items
+                    .child(
+                        IconButton::new("status_logs_button", IconName::FileDoc)
+                            // `IconButtonShape::Square` derives its size from the icon, so
+                            // size explicitly to match the neighbouring "Apogee" button.
+                            .size(ButtonSize::Default)
+                            .width(ButtonSize::Default.rems())
+                            .icon_size(IconSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Toggle Logs"))
+                            .on_click(|_event, window, cx| {
+                                window.dispatch_action(Box::new(ToggleLogs), cx);
+                            }),
+                    )
+                    .child(
+                        Button::new("status_button", "Apogee")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle),
+                    ),
             )
     }
 }
