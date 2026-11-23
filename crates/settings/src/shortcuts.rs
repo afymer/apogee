@@ -37,6 +37,22 @@ actions!(
         CenterOnSelection,
         /// Toggles between Alt/Az and RA/Dec view modes.
         ToggleViewMode,
+        /// Moves time backward by a normal increment.
+        TimeStepBackward,
+        /// Moves time forward by a normal increment.
+        TimeStepForward,
+        /// Moves time backward by a fine increment.
+        TimeStepBackwardFine,
+        /// Moves time forward by a fine increment.
+        TimeStepForwardFine,
+        /// Moves time backward by a coarse increment.
+        TimeStepBackwardCoarse,
+        /// Moves time forward by a coarse increment.
+        TimeStepForwardCoarse,
+        /// Snaps time to dawn on the current day.
+        SnapToDawn,
+        /// Snaps time to dusk on the current day.
+        SnapToDusk,
     ]
 );
 
@@ -106,6 +122,86 @@ pub fn shortcut_specs() -> Vec<ShortcutSpec> {
             default_binding: Some("m"),
             make_binding: |binding| {
                 KeyBinding::new(binding, ToggleViewMode, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::TimeStepBackward",
+            title: "Time Backward",
+            category: "Time",
+            description: "Move time backward by 10 minutes.",
+            default_binding: Some("alt-left"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, TimeStepBackward, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::TimeStepForward",
+            title: "Time Forward",
+            category: "Time",
+            description: "Move time forward by 10 minutes.",
+            default_binding: Some("alt-right"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, TimeStepForward, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::TimeStepBackwardFine",
+            title: "Time Backward (Fine)",
+            category: "Time",
+            description: "Move time backward by 1 minute.",
+            default_binding: Some("alt-shift-left"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, TimeStepBackwardFine, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::TimeStepForwardFine",
+            title: "Time Forward (Fine)",
+            category: "Time",
+            description: "Move time forward by 1 minute.",
+            default_binding: Some("alt-shift-right"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, TimeStepForwardFine, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::TimeStepBackwardCoarse",
+            title: "Time Backward (Coarse)",
+            category: "Time",
+            description: "Move time backward by 1 hour.",
+            default_binding: Some("alt-ctrl-left"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, TimeStepBackwardCoarse, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::TimeStepForwardCoarse",
+            title: "Time Forward (Coarse)",
+            category: "Time",
+            description: "Move time forward by 1 hour.",
+            default_binding: Some("alt-ctrl-right"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, TimeStepForwardCoarse, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::SnapToDawn",
+            title: "Snap to Dawn",
+            category: "Time",
+            description: "Jump to astronomical dawn (or sunrise) on the current day.",
+            default_binding: Some("alt-down"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, SnapToDawn, Some("PlanetariumViewport"))
+            },
+        },
+        ShortcutSpec {
+            id: "apogee::SnapToDusk",
+            title: "Snap to Dusk",
+            category: "Time",
+            description: "Jump to astronomical dusk (or sunset) on the current day.",
+            default_binding: Some("alt-up"),
+            make_binding: |binding| {
+                KeyBinding::new(binding, SnapToDusk, Some("PlanetariumViewport"))
             },
         },
     ]

@@ -26,7 +26,11 @@ use planetarium::{
     TrackingTarget, TrajectoryRenderData, ViewMode, pick_solar_system_body,
     rendered_solar_system_disc_radius_px,
 };
-use settings::{GlobalSettings, SettingsModel, ToggleViewMode};
+use settings::{
+    GlobalSettings, SettingsModel, SnapToDawn, SnapToDusk, TimeStepBackward,
+    TimeStepBackwardCoarse, TimeStepBackwardFine, TimeStepForward, TimeStepForwardCoarse,
+    TimeStepForwardFine, ToggleViewMode,
+};
 use status_bar::{
     CursorSkyCoords, GlobalPlanetariumStatus, PlanetariumTelemetry, TelemetryCoordMode,
 };
@@ -65,6 +69,12 @@ fn selection_ring_fade(object_radius_logical: f64) -> f32 {
 }
 
 #[inline]
+fn step_observer_time<T: 'static>(delta_minutes: i64, cx: &mut Context<T>) {
+    if let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.clone()) {
+        observer.update(cx, |model, cx| model.step_minutes(delta_minutes, cx));
+    }
+}
+
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0).max(1e-6)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -1776,6 +1786,26 @@ impl Render for PlanetariumPanel {
                     ViewMode::Equatorial => ViewMode::Horizontal,
                 };
                 this.set_view_mode(next, cx);
+            }))
+            .on_action(cx.listener(|_, _: &TimeStepBackward, _, cx| step_observer_time(-10, cx)))
+            .on_action(cx.listener(|_, _: &TimeStepForward, _, cx| step_observer_time(10, cx)))
+            .on_action(cx.listener(|_, _: &TimeStepBackwardFine, _, cx| step_observer_time(-1, cx)))
+            .on_action(cx.listener(|_, _: &TimeStepForwardFine, _, cx| step_observer_time(1, cx)))
+            .on_action(
+                cx.listener(|_, _: &TimeStepBackwardCoarse, _, cx| step_observer_time(-60, cx)),
+            )
+            .on_action(
+                cx.listener(|_, _: &TimeStepForwardCoarse, _, cx| step_observer_time(60, cx)),
+            )
+            .on_action(cx.listener(|_, _: &SnapToDawn, _, cx| {
+                if let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.clone()) {
+                    observer.update(cx, |model, cx| model.snap_to_dawn(cx));
+                }
+            }))
+            .on_action(cx.listener(|_, _: &SnapToDusk, _, cx| {
+                if let Some(observer) = cx.try_global::<GlobalObserver>().map(|g| g.0.clone()) {
+                    observer.update(cx, |model, cx| model.snap_to_dusk(cx));
+                }
             }))
             .size_full()
             .overflow_hidden()

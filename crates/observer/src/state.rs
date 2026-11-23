@@ -410,6 +410,28 @@ impl ObserverModel {
         self.set_manual_unix_seconds(target, cx);
     }
 
+    /// Moves the observation time by `delta_minutes`, dropping any sub-minute remainder.
+    pub fn step_minutes(&mut self, delta_minutes: i64, cx: &mut Context<Self>) {
+        let base_mins = (self.effective_unix_seconds() / 60.0).floor();
+        self.set_manual_unix_seconds((base_mins + delta_minutes as f64) * 60.0, cx);
+    }
+
+    /// Snaps to astronomical dawn (or sunrise when twilight never gets that dark) on the active local date.
+    pub fn snap_to_dawn(&mut self, cx: &mut Context<Self>) {
+        let events = self.daily_solar_events();
+        if let Some(h) = events.astro_dawn_hour.or(events.sunrise_hour) {
+            self.set_local_hour_of_day(h, cx);
+        }
+    }
+
+    /// Snaps to astronomical dusk (or sunset when twilight never gets that dark) on the active local date.
+    pub fn snap_to_dusk(&mut self, cx: &mut Context<Self>) {
+        let events = self.daily_solar_events();
+        if let Some(h) = events.astro_dusk_hour.or(events.sunset_hour) {
+            self.set_local_hour_of_day(h, cx);
+        }
+    }
+
     /// Shifts the observation date by `delta_days` while preserving local time of day.
     pub fn step_days(&mut self, delta_days: i64, cx: &mut Context<Self>) {
         let dt = self.effective_local_datetime();

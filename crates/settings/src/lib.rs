@@ -4,7 +4,9 @@ pub mod window;
 
 pub use shortcuts::{
     CenterOnSelection, OpenKeyboardShortcuts, OpenSettings, OpenSkySearch, ShortcutSpec, ShortcutsWindow,
-    ToggleObjectDetails, ToggleViewMode, open_shortcuts_window,
+    SnapToDawn, SnapToDusk, TimeStepBackward, TimeStepBackwardCoarse, TimeStepBackwardFine,
+    TimeStepForward, TimeStepForwardCoarse, TimeStepForwardFine, ToggleObjectDetails,
+    ToggleViewMode, open_shortcuts_window,
 };
 pub use state::{GlobalSettings, SettingsModel, init, init_with_store};
 pub use window::{
