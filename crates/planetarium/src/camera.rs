@@ -151,6 +151,19 @@ pub(crate) struct ZoomAnchor {
     pub(crate) frame_dir: DVec3,
 }
 
+/// Duration of the roll animation played when switching between view modes.
+const VIEW_MODE_TRANSITION_SECS: f64 = 0.5;
+
+/// In-flight roll animation between the previous view mode's orientation and the live one.
+///
+/// The view direction is preserved by a mode switch; only the roll about it differs
+/// (zenith-up vs. celestial-pole-up), so only that roll is decayed to zero.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViewModeTransition {
+    initial_roll: f64,
+    progress: f64,
+}
+
 #[derive(Component, Debug, Clone)]
 pub struct PlanetariumCamera {
     pub view_mode: ViewMode,
@@ -167,6 +180,7 @@ pub struct PlanetariumCamera {
     pub(crate) tracking_target: Option<TrackingTarget>,
     pub(crate) tracking_locked: bool,
     pub(crate) tracking_prev_target_dir: Option<DVec3>,
+    pub(crate) mode_transition: Option<ViewModeTransition>,
 }
 
 impl Default for PlanetariumCamera {
@@ -186,6 +200,7 @@ impl Default for PlanetariumCamera {
             tracking_target: None,
             tracking_locked: false,
             tracking_prev_target_dir: None,
+            mode_transition: None,
         }
     }
 }
@@ -323,8 +338,11 @@ impl PlanetariumCamera {
             return;
         }
 
-        // Conversion to prevent camera jump
-        // TODO: handle orientation lerping
+        // Capture the on-screen orientation (including any transition in flight) so the
+        // roll difference between the two frames can be animated instead of snapping.
+        let from_matrix = self.icrs_to_camera_matrix();
+
+        // Conversion keeps the view direction fixed across the switch.
         match mode {
             ViewMode::Horizontal => {
                 let (cur_az, cur_alt) = self.observer.equatorial_to_topocentric_coords(
@@ -357,10 +375,21 @@ impl PlanetariumCamera {
         }
 
         self.view_mode = mode;
+        // Camera-space rotation taking the new orientation to the old one: a roll about +z.
+        let relative = from_matrix * self.live_icrs_to_camera_matrix().transpose();
+        self.mode_transition = Some(ViewModeTransition {
+            initial_roll: relative.x_axis.y.atan2(relative.x_axis.x),
+            progress: 0.0,
+        });
         self.yaw_vel = 0.0;
         self.pitch_vel = 0.0;
         self.zoom_anchor = None;
         self.tracking_prev_target_dir = None;
+    }
+
+
+    pub fn is_view_mode_transitioning(&self) -> bool {
+        self.mode_transition.is_some()
     }
 
     pub fn set_tracking_target(&mut self, target: Option<TrackingTarget>) {
@@ -511,6 +540,13 @@ impl PlanetariumCamera {
         let dt = dt_seconds.clamp(0.0, 0.1);
         let factor = 1.0 - (-12.0 * dt).exp();
 
+        if let Some(transition) = self.mode_transition.as_mut() {
+            transition.progress += dt / VIEW_MODE_TRANSITION_SECS;
+            if transition.progress >= 1.0 {
+                self.mode_transition = None;
+            }
+        }
+
         if let Some(target) = self.tracking_target {
             self.fov_y += (self.target_fov_y - self.fov_y) * factor;
             if (self.target_fov_y - self.fov_y).abs() <= 1e-9 {
@@ -654,6 +690,10 @@ impl PlanetariumCamera {
     }
 
     pub fn topocentric_to_camera_matrix(&self) -> DMat3 {
+        if self.mode_transition.is_some() {
+            return self.icrs_to_camera_matrix()
+                * self.observer.topocentric_to_equatorial_matrix();
+        }
         match self.view_mode {
             ViewMode::Horizontal => self.camera_rotation_matrix(),
             ViewMode::Equatorial => {
@@ -662,13 +702,29 @@ impl PlanetariumCamera {
         }
     }
 
-    pub fn icrs_to_camera_matrix(&self) -> DMat3 {
+    fn live_icrs_to_camera_matrix(&self) -> DMat3 {
         match self.view_mode {
             ViewMode::Horizontal => {
                 self.camera_rotation_matrix() * self.observer.equatorial_to_topocentric_matrix()
             }
             ViewMode::Equatorial => self.camera_rotation_matrix(),
         }
+    }
+
+    pub fn icrs_to_camera_matrix(&self) -> DMat3 {
+        let live = self.live_icrs_to_camera_matrix();
+        let Some(transition) = self.mode_transition else {
+            return live;
+        };
+        let t = transition.progress.clamp(0.0, 1.0);
+        let eased = t * t * (3.0 - 2.0 * t);
+        let (sin_r, cos_r) = (transition.initial_roll * (1.0 - eased)).sin_cos();
+        let roll = DMat3::from_cols(
+            DVec3::new(cos_r, sin_r, 0.0),
+            DVec3::new(-sin_r, cos_r, 0.0),
+            DVec3::Z,
+        );
+        roll * live
     }
 
     pub fn icrs_to_camera_mat4(&self) -> Mat4 {
@@ -803,6 +859,35 @@ mod tests {
         assert!(wrapped.lon.contains(Angle::ZERO));
         assert!(wrapped.lon.contains(Angle::from_degrees(2.0)));
         assert!(!wrapped.lon.contains(Angle::PI));
+    }
+
+    #[test]
+    fn test_set_view_mode_animates_roll_without_jump() {
+        let mut camera = PlanetariumCamera {
+            view_mode: ViewMode::Horizontal,
+            yaw: 1.1,
+            pitch: 0.6,
+            target_yaw: 1.1,
+            target_pitch: 0.6,
+            ..Default::default()
+        };
+        let before = camera.icrs_to_camera_matrix();
+        camera.set_view_mode(ViewMode::Equatorial);
+        assert!(camera.is_view_mode_transitioning());
+        let start = camera.icrs_to_camera_matrix();
+        assert!((start - before).abs_diff_eq(DMat3::ZERO, 1e-9));
+
+        for _ in 0..60 {
+            camera.update(1.0 / 60.0);
+        }
+        assert!(!camera.is_view_mode_transitioning());
+        let end = camera.icrs_to_camera_matrix();
+        let live = PlanetariumCamera::rotation_matrix_for(
+            ViewMode::Equatorial,
+            camera.yaw,
+            camera.pitch,
+        );
+        assert!((end - live).abs_diff_eq(DMat3::ZERO, 1e-9));
     }
 
     #[test]

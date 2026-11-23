@@ -575,7 +575,9 @@ fn camera_movement_and_interpolation_system(
     let target_pitch_diff = (camera.target_pitch - camera.pitch).abs();
     let target_fov_diff = (camera.target_fov_y - camera.fov_y).abs();
 
-    let is_interpolating = if camera.is_tracking_locked() {
+    let is_interpolating = if camera.is_view_mode_transitioning() {
+        true
+    } else if camera.is_tracking_locked() {
         fov_diff > 1e-8 || target_fov_diff > 1e-7
     } else if camera.is_tracking_slewing() {
         true
