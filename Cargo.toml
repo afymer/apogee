@@ -34,7 +34,7 @@ tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "6.0"
-chrono = "0.4"
+
 jiff = "0.2"
 tokio = { version = "1.53", features = ["full"] }
 anyhow = "1.0"

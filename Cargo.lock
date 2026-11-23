@@ -5786,10 +5786,10 @@ name = "observer"
 version = "0.1.0"
 dependencies = [
  "celestial",
- "chrono",
  "components",
  "gpui",
  "horizon",
+ "jiff",
  "persistence",
  "theme",
  "tracing",

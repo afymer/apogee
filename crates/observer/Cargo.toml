@@ -11,7 +11,7 @@ persistence.workspace = true
 celestial.workspace = true
 components.workspace = true
 horizon.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use celestial::HorizonProfile;
-use chrono::{Datelike, Days, NaiveDate, Timelike};
+
 use components::{Slider, SliderEvent, StepPrecision, TextField, TextFieldEvent};
 use gpui::{
     App, Bounds, Context, CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
@@ -10,6 +10,8 @@ use gpui::{
     ScrollDelta, ScrollWheelEvent, Task, Window, canvas, div, prelude::*, px, rgb,
 };
 use horizon::{GlobalHorizons, open_horizon_manager_window};
+use jiff::ToSpan;
+use jiff::civil::Date;
 use persistence::{
     CoordinateAxis, GeoLocation, ObservatoryIcon, ObservatoryProfile, TimezoneConfig,
     parse_coordinate, parse_elevation_m, parse_utc_offset_minutes,
@@ -102,8 +104,8 @@ impl ObserverPopover {
                 model.solar_window_profile(center, 97),
                 format!("{:02}:{:02}", dt.hour(), dt.minute()),
                 model.effective_standard_utc_offset_minutes(),
-                dt.year(),
-                dt.month(),
+                i32::from(dt.year()),
+                u32::from(dt.month().unsigned_abs()),
             )
         };
 
@@ -554,7 +556,10 @@ impl ObserverPopover {
                         let model = observer.read(cx);
                         let dt = model.effective_local_datetime();
                         (
-                            (dt.hour(), dt.minute()),
+                            (
+                                u32::from(dt.hour().unsigned_abs()),
+                                u32::from(dt.minute().unsigned_abs()),
+                            ),
                             model.local_midnight_unix_seconds(),
                         )
                     };
@@ -1335,14 +1340,14 @@ impl ObserverPopover {
                 observer.effective_dst_enabled(),
             )
         };
-        let selected_date = dt.date_naive();
+        let selected_date = dt.date();
         if !self.calendar_open {
             if let Ok(mut guard) = self.calendar_dropdown_bounds.lock() {
                 *guard = None;
             }
         }
         let utc_badge = format_utc_offset(std_offset_mins * 60);
-        let date_label = dt.format("%b %d, %Y").to_string();
+        let date_label = dt.strftime("%b %d, %Y").to_string();
         let seconds_str = format!(":{:02}", dt.second());
 
         let (dusk_label, dusk_hour) = if let Some(h) = events.astro_dusk_hour {
@@ -1651,9 +1656,10 @@ impl ObserverPopover {
                                                     if this.calendar_open {
                                                         this.horizon_dropdown_open = false;
                                                         this.calendar_view_year =
-                                                            selected_date.year();
-                                                        this.calendar_view_month =
-                                                            selected_date.month();
+                                                            i32::from(selected_date.year());
+                                                        this.calendar_view_month = u32::from(
+                                                            selected_date.month().unsigned_abs(),
+                                                        );
                                                     }
                                                     cx.notify();
                                                 },
@@ -1742,8 +1748,8 @@ impl ObserverPopover {
 
     fn render_calendar_popover(
         &self,
-        selected_date: NaiveDate,
-        today_date: NaiveDate,
+        selected_date: Date,
+        today_date: Date,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors();
@@ -1825,8 +1831,9 @@ impl ObserverPopover {
                                     MouseButton::Right,
                                     cx.listener(move |this, _event, _window, cx| {
                                         cx.stop_propagation();
-                                        this.calendar_view_year = today_date.year();
-                                        this.calendar_view_month = today_date.month();
+                                        this.calendar_view_year = i32::from(today_date.year());
+                                        this.calendar_view_month =
+                                            u32::from(today_date.month().unsigned_abs());
                                         cx.notify();
                                     }),
                                 )
@@ -1866,12 +1873,14 @@ impl ObserverPopover {
                                 .w_full()
                                 .gap_0p5()
                                 .children(week.iter().map(|&cell_date| {
-                                    let is_current_month = cell_date.year() == view_year
-                                        && cell_date.month() == view_month;
+                                    let is_current_month = i32::from(cell_date.year())
+                                        == view_year
+                                        && u32::from(cell_date.month().unsigned_abs())
+                                            == view_month;
                                     let is_selected = cell_date == selected_date;
                                     let is_today = cell_date == today_date;
                                     let day_id =
-                                        format!("calendar_day_{}", cell_date.format("%Y-%m-%d"));
+                                        format!("calendar_day_{}", cell_date.strftime("%Y-%m-%d"));
                                     let debug_id = day_id.clone();
 
                                     h_flex()
@@ -2619,13 +2628,13 @@ pub(crate) fn step_year_month(year: i32, month: u32, delta_months: i32) -> (i32,
     (next_year, next_month)
 }
 
-pub(crate) fn calendar_month_grid(year: i32, month: u32) -> Option<[NaiveDate; 42]> {
-    let first_of_month = NaiveDate::from_ymd_opt(year, month, 1)?;
-    let leading_days = u64::from(first_of_month.weekday().num_days_from_monday());
-    let grid_start = first_of_month.checked_sub_days(Days::new(leading_days))?;
+pub(crate) fn calendar_month_grid(year: i32, month: u32) -> Option<[Date; 42]> {
+    let first_of_month = Date::new(i16::try_from(year).ok()?, i8::try_from(month).ok()?, 1).ok()?;
+    let leading_days = i32::from(first_of_month.weekday().to_monday_zero_offset());
+    let grid_start = first_of_month.checked_sub(leading_days.days()).ok()?;
     let mut days = [first_of_month; 42];
     for (idx, slot) in days.iter_mut().enumerate() {
-        *slot = grid_start.checked_add_days(Days::new(idx as u64))?;
+        *slot = grid_start.checked_add((idx as i32).days()).ok()?;
     }
     Some(days)
 }
@@ -3120,19 +3129,19 @@ mod tests {
 
         // Nov 1, 2026 is a Sunday -> Monday-first grid starts Oct 26, 2026.
         let grid = calendar_month_grid(2026, 11).expect("valid month grid");
-        assert_eq!(grid[0], NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
-        assert_eq!(grid[0].weekday(), chrono::Weekday::Mon);
-        assert_eq!(grid[6], NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
-        assert_eq!(grid[35], NaiveDate::from_ymd_opt(2026, 11, 30).unwrap());
-        assert_eq!(grid[41], NaiveDate::from_ymd_opt(2026, 12, 6).unwrap());
+        assert_eq!(grid[0], jiff::civil::date(2026, 10, 26));
+        assert_eq!(grid[0].weekday(), jiff::civil::Weekday::Monday);
+        assert_eq!(grid[6], jiff::civil::date(2026, 11, 1));
+        assert_eq!(grid[35], jiff::civil::date(2026, 11, 30));
+        assert_eq!(grid[41], jiff::civil::date(2026, 12, 6));
         for pair in grid.windows(2) {
-            assert_eq!(pair[1].signed_duration_since(pair[0]).num_days(), 1);
+            assert_eq!((pair[1] - pair[0]).get_days(), 1);
         }
 
         // May 1, 2026 is a Friday -> Monday-first grid starts Apr 27, 2026.
         let may_grid = calendar_month_grid(2026, 5).expect("valid May grid");
-        assert_eq!(may_grid[0], NaiveDate::from_ymd_opt(2026, 4, 27).unwrap());
-        assert_eq!(may_grid[4], NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
+        assert_eq!(may_grid[0], jiff::civil::date(2026, 4, 27));
+        assert_eq!(may_grid[4], jiff::civil::date(2026, 5, 1));
     }
 
     #[gpui::test]
@@ -3168,16 +3177,16 @@ mod tests {
         let observer = visual_cx.read(|cx| cx.global::<GlobalObserver>().0.clone());
         let today = observer.read_with(visual_cx, |m, _| m.today_local_date());
         let (initial_date, picked_date, day_selector) =
-            if today == NaiveDate::from_ymd_opt(2026, 5, 15).unwrap() {
+            if today == jiff::civil::date(2026, 5, 15) {
                 (
-                    NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
-                    NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+                    jiff::civil::date(2026, 6, 15),
+                    jiff::civil::date(2026, 6, 20),
                     "calendar_day_2026-06-20",
                 )
             } else {
                 (
-                    NaiveDate::from_ymd_opt(2026, 5, 15).unwrap(),
-                    NaiveDate::from_ymd_opt(2026, 5, 20).unwrap(),
+                    jiff::civil::date(2026, 5, 15),
+                    jiff::civil::date(2026, 5, 20),
                     "calendar_day_2026-05-20",
                 )
             };
@@ -3267,7 +3276,7 @@ mod tests {
         assert!(!host.read_with(visual_cx, |h, _| h.dismissed));
         let after_pick = observer.read_with(visual_cx, |m, _| {
             let dt = m.effective_local_datetime();
-            (dt.date_naive(), dt.hour(), dt.minute())
+            (dt.date(), dt.hour(), dt.minute())
         });
         assert_eq!(after_pick, (picked_date, 22, 30));
 
@@ -3307,7 +3316,7 @@ mod tests {
         assert!(!host.read_with(visual_cx, |h, _| h.dismissed));
         let after_reset = observer.read_with(visual_cx, |m, _| {
             let dt = m.effective_local_datetime();
-            (dt.date_naive(), dt.hour(), dt.minute())
+            (dt.date(), dt.hour(), dt.minute())
         });
         assert_eq!(after_reset, (today, 22, 30));
     }

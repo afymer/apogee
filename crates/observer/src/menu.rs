@@ -1,4 +1,4 @@
-use chrono::Timelike;
+
 use gpui::{Anchor, App, IntoElement, div, prelude::*, px, rgb};
 use ui::{
     ActiveTheme, ButtonCommon, ButtonLike, ButtonStyle, Color, Icon, IconName, IconSize, Label,

@@ -5,13 +5,12 @@ use celestial::observer::ObservationContext;
 use celestial::solar::{
     DailySolarEvents, SkyPhase, find_sky_events, sample_day_solar_profile, solar_altitude_deg,
 };
-use chrono::{
-    DateTime, Datelike, Days, FixedOffset, Local, NaiveDate, NaiveTime, Offset, TimeDelta,
-    TimeZone, Timelike, Utc,
-};
 use gpui::{App, AppContext, Context, Entity, Global};
 
 use crate::graph_center::VisibilityGraphCenter;
+use jiff::civil::{Date, Time};
+use jiff::tz::{Offset, TimeZone};
+use jiff::{Span, Timestamp, Zoned};
 use persistence::{
     DocumentStore, GeoLocation, MergeOutcome, ObservatoryIcon, ObservatoryProfile, ObserverCatalog,
     TimezoneConfig, TimezoneMode,
@@ -137,9 +136,9 @@ impl ObserverModel {
     }
 
     /// Returns the active timestamp converted to the active site's configured timezone + DST.
-    pub fn effective_local_datetime(&self) -> DateTime<FixedOffset> {
-        unix_seconds_to_utc(self.effective_unix_seconds())
-            .with_timezone(&self.effective_fixed_offset())
+    pub fn effective_local_datetime(&self) -> Zoned {
+        unix_seconds_to_timestamp(self.effective_unix_seconds())
+            .to_zoned(TimeZone::fixed(self.effective_fixed_offset()))
     }
 
     /// Returns the active site's configured timezone basis (`SiteLocal` or `Utc`).
@@ -203,31 +202,28 @@ impl ObserverModel {
         (base_secs + dst_secs).clamp(-18 * 3600, 18 * 3600)
     }
 
-    /// Builds the [`FixedOffset`] corresponding to the active site's timezone + DST.
-    pub fn effective_fixed_offset(&self) -> FixedOffset {
+    /// Builds the [`Offset`] corresponding to the active site's timezone + DST.
+    pub fn effective_fixed_offset(&self) -> Offset {
         self.fixed_offset_at(self.effective_unix_seconds())
     }
 
-    fn fixed_offset_at(&self, unix_seconds: f64) -> FixedOffset {
-        FixedOffset::east_opt(self.utc_offset_secs_at(unix_seconds)).unwrap_or_else(|| Utc.fix())
+    fn fixed_offset_at(&self, unix_seconds: f64) -> Offset {
+        Offset::from_seconds(self.utc_offset_secs_at(unix_seconds)).unwrap_or(Offset::UTC)
     }
 
     /// Returns the Unix timestamp for local `00:00:00` of the active local calendar date.
     pub fn local_midnight_unix_seconds(&self) -> f64 {
         let dt = self.effective_local_datetime();
-        let offset = *dt.offset();
-        let naive_midnight = dt.date_naive().and_time(NaiveTime::MIN);
-        if let Some(midnight) = offset.from_local_datetime(&naive_midnight).single() {
-            return midnight.timestamp() as f64;
+        if let Ok(midnight) = dt.start_of_day() {
+            return midnight.timestamp().as_second() as f64;
         }
-        let secs_since_midnight = i64::from(dt.num_seconds_from_midnight());
-        (dt - TimeDelta::seconds(secs_since_midnight)).timestamp() as f64
+        (dt.timestamp().as_second() - seconds_since_midnight(&dt)) as f64
     }
 
     /// Returns the local hour of day in `[0.0, 24.0)`.
     pub fn local_hour_of_day(&self) -> f64 {
         let dt = self.effective_local_datetime();
-        (f64::from(dt.num_seconds_from_midnight()) / 3600.0).clamp(0.0, 23.9999)
+        (seconds_since_midnight(&dt) as f64 / 3600.0).clamp(0.0, 23.9999)
     }
 
     /// Builds a celestial [`ObservationContext`] for the active site and time.
@@ -479,13 +475,10 @@ impl ObserverModel {
     /// Shifts the observation date by `delta_days` while preserving local time of day.
     pub fn step_days(&mut self, delta_days: i64, cx: &mut Context<Self>) {
         let dt = self.effective_local_datetime();
-        let next_date = if delta_days >= 0 {
-            dt.date_naive()
-                .checked_add_days(Days::new(delta_days as u64))
-        } else {
-            dt.date_naive()
-                .checked_sub_days(Days::new(delta_days.unsigned_abs()))
-        };
+        let next_date = Span::new()
+            .try_days(delta_days)
+            .and_then(|span| dt.date().checked_add(span))
+            .ok();
 
         let full_host_auto = self.timezone_mode() == TimezoneMode::Utc
             && self.is_utc_offset_auto()
@@ -493,12 +486,12 @@ impl ObserverModel {
         let target_secs = next_date
             .and_then(|d| {
                 if full_host_auto {
-                    resolve_local_date_time(d, dt.time()).map(|r| r.timestamp() as f64)
+                    resolve_local_date_time(d, dt.time()).map(|r| r.timestamp().as_second() as f64)
                 } else {
                     self.effective_fixed_offset()
-                        .from_local_datetime(&d.and_time(dt.time()))
-                        .single()
-                        .map(|r| r.timestamp() as f64)
+                        .to_timestamp(d.to_datetime(dt.time()))
+                        .ok()
+                        .map(|r| r.as_second() as f64)
                 }
             })
             .unwrap_or_else(|| self.effective_unix_seconds() + delta_days as f64 * 86_400.0);
@@ -507,38 +500,39 @@ impl ObserverModel {
     }
 
     /// Returns today's calendar date in the active site's effective timezone.
-    pub fn today_local_date(&self) -> NaiveDate {
+    pub fn today_local_date(&self) -> Date {
         let full_host_auto = self.timezone_mode() == TimezoneMode::Utc
             && self.is_utc_offset_auto()
             && self.is_dst_auto();
         if full_host_auto {
-            Local::now().date_naive()
+            Zoned::now().date()
         } else {
             let offset = self.fixed_offset_at(now_unix_seconds());
-            Utc::now().with_timezone(&offset).date_naive()
+            Timestamp::now()
+                .to_zoned(TimeZone::fixed(offset))
+                .date()
         }
     }
 
     /// Pins observation time to a specific local calendar `date` while keeping the current local time of day.
-    pub fn set_local_date(&mut self, date: NaiveDate, cx: &mut Context<Self>) {
+    pub fn set_local_date(&mut self, date: Date, cx: &mut Context<Self>) {
         let dt = self.effective_local_datetime();
         let full_host_auto = self.timezone_mode() == TimezoneMode::Utc
             && self.is_utc_offset_auto()
             && self.is_dst_auto();
         let resolved_secs = if full_host_auto {
-            resolve_local_date_time(date, dt.time()).map(|r| r.timestamp() as f64)
+            resolve_local_date_time(date, dt.time()).map(|r| r.timestamp().as_second() as f64)
         } else {
-            let initial_offset = self.effective_fixed_offset();
-            initial_offset
-                .from_local_datetime(&date.and_time(dt.time()))
-                .single()
+            let naive = date.to_datetime(dt.time());
+            self.effective_fixed_offset()
+                .to_timestamp(naive)
+                .ok()
                 .and_then(|est| {
-                    let target_offset = self.fixed_offset_at(est.timestamp() as f64);
-                    target_offset
-                        .from_local_datetime(&date.and_time(dt.time()))
-                        .single()
+                    self.fixed_offset_at(est.as_second() as f64)
+                        .to_timestamp(naive)
+                        .ok()
                 })
-                .map(|r| r.timestamp() as f64)
+                .map(|r| r.as_second() as f64)
         };
         if let Some(secs) = resolved_secs {
             self.set_manual_unix_seconds(secs, cx);
@@ -702,7 +696,11 @@ fn now_unix_seconds() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn unix_seconds_to_utc(unix_seconds: f64) -> DateTime<Utc> {
+fn seconds_since_midnight(dt: &Zoned) -> i64 {
+    i64::from(dt.hour()) * 3600 + i64::from(dt.minute()) * 60 + i64::from(dt.second())
+}
+
+fn unix_seconds_to_timestamp(unix_seconds: f64) -> Timestamp {
     let safe = if unix_seconds.is_finite() {
         unix_seconds
     } else {
@@ -711,34 +709,32 @@ fn unix_seconds_to_utc(unix_seconds: f64) -> DateTime<Utc> {
     let secs = safe.floor() as i64;
     let nanos = ((safe - secs as f64) * 1e9)
         .round()
-        .clamp(0.0, 999_999_999.0) as u32;
-    DateTime::from_timestamp(secs, nanos).unwrap_or_else(Utc::now)
+        .clamp(0.0, 999_999_999.0) as i32;
+    Timestamp::new(secs, nanos).unwrap_or_else(|_| Timestamp::now())
 }
 
 fn host_standard_offset_and_dst(unix_seconds: f64) -> (i32, bool) {
-    let local_dt = unix_seconds_to_utc(unix_seconds).with_timezone(&Local);
-    let cur_secs = local_dt.offset().local_minus_utc();
+    let local_dt = unix_seconds_to_timestamp(unix_seconds).to_zoned(TimeZone::system());
+    let cur_secs = local_dt.offset().seconds();
     let year = local_dt.year();
 
-    let jan_secs = NaiveDate::from_ymd_opt(year, 1, 1)
-        .and_then(|d| resolve_local_date_time(d, NaiveTime::MIN))
-        .map(|dt| dt.offset().local_minus_utc())
+    let jan_secs = Date::new(year, 1, 1)
+        .ok()
+        .and_then(|d| resolve_local_date_time(d, Time::midnight()))
+        .map(|dt| dt.offset().seconds())
         .unwrap_or(cur_secs);
-    let jul_secs = NaiveDate::from_ymd_opt(year, 7, 1)
-        .and_then(|d| resolve_local_date_time(d, NaiveTime::MIN))
-        .map(|dt| dt.offset().local_minus_utc())
+    let jul_secs = Date::new(year, 7, 1)
+        .ok()
+        .and_then(|d| resolve_local_date_time(d, Time::midnight()))
+        .map(|dt| dt.offset().seconds())
         .unwrap_or(cur_secs);
 
     let std_secs = jan_secs.min(jul_secs);
     (std_secs / 60, cur_secs > std_secs)
 }
 
-fn resolve_local_date_time(date: NaiveDate, time: NaiveTime) -> Option<DateTime<Local>> {
-    let naive = date.and_time(time);
-    Local
-        .from_local_datetime(&naive)
-        .earliest()
-        .or_else(|| Local.from_local_datetime(&naive).latest())
+fn resolve_local_date_time(date: Date, time: Time) -> Option<Zoned> {
+    date.to_datetime(time).to_zoned(TimeZone::system()).ok()
 }
 
 #[cfg(test)]
