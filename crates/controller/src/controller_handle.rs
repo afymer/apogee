@@ -1,4 +1,5 @@
-use protocol::{CameraStatus, DaemonStatus, Frame};
+use protocol::{CameraStatus, DaemonStatus, Frame, MountCommand, MountStatus, MountTelemetry};
+use synscan::{MountEvent, MountHandle};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::ControllerEvent;
@@ -13,6 +14,7 @@ pub enum ControllerError {
 pub enum ControllerCommand {
     StartCapture(Frame),
     Abort,
+    Mount(MountCommand),
 }
 
 #[derive(Clone)]
@@ -20,6 +22,7 @@ pub struct ControllerHandle {
     cmd_tx: mpsc::Sender<ControllerCommand>,
     daemon_status_rx: watch::Receiver<DaemonStatus>,
     camera_status_rx: watch::Receiver<CameraStatus>,
+    mount: MountHandle,
     event_tx: broadcast::Sender<ControllerEvent>,
 }
 
@@ -28,12 +31,14 @@ impl ControllerHandle {
         cmd_tx: mpsc::Sender<ControllerCommand>,
         daemon_status_rx: watch::Receiver<DaemonStatus>,
         camera_status_rx: watch::Receiver<CameraStatus>,
+        mount: MountHandle,
         event_tx: broadcast::Sender<ControllerEvent>,
     ) -> Self {
         Self {
             cmd_tx,
             daemon_status_rx,
             camera_status_rx,
+            mount,
             event_tx,
         }
     }
@@ -52,12 +57,31 @@ impl ControllerHandle {
             .map_err(|_| ControllerError::Disconnected)
     }
 
+    pub async fn send_mount_command(&self, cmd: MountCommand) -> Result<(), ControllerError> {
+        self.cmd_tx
+            .send(ControllerCommand::Mount(cmd))
+            .await
+            .map_err(|_| ControllerError::Disconnected)
+    }
+
     pub fn status(&self) -> watch::Receiver<DaemonStatus> {
         self.daemon_status_rx.clone()
     }
 
     pub fn camera_status(&self) -> watch::Receiver<CameraStatus> {
         self.camera_status_rx.clone()
+    }
+
+    pub fn mount_status(&self) -> watch::Receiver<MountStatus> {
+        self.mount.status()
+    }
+
+    pub fn mount_telemetry(&self) -> watch::Receiver<Option<MountTelemetry>> {
+        self.mount.telemetry()
+    }
+
+    pub fn subscribe_mount_events(&self) -> broadcast::Receiver<MountEvent> {
+        self.mount.subscribe_events()
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<ControllerEvent> {

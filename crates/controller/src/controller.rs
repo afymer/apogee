@@ -7,6 +7,7 @@ mod tests;
 
 use gphoto::handle::CameraHandle;
 use protocol::{DaemonStatus, Frame};
+use synscan::MountHandle;
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -35,6 +36,7 @@ enum InternalMessage {
 
 pub struct Controller {
     camera: CameraHandle,
+    mount: MountHandle,
     cmd_rx: mpsc::Receiver<ControllerCommand>,
     internal_tx: mpsc::Sender<InternalMessage>,
     internal_rx: mpsc::Receiver<InternalMessage>,
@@ -48,6 +50,10 @@ pub struct Controller {
 
 impl Controller {
     pub fn spawn(camera: CameraHandle) -> ControllerHandle {
+        Self::spawn_with_mount(camera, MountHandle::disconnected_stub())
+    }
+
+    pub fn spawn_with_mount(camera: CameraHandle, mount: MountHandle) -> ControllerHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (internal_tx, internal_rx) = mpsc::channel(32);
         let (status_tx, status_rx) = watch::channel(DaemonStatus::Idle);
@@ -55,10 +61,17 @@ impl Controller {
 
         let camera_status_rx = camera.status();
 
-        let handle = ControllerHandle::new(cmd_tx, status_rx, camera_status_rx, event_tx.clone());
+        let handle = ControllerHandle::new(
+            cmd_tx,
+            status_rx,
+            camera_status_rx,
+            mount.clone(),
+            event_tx.clone(),
+        );
 
         let controller = Self {
             camera,
+            mount,
             cmd_rx,
             internal_tx,
             internal_rx,
@@ -85,6 +98,11 @@ impl Controller {
                         }
                         Some(ControllerCommand::Abort) => {
                             self.handle_abort();
+                        }
+                        Some(ControllerCommand::Mount(mount_cmd)) => {
+                            if let Err(err) = self.mount.try_send_command(mount_cmd) {
+                                error!("Failed to forward mount command: {err}");
+                            }
                         }
                         None => {
                             info!("Controller command channel closed, shutting down controller");

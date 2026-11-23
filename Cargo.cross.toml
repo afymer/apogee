@@ -5,6 +5,7 @@ members = [
     "crates/protocol",
     "crates/controller",
     "crates/drivers/gphoto",
+    "crates/drivers/synscan",
 ]
 default-members = ["crates/daemon"]
 
@@ -22,6 +23,7 @@ anyhow = "1.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 protocol.path = "crates/protocol"
 gphoto.path = "crates/drivers/gphoto"
+synscan.path = "crates/drivers/synscan"
 controller.path = "crates/controller"
 
 [workspace.lints.clippy]

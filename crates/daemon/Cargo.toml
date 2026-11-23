@@ -12,6 +12,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 gphoto.workspace = true
+synscan.workspace = true
 controller.workspace = true
 protocol.workspace = true
 anyhow.workspace = true

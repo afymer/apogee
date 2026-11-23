@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use controller::Controller;
 use gphoto::actor::CameraActor;
+use synscan::MountActor;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -21,10 +22,23 @@ async fn main() -> anyhow::Result<()> {
         .with_line_number(true)
         .init();
 
-    info!("Starting Apogee daemon...");
+    let sim_mode = std::env::args().any(|a| a == "--sim" || a == "--simulate")
+        || matches!(
+            std::env::var("APOGEE_SIM").ok().as_deref(),
+            Some("1" | "true" | "TRUE" | "yes")
+        );
 
-    let camera_handle = CameraActor::spawn();
-    let controller_handle = Controller::spawn(camera_handle);
+    let (camera_handle, mount_handle) = if sim_mode {
+        info!("Starting Apogee daemon in SIMULATED hardware mode (camera + NEQ6-Pro mount)...");
+        (
+            CameraActor::spawn_simulated(),
+            MountActor::spawn_simulated(),
+        )
+    } else {
+        info!("Starting Apogee daemon...");
+        (CameraActor::spawn(), MountActor::spawn())
+    };
+    let controller_handle = Controller::spawn_with_mount(camera_handle, mount_handle);
 
     let bind_addr: SocketAddr = match std::env::var("APOGEE_DAEMON_ADDR") {
         Ok(raw_addr) => match raw_addr.parse() {

@@ -21,14 +21,18 @@ use axum::{
 };
 use controller::{CapturedFrame, ControllerEvent, ControllerHandle};
 use futures::{SinkExt, StreamExt};
-use protocol::{CameraStatus, DaemonMessage, DaemonStatus, FrameType, ViewerMessage};
+use protocol::{
+    CameraStatus, DaemonMessage, DaemonStatus, FrameType, MountStatus, MountTelemetry,
+    ViewerMessage,
+};
 use serde::Serialize;
+use synscan::MountEvent;
 use tokio::sync::{RwLock, broadcast};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info, warn};
 
 pub struct FrameCacheEntry {
-    pub data: Vec<u8>,
+    pub data: axum::body::Bytes,
     pub mime_type: String,
     pub filename: String,
 }
@@ -210,14 +214,14 @@ impl ServerState {
         &self,
         frame_id: u64,
         filename: String,
-        data: Vec<u8>,
+        data: impl Into<axum::body::Bytes>,
         mime_type: String,
     ) {
         let mut cache = self.frame_cache.write().await;
         cache.insert(
             frame_id,
             FrameCacheEntry {
-                data,
+                data: data.into(),
                 mime_type,
                 filename,
             },
@@ -241,7 +245,7 @@ impl ServerState {
             .and_then(|s| s.override_template.as_deref());
         let filename = build_capture_filename(captured, template_override);
         let mut dest_path = self.capture_dir.join(&filename);
-        if dest_path.exists() {
+        if tokio::fs::try_exists(&dest_path).await.unwrap_or(false) {
             let stem = dest_path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -301,17 +305,23 @@ async fn health_handler() -> impl IntoResponse {
 struct StatusResponse {
     daemon: DaemonStatus,
     camera: CameraStatus,
+    mount: MountStatus,
+    mount_telemetry: Option<MountTelemetry>,
     viewers: usize,
 }
 
 async fn status_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let daemon = state.controller.status().borrow().clone();
     let camera = state.controller.camera_status().borrow().clone();
+    let mount = state.controller.mount_status().borrow().clone();
+    let mount_telemetry = state.controller.mount_telemetry().borrow().clone();
     let viewers = state.active_viewers_count.load(Ordering::Relaxed);
 
     axum::Json(StatusResponse {
         daemon,
         camera,
+        mount,
+        mount_telemetry,
         viewers,
     })
 }
@@ -371,26 +381,64 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<ServerState>>)
     ws.on_upgrade(move |socket| handle_viewer_socket(socket, state))
 }
 
+struct ViewerCountGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl ViewerCountGuard {
+    fn acquire(counter: Arc<AtomicUsize>) -> (Self, usize) {
+        let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        (Self { counter }, count)
+    }
+}
+
+impl Drop for ViewerCountGuard {
+    fn drop(&mut self) {
+        let remaining = self.counter.fetch_sub(1, Ordering::SeqCst) - 1;
+        info!("Viewer disconnected (remaining active viewers: {remaining})");
+    }
+}
+
+fn collect_snapshot_messages(state: &ServerState) -> Vec<DaemonMessage> {
+    let mut msgs = Vec::with_capacity(4);
+    msgs.push(DaemonMessage::Status(
+        state.controller.status().borrow().clone(),
+    ));
+    msgs.push(DaemonMessage::CameraStatus(
+        state.controller.camera_status().borrow().clone(),
+    ));
+    msgs.push(DaemonMessage::MountStatus(
+        state.controller.mount_status().borrow().clone(),
+    ));
+    if let Some(telemetry) = state.controller.mount_telemetry().borrow().clone() {
+        msgs.push(DaemonMessage::MountTelemetry(telemetry));
+    }
+    msgs
+}
+
+async fn send_daemon_message(
+    ws_sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    msg: &DaemonMessage,
+) -> bool {
+    match serde_json::to_string(msg) {
+        Ok(text) => ws_sender.send(Message::Text(text.into())).await.is_ok(),
+        Err(err) => {
+            error!("Failed to serialize DaemonMessage: {err}");
+            true
+        }
+    }
+}
+
 async fn handle_viewer_socket(socket: WebSocket, state: Arc<ServerState>) {
-    let viewer_idx = state.active_viewers_count.fetch_add(1, Ordering::SeqCst) + 1;
+    let (_guard, viewer_idx) = ViewerCountGuard::acquire(state.active_viewers_count.clone());
     info!("Viewer connected via WebSocket (active viewers: {viewer_idx})");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let mut broadcast_rx = state.broadcast_tx.subscribe();
+    let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonMessage>();
 
-    let initial_status = state.controller.status().borrow().clone();
-    let camera_status = state.controller.camera_status().borrow().clone();
-
-    if let Ok(text) = serde_json::to_string(&DaemonMessage::Status(initial_status)) {
-        if ws_sender.send(Message::Text(text.into())).await.is_err() {
-            state.active_viewers_count.fetch_sub(1, Ordering::SeqCst);
-            return;
-        }
-    }
-
-    if let Ok(text) = serde_json::to_string(&DaemonMessage::CameraStatus(camera_status)) {
-        if ws_sender.send(Message::Text(text.into())).await.is_err() {
-            state.active_viewers_count.fetch_sub(1, Ordering::SeqCst);
+    for msg in collect_snapshot_messages(&state) {
+        if !send_daemon_message(&mut ws_sender, &msg).await {
             return;
         }
     }
@@ -400,30 +448,38 @@ async fn handle_viewer_socket(socket: WebSocket, state: Arc<ServerState>) {
             frame_id: *frame_id,
             image_bytes: bytes.clone(),
         };
-        if let Ok(text) = serde_json::to_string(&preview_msg) {
-            let _ = ws_sender.send(Message::Text(text.into())).await;
+        if !send_daemon_message(&mut ws_sender, &preview_msg).await {
+            return;
         }
     }
 
     let mut send_task = tokio::spawn(async move {
         loop {
-            match broadcast_rx.recv().await {
-                Ok(msg) => match serde_json::to_string(&msg) {
-                    Ok(text) => {
-                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
-                            break;
+            tokio::select! {
+                biased;
+                direct = direct_rx.recv() => {
+                    match direct {
+                        Some(msg) => {
+                            if !send_daemon_message(&mut ws_sender, &msg).await {
+                                break;
+                            }
                         }
+                        None => break,
                     }
-                    Err(err) => {
-                        error!("Failed to serialize DaemonMessage: {err}");
-                    }
-                },
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!("WebSocket broadcast receiver lagged by {skipped} messages; continuing");
-                    continue;
                 }
-                Err(broadcast::error::RecvError::Closed) => {
-                    break;
+                res = broadcast_rx.recv() => {
+                    match res {
+                        Ok(msg) => {
+                            if !send_daemon_message(&mut ws_sender, &msg).await {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!("WebSocket broadcast receiver lagged by {skipped} messages; continuing");
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             }
         }
@@ -435,7 +491,7 @@ async fn handle_viewer_socket(socket: WebSocket, state: Arc<ServerState>) {
             match msg_result {
                 Ok(Message::Text(text)) => match serde_json::from_str::<ViewerMessage>(&text) {
                     Ok(viewer_msg) => {
-                        handle_viewer_command(viewer_msg, &incoming_state).await;
+                        handle_viewer_command(viewer_msg, &incoming_state, &direct_tx).await;
                     }
                     Err(err) => {
                         warn!("Invalid ViewerMessage JSON received: {err}");
@@ -465,21 +521,22 @@ async fn handle_viewer_socket(socket: WebSocket, state: Arc<ServerState>) {
             send_task.abort();
         }
     }
-
-    let remaining = state.active_viewers_count.fetch_sub(1, Ordering::SeqCst) - 1;
-    info!("Viewer disconnected (remaining active viewers: {remaining})");
 }
 
-async fn handle_viewer_command(msg: ViewerMessage, state: &Arc<ServerState>) {
+async fn handle_viewer_command(
+    msg: ViewerMessage,
+    state: &Arc<ServerState>,
+    direct_tx: &tokio::sync::mpsc::UnboundedSender<DaemonMessage>,
+) {
     match msg {
         ViewerMessage::Connect => {
             info!("Received explicit Connect handshake from viewer");
-            let daemon = state.controller.status().borrow().clone();
-            let camera = state.controller.camera_status().borrow().clone();
-            state.broadcast(DaemonMessage::Status(daemon));
-            state.broadcast(DaemonMessage::CameraStatus(camera));
+            for snapshot_msg in collect_snapshot_messages(state) {
+                let _ = direct_tx.send(snapshot_msg);
+            }
         }
         ViewerMessage::StartCapture(frame) => {
+            let frame_id = frame.id;
             info!(
                 "Forwarding StartCapture for frame {} ({:?}, {:.1}s) to controller",
                 frame.id,
@@ -488,12 +545,24 @@ async fn handle_viewer_command(msg: ViewerMessage, state: &Arc<ServerState>) {
             );
             if let Err(err) = state.controller.start_capture(frame).await {
                 error!("Failed to forward StartCapture to controller: {err}");
+                let _ = direct_tx.send(DaemonMessage::CaptureError {
+                    frame_id,
+                    message: err.to_string(),
+                });
             }
         }
         ViewerMessage::Abort => {
             warn!("Forwarding Abort command to controller");
             if let Err(err) = state.controller.abort().await {
                 error!("Failed to forward Abort to controller: {err}");
+            }
+        }
+        ViewerMessage::Mount(mount_cmd) => {
+            if let Err(err) = state.controller.send_mount_command(mount_cmd).await {
+                error!("Failed to forward MountCommand to controller: {err}");
+                let _ = direct_tx.send(DaemonMessage::MountError {
+                    message: err.to_string(),
+                });
             }
         }
     }
@@ -516,16 +585,16 @@ pub fn spawn_controller_event_forwarder(state: Arc<ServerState>) {
                 ControllerEvent::Status(status) => {
                     state.broadcast(DaemonMessage::Status(status));
                 }
-                ControllerEvent::FrameCaptured(captured) => {
+                ControllerEvent::FrameCaptured(mut captured) => {
                     let frame_id = captured.frame.id;
                     let mime = detect_raw_mime_type(&captured.file_ref.filename);
                     let save_to_server = captured.frame.save_config.server.is_some();
                     let save_to_viewer = captured.frame.save_config.viewer.is_some();
 
-                    if let Some(data) = captured.data.as_ref() {
+                    if let Some(data) = captured.data.take() {
                         let mut persist_ok = true;
                         if save_to_server {
-                            match state.persist_frame_to_disk(&captured, data).await {
+                            match state.persist_frame_to_disk(&captured, &data).await {
                                 Ok(path) => {
                                     info!("Saved frame {frame_id} to {}", path.display());
                                 }
@@ -549,12 +618,7 @@ pub fn spawn_controller_event_forwarder(state: Arc<ServerState>) {
                                 captured.file_ref.filename.clone()
                             };
                             state
-                                .store_frame_with_name(
-                                    frame_id,
-                                    filename,
-                                    data.clone(),
-                                    mime.into(),
-                                )
+                                .store_frame_with_name(frame_id, filename, data, mime.into())
                                 .await;
                             let raw_url = format!("/api/frames/{frame_id}/raw");
                             state.broadcast(DaemonMessage::FrameReady {
@@ -596,9 +660,51 @@ pub fn spawn_camera_status_watcher(state: Arc<ServerState>) {
     });
 }
 
+pub fn spawn_mount_watchers(state: Arc<ServerState>) {
+    let mut status_rx = state.controller.mount_status();
+    let status_state = state.clone();
+    tokio::spawn(async move {
+        while status_rx.changed().await.is_ok() {
+            let new_status = status_rx.borrow().clone();
+            info!("Mount status changed: {:?}", new_status);
+            status_state.broadcast(DaemonMessage::MountStatus(new_status));
+        }
+    });
+
+    let mut telemetry_rx = state.controller.mount_telemetry();
+    let telem_state = state.clone();
+    tokio::spawn(async move {
+        while telemetry_rx.changed().await.is_ok() {
+            if let Some(telemetry) = telemetry_rx.borrow().clone() {
+                telem_state.broadcast(DaemonMessage::MountTelemetry(telemetry));
+            }
+        }
+    });
+
+    let mut event_rx = state.controller.subscribe_mount_events();
+    tokio::spawn(async move {
+        loop {
+            match event_rx.recv().await {
+                Ok(MountEvent::Ports(ports)) => {
+                    state.broadcast(DaemonMessage::MountPorts(ports));
+                }
+                Ok(MountEvent::Error(message)) => {
+                    state.broadcast(DaemonMessage::MountError { message });
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!("Mount event watcher lagged by {skipped} messages; continuing");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 pub async fn start_server(addr: SocketAddr, controller: ControllerHandle) -> anyhow::Result<()> {
     let state = Arc::new(ServerState::new(controller));
     spawn_camera_status_watcher(state.clone());
+    spawn_mount_watchers(state.clone());
     spawn_controller_event_forwarder(state.clone());
 
     let app = create_router(state);

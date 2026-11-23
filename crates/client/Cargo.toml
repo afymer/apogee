@@ -10,11 +10,11 @@ path = "src/client.rs"
 [dependencies]
 gpui.workspace = true
 protocol.workspace = true
+persistence.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures.workspace = true
 tracing.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 anyhow.workspace = true

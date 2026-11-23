@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod error;
 pub mod horizon;
+pub mod mount;
 pub mod observer;
 pub mod settings;
 pub mod store;
@@ -15,6 +16,7 @@ pub use horizon::{
     DEFAULT_HORIZON_SAMPLE_COUNT, HORIZON_ASSET_NAMESPACE, HORIZON_SCHEMA_VERSION,
     HorizonBackground, HorizonCatalog,
 };
+pub use mount::{HardwareConfig, MOUNT_SCHEMA_VERSION};
 pub use observer::{
     CoordinateAxis, GeoLocation, MergeOutcome, OBSERVER_SCHEMA_VERSION, ObservatoryIcon,
     ObservatoryProfile, ObserverCatalog, ProfileSource, TimezoneConfig, TimezoneMode,

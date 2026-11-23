@@ -24,6 +24,7 @@ COPY crates/daemon ./crates/daemon
 COPY crates/controller ./crates/controller
 COPY crates/protocol ./crates/protocol
 COPY crates/drivers/gphoto ./crates/drivers/gphoto
+COPY crates/drivers/synscan ./crates/drivers/synscan
 
 RUN cargo build --release --target aarch64-unknown-linux-gnu -p daemon --bin daemon
 
@@ -56,6 +57,7 @@ COPY crates/daemon ./crates/daemon
 COPY crates/controller ./crates/controller
 COPY crates/protocol ./crates/protocol
 COPY crates/drivers/gphoto ./crates/drivers/gphoto
+COPY crates/drivers/synscan ./crates/drivers/synscan
 
 RUN cargo build --release --target armv7-unknown-linux-gnueabihf -p daemon --bin daemon
 

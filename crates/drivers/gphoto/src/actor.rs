@@ -56,6 +56,54 @@ impl CameraActor {
         CameraHandle::new(cmd_tx, status_rx)
     }
 
+    /// Spawns a simulated camera actor that stays `CameraStatus::Ready` without polling USB.
+    pub fn spawn_simulated() -> CameraHandle {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
+        let (status_tx, status_rx) = watch::channel(CameraStatus::Ready);
+
+        tokio::spawn(async move {
+            info!("Simulated camera actor ready (no USB polling)");
+            let mut seq: u64 = 0;
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    CameraCommand::Capture {
+                        exposure,
+                        iso: _,
+                        mut cancel,
+                        reply,
+                    } => {
+                        let sleep = tokio::time::sleep(exposure.min(Duration::from_secs(10)));
+                        tokio::pin!(sleep);
+                        let res = if *cancel.borrow() {
+                            Err(CaptureError::Interrupted)
+                        } else {
+                            tokio::select! {
+                                () = &mut sleep => {
+                                    seq += 1;
+                                    Ok(CameraFileRef {
+                                        folder: "/sim".to_string(),
+                                        filename: format!("sim_frame_{seq:04}.raw"),
+                                    })
+                                }
+                                () = wait_for_cancel(&mut cancel) => Err(CaptureError::Interrupted),
+                            }
+                        };
+                        let _ = reply.send(res);
+                    }
+                    CameraCommand::Download { reply, .. } => {
+                        let _ = reply.send(Ok(Vec::new()));
+                    }
+                    CameraCommand::DeleteFile { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+            }
+            drop(status_tx);
+        });
+
+        CameraHandle::new(cmd_tx, status_rx)
+    }
+
     async fn run(mut self) {
         loop {
             let mut driver = match self.connect().await {
