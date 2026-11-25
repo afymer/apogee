@@ -6,12 +6,13 @@ use celestial::{
     coords::{Angle, canonical_spherical_to_cartesian},
     sample_day_equatorial_track, sample_day_solar_system_track,
 };
+use client::{GlobalDaemonState, send_mount_command};
 use glam::DVec3;
 use gpui::{
-    App, AppContext, BorderStyle, Bounds, Context, Corners, Edges, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, Rgba, Window, actions, div,
-    fill, hsla, point, prelude::*, px, rgb, svg,
+    AnyElement, App, AppContext, BorderStyle, Bounds, Context, Corners, Edges, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, RenderImage, Rgba, Window,
+    actions, div, fill, hsla, point, prelude::*, px, rgb, svg,
 };
 
 actions!(planetarium, [ClearSelection]);
@@ -20,11 +21,12 @@ use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_da
 pub use observer::{GlobalVisibilityGraphPrefs, VisibilityGraphCenter, VisibilityGraphPrefsModel};
 use observer::{GraphCenterToggleStyle, graph_axis_labels, graph_center_toggle};
 use planetarium::{PickedSolarSystemBody, PickedStar};
+use protocol::{ConnectionState, MountCommand, MountStatus};
 use settings::{CenterOnSelection, ToggleObjectDetails};
 use status_bar::{format_altaz, format_radec};
 use ui::{
-    ActiveTheme, ButtonCommon, Clickable, IconButton, IconName, IconSize, StyledTypography,
-    Tooltip, h_flex, v_flex,
+    ActiveTheme, Button, ButtonCommon, ButtonStyle, Clickable, Disableable, FixedWidth, IconButton,
+    IconName, IconSize, LabelSize, StyledTypography, Tooltip, h_flex, v_flex,
 };
 use workspace::{
     WorkspaceKind,
@@ -420,6 +422,13 @@ impl StarDetailsPanel {
                 .detach();
             }
 
+            if let Some(daemon_entity) = cx.try_global::<GlobalDaemonState>().map(|g| g.0.clone()) {
+                cx.observe(&daemon_entity, |_this: &mut Self, _model, cx| {
+                    cx.notify();
+                })
+                .detach();
+            }
+
             let mut panel = Self {
                 focus_handle: cx.focus_handle(),
                 last_activation_nonce: initial_nonce,
@@ -581,6 +590,76 @@ impl StarDetailsPanel {
 
     fn toggle_panel(&self, cx: &mut Context<Self>) {
         cx.emit(PanelEvent::Toggle);
+    }
+
+    fn mount_action_state(&self, cx: &App) -> (bool, bool) {
+        cx.try_global::<GlobalDaemonState>()
+            .map(|g| {
+                let model = g.0.read(cx);
+                let is_ready = model.state.connection == ConnectionState::Connected
+                    && model.state.mount == MountStatus::Ready;
+                let is_parked = model
+                    .state
+                    .mount_telemetry
+                    .as_ref()
+                    .map_or(true, |t| t.is_parked);
+                (is_ready, is_parked)
+            })
+            .unwrap_or((false, true))
+    }
+
+    fn render_mount_actions(&self, ra_deg: f64, dec_deg: f64, cx: &App) -> AnyElement {
+        let (is_ready, is_parked) = self.mount_action_state(cx);
+        let can_slew = is_ready && !is_parked;
+        let slew_tooltip = if can_slew {
+            "Slew mount to selected object"
+        } else if is_ready {
+            "Unpark mount to slew"
+        } else {
+            "Connect a mount to slew"
+        };
+        let sync_tooltip = if is_ready {
+            "Sync mount coordinates to selected object"
+        } else {
+            "Connect a mount to sync"
+        };
+
+        h_flex()
+            .w_full()
+            .gap_1p5()
+            .child(
+                div().flex_1().child(
+                    Button::new("star_details_slew_to_btn", "Slew To")
+                        .full_width()
+                        .style(ButtonStyle::Filled)
+                        .label_size(LabelSize::Small)
+                        .disabled(!can_slew)
+                        .tooltip(Tooltip::text(slew_tooltip))
+                        .on_click(move |_, _, cx| {
+                            send_mount_command(
+                                MountCommand::SlewToEquatorial { ra_deg, dec_deg },
+                                cx,
+                            );
+                        }),
+                ),
+            )
+            .child(
+                div().flex_1().child(
+                    Button::new("star_details_sync_to_btn", "Sync To")
+                        .full_width()
+                        .style(ButtonStyle::Subtle)
+                        .label_size(LabelSize::Small)
+                        .disabled(!is_ready)
+                        .tooltip(Tooltip::text(sync_tooltip))
+                        .on_click(move |_, _, cx| {
+                            send_mount_command(
+                                MountCommand::SyncEquatorial { ra_deg, dec_deg },
+                                cx,
+                            );
+                        }),
+                ),
+            )
+            .into_any_element()
     }
 }
 
@@ -1843,6 +1922,9 @@ impl Render for StarDetailsPanel {
             .child(div().h(px(1.0)).w_full().bg(colors.border_variant))
             // 3. Compact photometry / solar-system ephemeris, coordinates & identifiers section
             .child(details_metrics_section)
+            .child(div().h(px(1.0)).w_full().bg(colors.border_variant))
+            // 4. Mount actions
+            .child(self.render_mount_actions(ra_deg, dec_deg, cx))
             .into_any_element()
     }
 }
