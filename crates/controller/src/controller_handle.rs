@@ -1,4 +1,7 @@
-use protocol::{CameraStatus, DaemonStatus, Frame, MountCommand, MountStatus, MountTelemetry};
+use protocol::{
+    CameraStatus, DaemonStatus, Frame, ImagingSequence, MountCommand, MountStatus, MountTelemetry,
+    SequenceStatus,
+};
 use synscan::{MountEvent, MountHandle};
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -13,6 +16,9 @@ pub enum ControllerError {
 #[derive(Debug)]
 pub enum ControllerCommand {
     StartCapture(Frame),
+    StartSequence(ImagingSequence),
+    PauseSequence,
+    ResumeSequence,
     Abort,
     Mount(MountCommand),
 }
@@ -22,6 +28,7 @@ pub struct ControllerHandle {
     cmd_tx: mpsc::Sender<ControllerCommand>,
     daemon_status_rx: watch::Receiver<DaemonStatus>,
     camera_status_rx: watch::Receiver<CameraStatus>,
+    sequence_status_rx: watch::Receiver<Option<SequenceStatus>>,
     mount: MountHandle,
     event_tx: broadcast::Sender<ControllerEvent>,
 }
@@ -31,6 +38,7 @@ impl ControllerHandle {
         cmd_tx: mpsc::Sender<ControllerCommand>,
         daemon_status_rx: watch::Receiver<DaemonStatus>,
         camera_status_rx: watch::Receiver<CameraStatus>,
+        sequence_status_rx: watch::Receiver<Option<SequenceStatus>>,
         mount: MountHandle,
         event_tx: broadcast::Sender<ControllerEvent>,
     ) -> Self {
@@ -38,6 +46,7 @@ impl ControllerHandle {
             cmd_tx,
             daemon_status_rx,
             camera_status_rx,
+            sequence_status_rx,
             mount,
             event_tx,
         }
@@ -46,6 +55,27 @@ impl ControllerHandle {
     pub async fn start_capture(&self, frame: Frame) -> Result<(), ControllerError> {
         self.cmd_tx
             .send(ControllerCommand::StartCapture(frame))
+            .await
+            .map_err(|_| ControllerError::Disconnected)
+    }
+
+    pub async fn start_sequence(&self, sequence: ImagingSequence) -> Result<(), ControllerError> {
+        self.cmd_tx
+            .send(ControllerCommand::StartSequence(sequence))
+            .await
+            .map_err(|_| ControllerError::Disconnected)
+    }
+
+    pub async fn pause_sequence(&self) -> Result<(), ControllerError> {
+        self.cmd_tx
+            .send(ControllerCommand::PauseSequence)
+            .await
+            .map_err(|_| ControllerError::Disconnected)
+    }
+
+    pub async fn resume_sequence(&self) -> Result<(), ControllerError> {
+        self.cmd_tx
+            .send(ControllerCommand::ResumeSequence)
             .await
             .map_err(|_| ControllerError::Disconnected)
     }
@@ -70,6 +100,10 @@ impl ControllerHandle {
 
     pub fn camera_status(&self) -> watch::Receiver<CameraStatus> {
         self.camera_status_rx.clone()
+    }
+
+    pub fn sequence_status(&self) -> watch::Receiver<Option<SequenceStatus>> {
+        self.sequence_status_rx.clone()
     }
 
     pub fn mount_status(&self) -> watch::Receiver<MountStatus> {

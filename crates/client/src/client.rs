@@ -214,6 +214,7 @@ fn daemon_state_meaningfully_equal(a: &DaemonState, b: &DaemonState) -> bool {
         && a.mount == b.mount
         && a.available_mount_ports == b.available_mount_ports
         && a.daemon == b.daemon
+        && a.sequence == b.sequence
         && telemetry_meaningfully_equal(a.mount_telemetry.as_ref(), b.mount_telemetry.as_ref())
 }
 
@@ -373,6 +374,7 @@ fn reset_disconnected_state(state: &mut DaemonState) {
     state.mount_telemetry = None;
     state.available_mount_ports.clear();
     state.daemon = DaemonStatus::Idle;
+    state.sequence = None;
 }
 
 fn send_state(
@@ -659,6 +661,10 @@ async fn run_message_pump(
                                     DaemonMessage::MountError { message } => {
                                         warn!("Daemon reported mount error: {message}");
                                         let _ = update_tx.send(ClientModelUpdate::MountError(message));
+                                    }
+                                    DaemonMessage::SequenceStatus(seq_status) => {
+                                        current_state.sequence = Some(seq_status);
+                                        send_state(update_tx, current_state, false);
                                     }
                                     DaemonMessage::SequenceProgress { .. }
                                     | DaemonMessage::PreviewAvailable { .. } => {}

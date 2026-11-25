@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::camera::CameraStatus;
+use crate::capture::SequenceStatus;
 use crate::message::DaemonStatus;
 use crate::mount::{MountStatus, MountTelemetry};
 
@@ -24,6 +25,7 @@ pub struct DaemonState {
     pub mount_telemetry: Option<MountTelemetry>,
     pub available_mount_ports: Vec<String>,
     pub daemon: DaemonStatus,
+    pub sequence: Option<SequenceStatus>,
 }
 
 impl Default for DaemonState {
@@ -35,6 +37,7 @@ impl Default for DaemonState {
             mount_telemetry: None,
             available_mount_ports: Vec::new(),
             daemon: DaemonStatus::Idle,
+            sequence: None,
         }
     }
 }

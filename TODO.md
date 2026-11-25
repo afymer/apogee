@@ -2,7 +2,6 @@
 
 ## Features
 - [mount/explore] Add J2000 <-> JNow precession conversion at the mount boundary
-- [controller/capture] Implement multi-frame imaging Sequence Runner (`SequenceProgress`, pause/resume, auto-meridian-flip coordination between camera and mount)
 - [planetarium] Add camera sensor FOV framing overlay (draggable/rotatable rectangle synced with mount GoTo)
 - [mount_renderer] Optional animated 3D meridian flip (mechanical RA/Dec shaft angles or local pier-side transition animation)
 

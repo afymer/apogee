@@ -23,7 +23,7 @@ use controller::{CapturedFrame, ControllerEvent, ControllerHandle};
 use futures::{SinkExt, StreamExt};
 use protocol::{
     CameraStatus, DaemonMessage, DaemonStatus, FrameType, MountStatus, MountTelemetry,
-    ViewerMessage,
+    SequenceStatus, ViewerMessage,
 };
 use serde::Serialize;
 use synscan::MountEvent;
@@ -307,6 +307,7 @@ struct StatusResponse {
     camera: CameraStatus,
     mount: MountStatus,
     mount_telemetry: Option<MountTelemetry>,
+    sequence: Option<SequenceStatus>,
     viewers: usize,
 }
 
@@ -315,6 +316,7 @@ async fn status_handler(State(state): State<Arc<ServerState>>) -> impl IntoRespo
     let camera = state.controller.camera_status().borrow().clone();
     let mount = state.controller.mount_status().borrow().clone();
     let mount_telemetry = state.controller.mount_telemetry().borrow().clone();
+    let sequence = state.controller.sequence_status().borrow().clone();
     let viewers = state.active_viewers_count.load(Ordering::Relaxed);
 
     axum::Json(StatusResponse {
@@ -322,6 +324,7 @@ async fn status_handler(State(state): State<Arc<ServerState>>) -> impl IntoRespo
         camera,
         mount,
         mount_telemetry,
+        sequence,
         viewers,
     })
 }
@@ -400,7 +403,7 @@ impl Drop for ViewerCountGuard {
 }
 
 fn collect_snapshot_messages(state: &ServerState) -> Vec<DaemonMessage> {
-    let mut msgs = Vec::with_capacity(4);
+    let mut msgs = Vec::with_capacity(5);
     msgs.push(DaemonMessage::Status(
         state.controller.status().borrow().clone(),
     ));
@@ -412,6 +415,9 @@ fn collect_snapshot_messages(state: &ServerState) -> Vec<DaemonMessage> {
     ));
     if let Some(telemetry) = state.controller.mount_telemetry().borrow().clone() {
         msgs.push(DaemonMessage::MountTelemetry(telemetry));
+    }
+    if let Some(sequence) = state.controller.sequence_status().borrow().clone() {
+        msgs.push(DaemonMessage::SequenceStatus(sequence));
     }
     msgs
 }
@@ -551,6 +557,33 @@ async fn handle_viewer_command(
                 });
             }
         }
+        ViewerMessage::StartSequence(sequence) => {
+            let sequence_id = sequence.id;
+            info!(
+                "Forwarding StartSequence {} ({} frames) to controller",
+                sequence_id,
+                sequence.total_frames()
+            );
+            if let Err(err) = state.controller.start_sequence(sequence).await {
+                error!("Failed to forward StartSequence to controller: {err}");
+                let _ = direct_tx.send(DaemonMessage::CaptureError {
+                    frame_id: sequence_id,
+                    message: err.to_string(),
+                });
+            }
+        }
+        ViewerMessage::PauseSequence => {
+            info!("Forwarding PauseSequence to controller");
+            if let Err(err) = state.controller.pause_sequence().await {
+                error!("Failed to forward PauseSequence to controller: {err}");
+            }
+        }
+        ViewerMessage::ResumeSequence => {
+            info!("Forwarding ResumeSequence to controller");
+            if let Err(err) = state.controller.resume_sequence().await {
+                error!("Failed to forward ResumeSequence to controller: {err}");
+            }
+        }
         ViewerMessage::Abort => {
             warn!("Forwarding Abort command to controller");
             if let Err(err) = state.controller.abort().await {
@@ -643,6 +676,13 @@ pub fn spawn_controller_event_forwarder(state: Arc<ServerState>) {
                         frame_id,
                         message: error,
                     });
+                }
+                ControllerEvent::SequenceStatus(status) => {
+                    state.broadcast(DaemonMessage::SequenceProgress {
+                        completed: status.completed,
+                        total: status.total,
+                    });
+                    state.broadcast(DaemonMessage::SequenceStatus(status));
                 }
             }
         }

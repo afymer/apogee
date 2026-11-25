@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::camera::CameraStatus;
-use crate::capture::Frame;
+use crate::capture::{Frame, ImagingSequence, SequenceStatus};
 use crate::mount::{MountCommand, MountStatus, MountTelemetry};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +16,9 @@ pub enum DaemonStatus {
 pub enum ViewerMessage {
     Connect,
     StartCapture(Frame),
+    StartSequence(ImagingSequence),
+    PauseSequence,
+    ResumeSequence,
     Abort,
     Mount(MountCommand),
 }
@@ -30,6 +33,7 @@ pub enum DaemonMessage {
     MountPorts(Vec<String>),
     MountError { message: String },
     SequenceProgress { completed: u32, total: u32 },
+    SequenceStatus(SequenceStatus),
     PreviewAvailable { frame_id: u64, image_bytes: Vec<u8> },
     FrameReady { frame_id: u64, url: String },
     CaptureError { frame_id: u64, message: String },

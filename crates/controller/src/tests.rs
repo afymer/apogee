@@ -406,3 +406,325 @@ async fn test_capture_camera_only_skips_download() {
         downloaded
     );
 }
+
+#[test]
+fn test_needs_meridian_flip() {
+    use crate::needs_meridian_flip;
+    use protocol::{MountLimits, MountTelemetry, PierSide};
+
+    let mut telemetry = MountTelemetry {
+        az_deg: 195.0,
+        pier_side: PierSide::West,
+        is_parked: false,
+        limits: MountLimits {
+            meridian_limit_deg: 10.0,
+            auto_meridian_flip: true,
+            ..MountLimits::default()
+        },
+        ..MountTelemetry::default()
+    };
+
+    // Past 180 + 10 deg on West pier side -> flip needed
+    assert!(needs_meridian_flip(&telemetry));
+
+    // Already on East pier side -> no flip
+    telemetry.pier_side = PierSide::East;
+    assert!(!needs_meridian_flip(&telemetry));
+
+    // Within meridian limit (185 < 190) -> no flip
+    telemetry.pier_side = PierSide::West;
+    telemetry.az_deg = 185.0;
+    assert!(!needs_meridian_flip(&telemetry));
+
+    // Auto meridian flip disabled -> no flip
+    telemetry.az_deg = 200.0;
+    telemetry.limits.auto_meridian_flip = false;
+    assert!(!needs_meridian_flip(&telemetry));
+
+    // Parked -> no flip
+    telemetry.limits.auto_meridian_flip = true;
+    telemetry.is_parked = true;
+    assert!(!needs_meridian_flip(&telemetry));
+}
+
+#[tokio::test]
+async fn test_sequence_runner_multi_step_completion() {
+    use protocol::{ImagingSequence, SequencePhase, SequenceStep};
+
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<CameraCommand>(32);
+    let (_status_tx, status_rx) = watch::channel(protocol::CameraStatus::Ready);
+    let camera_handle = CameraHandle::new(cmd_tx, status_rx);
+
+    tokio::spawn(async move {
+        let mut idx = 0u32;
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                CameraCommand::Capture { reply, .. } => {
+                    idx += 1;
+                    let _ = reply.send(Ok(CameraFileRef {
+                        folder: "/store".into(),
+                        filename: format!("SEQ_{idx:04}.CR2"),
+                    }));
+                }
+                CameraCommand::Download { reply, .. } => {
+                    let _ = reply.send(Ok(vec![1, 2, 3, 4]));
+                }
+                CameraCommand::DeleteFile { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        }
+    });
+
+    let controller_handle = Controller::spawn(camera_handle);
+    let mut event_rx = controller_handle.subscribe_events();
+
+    let sequence = ImagingSequence {
+        id: 7,
+        target_name: "M31".into(),
+        steps: vec![
+            SequenceStep {
+                frame_type: FrameType::Light,
+                count: 2,
+                params: CaptureParams {
+                    exposure: Duration::from_millis(10),
+                    iso: Some(800),
+                },
+                delay_between_frames: Duration::ZERO,
+            },
+            SequenceStep {
+                frame_type: FrameType::Dark,
+                count: 1,
+                params: CaptureParams {
+                    exposure: Duration::from_millis(10),
+                    iso: Some(800),
+                },
+                delay_between_frames: Duration::ZERO,
+            },
+        ],
+        save_config: SaveLocationConfig::default(),
+        auto_meridian_flip: false,
+    };
+
+    controller_handle.start_sequence(sequence).await.unwrap();
+
+    let mut captured_count = 0u32;
+    let mut final_phase = None;
+    let timeout = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Ok(event) = event_rx.recv().await {
+            match event {
+                ControllerEvent::FrameCaptured(_) => {
+                    captured_count += 1;
+                }
+                ControllerEvent::SequenceStatus(st) if st.phase == SequencePhase::Completed => {
+                    assert_eq!(st.completed, 3);
+                    assert_eq!(st.total, 3);
+                    assert_eq!(st.current_step, 2);
+                    final_phase = Some(st.phase);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    assert!(timeout.is_ok(), "Sequence did not complete within timeout");
+    assert_eq!(captured_count, 3);
+    assert_eq!(final_phase, Some(SequencePhase::Completed));
+
+    let mut status_rx = controller_handle.status();
+    status_rx
+        .wait_for(|s| *s == DaemonStatus::Idle)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_sequence_pause_resume_and_abort() {
+    use protocol::{ImagingSequence, SequencePhase, SequenceStep};
+
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<CameraCommand>(32);
+    let (_status_tx, status_rx) = watch::channel(protocol::CameraStatus::Ready);
+    let camera_handle = CameraHandle::new(cmd_tx, status_rx);
+
+    tokio::spawn(async move {
+        let mut idx = 0u32;
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                CameraCommand::Capture { reply, .. } => {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    idx += 1;
+                    let _ = reply.send(Ok(CameraFileRef {
+                        folder: "/store".into(),
+                        filename: format!("PAUSE_{idx:04}.CR2"),
+                    }));
+                }
+                CameraCommand::Download { reply, .. } => {
+                    let _ = reply.send(Ok(vec![9, 9]));
+                }
+                CameraCommand::DeleteFile { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        }
+    });
+
+    let controller_handle = Controller::spawn(camera_handle);
+    let mut seq_rx = controller_handle.sequence_status();
+
+    let sequence = ImagingSequence {
+        id: 8,
+        target_name: "M42".into(),
+        steps: vec![SequenceStep {
+            frame_type: FrameType::Light,
+            count: 5,
+            params: CaptureParams {
+                exposure: Duration::from_millis(30),
+                iso: None,
+            },
+            delay_between_frames: Duration::ZERO,
+        }],
+        save_config: SaveLocationConfig::default(),
+        auto_meridian_flip: false,
+    };
+
+    controller_handle.start_sequence(sequence).await.unwrap();
+    // Pause shortly after starting; it should pause before frame 2.
+    controller_handle.pause_sequence().await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        seq_rx
+            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Paused))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Sequence should reach Paused phase");
+
+    // Resume and then abort.
+    controller_handle.resume_sequence().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        seq_rx
+            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Running))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Sequence should resume to Running phase");
+
+    controller_handle.abort().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        seq_rx
+            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Aborted))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Sequence should reach Aborted phase");
+}
+
+#[tokio::test]
+async fn test_sequence_auto_meridian_flip_coordination() {
+    use protocol::{
+        ImagingSequence, MountCommand, MountLimits, MountStatus, MountTelemetry, PierSide,
+        SequencePhase, SequenceStep,
+    };
+    use synscan::{MountEvent, MountHandle};
+    use tokio::sync::broadcast;
+
+    let (cam_tx, mut cam_rx) = mpsc::channel::<CameraCommand>(32);
+    let (_cam_status_tx, cam_status_rx) = watch::channel(protocol::CameraStatus::Ready);
+    let camera_handle = CameraHandle::new(cam_tx, cam_status_rx);
+
+    tokio::spawn(async move {
+        while let Some(cmd) = cam_rx.recv().await {
+            match cmd {
+                CameraCommand::Capture { reply, .. } => {
+                    let _ = reply.send(Ok(CameraFileRef {
+                        folder: "/store".into(),
+                        filename: "FLIP_0001.CR2".into(),
+                    }));
+                }
+                CameraCommand::Download { reply, .. } => {
+                    let _ = reply.send(Ok(vec![42]));
+                }
+                CameraCommand::DeleteFile { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        }
+    });
+
+    let (mount_cmd_tx, mut mount_cmd_rx) = mpsc::channel::<MountCommand>(16);
+    let (_mount_status_tx, mount_status_rx) = watch::channel(MountStatus::Ready);
+    let initial_telem = MountTelemetry {
+        az_deg: 195.0,
+        pier_side: PierSide::West,
+        is_parked: false,
+        is_slewing: false,
+        limits: MountLimits {
+            meridian_limit_deg: 10.0,
+            auto_meridian_flip: true,
+            ..MountLimits::default()
+        },
+        ..MountTelemetry::default()
+    };
+    let (mount_telem_tx, mount_telem_rx) = watch::channel(Some(initial_telem.clone()));
+    let (mount_event_tx, _) = broadcast::channel::<MountEvent>(16);
+    let mount_handle = MountHandle::new(mount_cmd_tx, mount_status_rx, mount_telem_rx, mount_event_tx);
+
+    let flip_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flip_received_clone = flip_received.clone();
+
+    tokio::spawn(async move {
+        while let Some(cmd) = mount_cmd_rx.recv().await {
+            if matches!(cmd, MountCommand::MeridianFlip) {
+                flip_received_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                let mut slewing = initial_telem.clone();
+                slewing.is_slewing = true;
+                let _ = mount_telem_tx.send(Some(slewing));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let mut settled = initial_telem.clone();
+                settled.is_slewing = false;
+                settled.pier_side = PierSide::East;
+                let _ = mount_telem_tx.send(Some(settled));
+            }
+        }
+    });
+
+    let controller_handle = Controller::spawn_with_mount(camera_handle, mount_handle);
+    let mut seq_rx = controller_handle.sequence_status();
+
+    let sequence = ImagingSequence {
+        id: 9,
+        target_name: "NGC7000".into(),
+        steps: vec![SequenceStep {
+            frame_type: FrameType::Light,
+            count: 1,
+            params: CaptureParams {
+                exposure: Duration::from_millis(10),
+                iso: None,
+            },
+            delay_between_frames: Duration::ZERO,
+        }],
+        save_config: SaveLocationConfig::default(),
+        auto_meridian_flip: true,
+    };
+
+    controller_handle.start_sequence(sequence).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        seq_rx
+            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Completed))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Sequence with meridian flip should complete");
+
+    assert!(
+        flip_received.load(std::sync::atomic::Ordering::SeqCst),
+        "Expected MountCommand::MeridianFlip to be sent before Light exposure"
+    );
+}
