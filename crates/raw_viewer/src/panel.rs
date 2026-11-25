@@ -137,7 +137,7 @@ impl RawViewerPanel {
         })
     }
 
-    pub(crate) fn bridge(&self) -> &RawViewerBridge {
+    pub fn bridge(&self) -> &RawViewerBridge {
         &self.bridge
     }
 
@@ -566,7 +566,7 @@ impl Panel for RawViewerPanel {
     }
 
     fn is_enabled_in_workspace(&self, kind: WorkspaceKind, _cx: &App) -> bool {
-        matches!(kind, WorkspaceKind::Capture)
+        matches!(kind, WorkspaceKind::Camera)
     }
 }
 

@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 
-pub(crate) mod bridge;
+pub mod bridge;
 pub mod control_panel;
 pub mod histogram;
 pub mod panel;
@@ -8,8 +8,9 @@ pub mod raw_image;
 pub mod renderer;
 pub mod types;
 
+pub use bridge::RawViewerBridge;
 pub use components::{ActiveKnob, DoubleSlider, DoubleSliderEvent, SliderColors, SliderThemeExt};
-pub use control_panel::CaptureControlPanel;
+pub use control_panel::{CameraBenchMode, CameraControlPanel};
 pub use histogram::{HistogramData, HistogramWidget, ScaleMode};
 pub use panel::RawViewerPanel;
 pub use raw_image::{RawError, RawImage};
@@ -26,7 +27,7 @@ pub fn init(cx: &mut App) {
         if let Some(window) = window {
             let viewer = RawViewerPanel::build(window, cx, 1024, 1024);
             let bridge = viewer.read(cx).bridge().clone();
-            let control_panel = CaptureControlPanel::build(bridge, cx);
+            let control_panel = CameraControlPanel::build(bridge, window, cx);
 
             cx.observe(&viewer, |_this, _panel, cx| {
                 cx.notify();

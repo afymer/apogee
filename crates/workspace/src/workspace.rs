@@ -16,21 +16,29 @@ pub enum WorkspaceKind {
     Connect,
     #[default]
     Explore,
+    Plan,
     Mount,
-    Capture,
+    Camera,
 }
 
 impl WorkspaceKind {
     pub fn all() -> &'static [Self] {
-        &[Self::Connect, Self::Explore, Self::Mount, Self::Capture]
+        &[
+            Self::Connect,
+            Self::Explore,
+            Self::Plan,
+            Self::Mount,
+            Self::Camera,
+        ]
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             Self::Connect => "Connect",
             Self::Explore => "Explore",
+            Self::Plan => "Plan",
             Self::Mount => "Mount",
-            Self::Capture => "Capture",
+            Self::Camera => "Camera",
         }
     }
 }
