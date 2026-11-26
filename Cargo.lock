@@ -6186,13 +6186,21 @@ name = "planner"
 version = "0.1.0"
 dependencies = [
  "celestial",
+ "client",
+ "components",
+ "glam",
  "gpui",
+ "hifitime",
+ "horizon",
  "jiff",
  "observer",
  "persistence",
  "protocol",
+ "theme",
  "tokio",
  "tracing",
+ "ui",
+ "workspace",
 ]
 
 [[package]]

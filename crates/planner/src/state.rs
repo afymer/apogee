@@ -1,12 +1,15 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use celestial::coords::{Angle, canonical_spherical_to_cartesian};
+use client::GlobalDaemonState;
 use gpui::{App, AppContext, Context, Entity, Global};
-use jiff::Span;
+use jiff::tz::Offset;
+use jiff::{Span, Timestamp};
 use observer::ObserverModel;
 use persistence::{DocumentStore, PlannerCatalog};
 use protocol::{
-    NightPlan, NightPlanPolicy, PlannedTarget, SequenceStep, SequenceTemplate,
+    NightPlan, NightPlanPolicy, PlannedTarget, SequencePhase, SequenceStep, SequenceTemplate,
     builtin_sequence_templates,
 };
 use tracing::warn;
@@ -96,6 +99,7 @@ pub struct PlanModel {
     selected_target_id: Option<String>,
     explore_request: Option<ExploreTargetRequest>,
     explore_nonce: u64,
+    plan_revision: u64,
 }
 
 impl PlanModel {
@@ -107,7 +111,12 @@ impl PlanModel {
             selected_target_id,
             explore_request: None,
             explore_nonce: 0,
+            plan_revision: 0,
         }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.plan_revision
     }
 
     pub fn plan(&self) -> &NightPlan {
@@ -565,7 +574,8 @@ impl PlanModel {
         self.explore_request.as_ref()
     }
 
-    fn save_and_notify(&self, cx: &mut Context<Self>) {
+    fn save_and_notify(&mut self, cx: &mut Context<Self>) {
+        self.plan_revision = self.plan_revision.wrapping_add(1);
         let store = self.store.clone();
         let catalog = self.catalog.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -579,6 +589,65 @@ impl PlanModel {
         }
         cx.notify();
     }
+}
+
+/// Returns `true` when an imaging sequence/plan is actively running (unlocked when idle or `Paused`).
+pub fn is_session_locked(cx: &App) -> bool {
+    cx.try_global::<GlobalDaemonState>().is_some_and(|g| {
+        g.0.read(cx)
+            .state
+            .sequence
+            .as_ref()
+            .is_some_and(|seq| seq.phase.is_active() && seq.phase != SequencePhase::Paused)
+    })
+}
+
+pub fn format_duration_compact(dur: Duration) -> String {
+    let total_secs = dur.as_secs();
+    if total_secs < 60 {
+        return format!("{total_secs}s");
+    }
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}h {mins:02}m")
+    } else {
+        format!("{mins}m")
+    }
+}
+
+pub fn format_unix_hm(unix_secs: i64, utc_offset_secs: i32) -> String {
+    let Ok(ts) = Timestamp::from_second(unix_secs) else {
+        return "--:--".to_string();
+    };
+    let Ok(offset) = Offset::from_seconds(utc_offset_secs) else {
+        return "--:--".to_string();
+    };
+    let dt = ts.to_zoned(offset.to_time_zone()).datetime();
+    format!("{:02}:{:02}", dt.hour(), dt.minute())
+}
+
+pub fn format_radec_compact(ra_deg: f64, dec_deg: f64) -> String {
+    let ra_hours = ra_deg.rem_euclid(360.0) / 15.0;
+    let ra_h = ra_hours.floor() as u32;
+    let ra_m = ((ra_hours - f64::from(ra_h)) * 60.0).round() as u32;
+    let (ra_h, ra_m) = if ra_m >= 60 {
+        ((ra_h + 1) % 24, 0)
+    } else {
+        (ra_h, ra_m)
+    };
+
+    let sign = if dec_deg < 0.0 { '-' } else { '+' };
+    let abs_dec = dec_deg.abs();
+    let dec_d = abs_dec.floor() as u32;
+    let dec_m = ((abs_dec - f64::from(dec_d)) * 60.0).round() as u32;
+    let (dec_d, dec_m) = if dec_m >= 60 {
+        (dec_d + 1, 0)
+    } else {
+        (dec_d, dec_m)
+    };
+
+    format!("{ra_h:02}h{ra_m:02}m {sign}{dec_d:02}°{dec_m:02}'")
 }
 
 #[cfg(test)]

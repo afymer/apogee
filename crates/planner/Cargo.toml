@@ -5,10 +5,18 @@ edition.workspace = true
 
 [dependencies]
 gpui.workspace = true
+ui.workspace = true
+theme.workspace = true
+components.workspace = true
+client.workspace = true
 protocol.workspace = true
 persistence.workspace = true
 observer.workspace = true
+horizon.workspace = true
 celestial.workspace = true
+workspace.workspace = true
+hifitime.workspace = true
+glam.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 jiff.workspace = true
