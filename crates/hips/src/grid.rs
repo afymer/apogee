@@ -83,6 +83,20 @@ impl HipsGrid {
         cells
     }
 
+    /// Unit vector in ICRS pointing to the center of HEALPix nested cell `(depth, hash)`.
+    #[inline]
+    pub fn cell_center_icrs(depth: u8, hash: u64) -> DVec3 {
+        let layer = cdshealpix::nested::get(depth.min(29));
+        let (lon, lat) = layer.center(hash);
+        Self::spherical_to_vector(lon, lat)
+    }
+
+    /// Conservative upper bound on the angular radius (radians) of any HEALPix cell at `depth`.
+    #[inline]
+    pub fn max_cell_radius_rad(depth: u8) -> f64 {
+        1.0_f64 / 2.0_f64.powi(i32::from(depth.min(29)))
+    }
+
     #[inline]
     pub fn default_segments_per_edge(depth: u8) -> usize {
         Self::default_tile_subdivisions(depth)

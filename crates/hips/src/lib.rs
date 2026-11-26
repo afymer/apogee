@@ -124,4 +124,35 @@ mod tests {
             assert!((0.0..=1.0).contains(&uv[1]));
         }
     }
+
+    #[test]
+    fn test_cell_center_and_max_radius_bounds() {
+        for depth in 0..=6_u8 {
+            let nside_cells = 12 * 4_u64.pow(u32::from(depth));
+            let layer = cdshealpix::nested::get(depth);
+            let max_r = HipsGrid::max_cell_radius_rad(depth);
+
+            for hash in [0_u64, nside_cells / 3, nside_cells - 1] {
+                let center = HipsGrid::cell_center_icrs(depth, hash);
+                assert!(
+                    (center.length() - 1.0).abs() < 1e-12,
+                    "center must be unit length at depth {depth}"
+                );
+                let (lon, lat) = HipsGrid::vector_to_spherical(center);
+                assert_eq!(
+                    layer.hash(lon, lat),
+                    hash,
+                    "center must map back to its own cell at depth {depth}"
+                );
+
+                for (p1, _) in HipsGrid::cell_boundary_segments(depth, hash, 4) {
+                    let angle = center.dot(p1).clamp(-1.0, 1.0).acos();
+                    assert!(
+                        angle <= max_r,
+                        "boundary vertex angle {angle} exceeds max_cell_radius_rad {max_r} at depth {depth}"
+                    );
+                }
+            }
+        }
+    }
 }

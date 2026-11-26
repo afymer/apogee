@@ -17,7 +17,7 @@ use bevy::{
         render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
     },
 };
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 
 use crate::{
     BevyBridge, ViewportDimensions,
@@ -27,6 +27,11 @@ use crate::{
         CelestialLineMaterial, CelestialLineUniforms, CelestialTileMaterial, CelestialTileUniforms,
     },
 };
+
+const MAX_DESCENDANT_DEPTH_DELTA: u8 = 3;
+const MAX_DESCENDANT_FALLBACK_TILES: usize = 64;
+const MAX_CACHED_SURVEY_TILES: usize = 1024;
+const TARGET_CACHED_SURVEY_TILES: usize = 768;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HipsTile {
@@ -48,11 +53,15 @@ pub struct HipsMeshCache {
 #[derive(Resource, Default)]
 pub struct HipsSurfaceMeshCache {
     pub meshes: HashMap<(u8, u64), Handle<Mesh>>,
+    last_used: HashMap<(u8, u64), u64>,
+    tick: u64,
 }
 
 #[derive(Resource, Default)]
 pub struct HipsImageCache {
     pub images: HashMap<(u8, u64), Handle<Image>>,
+    last_used: HashMap<(u8, u64), u64>,
+    tick: u64,
 }
 
 #[derive(Resource, Default)]
@@ -455,6 +464,150 @@ pub(crate) fn hips_grid_system(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DescendantFallbackLimits {
+    max_depth_delta: u8,
+    max_tiles: usize,
+}
+
+impl Default for DescendantFallbackLimits {
+    fn default() -> Self {
+        Self {
+            max_depth_delta: MAX_DESCENDANT_DEPTH_DELTA,
+            max_tiles: MAX_DESCENDANT_FALLBACK_TILES,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SurveyTileSelection {
+    desired: HashSet<(u8, u64)>,
+    missing_to_fetch: Vec<(u8, u64)>,
+}
+
+fn select_survey_tiles<V>(
+    visible_cells: &[u64],
+    target_depth: u8,
+    max_survey_depth: u8,
+    center_icrs: DVec3,
+    half_diag_rad: f64,
+    cached_images: &HashMap<(u8, u64), V>,
+    limits: DescendantFallbackLimits,
+) -> SurveyTileSelection {
+    let mut desired = HashSet::new();
+    let mut missing_hashes = HashSet::new();
+    let mut missing_scored: Vec<(f64, u64)> = Vec::new();
+
+    for &hash in visible_cells {
+        let key = (target_depth, hash);
+        if cached_images.contains_key(&key) {
+            desired.insert(key);
+        } else {
+            if missing_hashes.insert(hash) {
+                let dot = HipsGrid::cell_center_icrs(target_depth, hash).dot(center_icrs);
+                missing_scored.push((dot, hash));
+            }
+            let mut fallback_depth = target_depth;
+            let mut fallback_hash = hash;
+            while fallback_depth > 0 {
+                fallback_depth -= 1;
+                fallback_hash >>= 2;
+                let parent_key = (fallback_depth, fallback_hash);
+                if cached_images.contains_key(&parent_key) {
+                    desired.insert(parent_key);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Push farthest-from-center missing tiles first so LIFO pending_queue.pop() fetches center first.
+    missing_scored.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let missing_to_fetch = missing_scored
+        .into_iter()
+        .map(|(_, hash)| (target_depth, hash))
+        .collect();
+
+    let max_desc_depth = target_depth
+        .saturating_add(limits.max_depth_delta)
+        .min(max_survey_depth);
+    if !missing_hashes.is_empty() && max_desc_depth > target_depth && limits.max_tiles > 0 {
+        let mut descendant_candidates: Vec<(u8, f64, u64)> = Vec::new();
+        for &(d, h) in cached_images.keys() {
+            if d <= target_depth || d > max_desc_depth {
+                continue;
+            }
+            let delta = u32::from(d - target_depth);
+            if delta >= 32 {
+                continue;
+            }
+            let target_anc = h >> (2 * delta);
+            if !missing_hashes.contains(&target_anc) {
+                continue;
+            }
+            let has_cached_intermediate = ((target_depth + 1)..d).any(|inter_d| {
+                let shift = 2 * u32::from(d - inter_d);
+                cached_images.contains_key(&(inter_d, h >> shift))
+            });
+            if has_cached_intermediate {
+                continue;
+            }
+            let dot = HipsGrid::cell_center_icrs(d, h).dot(center_icrs);
+            let min_dot = (half_diag_rad + HipsGrid::max_cell_radius_rad(d))
+                .min(std::f64::consts::PI)
+                .cos();
+            if dot < min_dot {
+                continue;
+            }
+            descendant_candidates.push((d, dot, h));
+        }
+
+        if descendant_candidates.len() > limits.max_tiles {
+            // Prioritize shallower descendants (broader screen coverage) and tiles closer to view center.
+            descendant_candidates.sort_unstable_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| b.1.total_cmp(&a.1))
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+            descendant_candidates.truncate(limits.max_tiles);
+        }
+
+        for (d, _, h) in descendant_candidates {
+            desired.insert((d, h));
+        }
+    }
+
+    SurveyTileSelection {
+        desired,
+        missing_to_fetch,
+    }
+}
+
+fn evict_lru_cache<V>(
+    entries: &mut HashMap<(u8, u64), V>,
+    last_used: &mut HashMap<(u8, u64), u64>,
+    active: &HashMap<(u8, u64), Entity>,
+    max_len: usize,
+    target_len: usize,
+) {
+    if entries.len() <= max_len {
+        return;
+    }
+    let target = target_len.min(max_len);
+    let mut candidates: Vec<(u64, (u8, u64))> = entries
+        .keys()
+        .copied()
+        .filter(|key| key.0 != 0 && !active.contains_key(key))
+        .map(|key| (last_used.get(&key).copied().unwrap_or(0), key))
+        .collect();
+    candidates.sort_unstable_by_key(|&(stamp, key)| (stamp, key));
+    let to_remove = entries.len().saturating_sub(target).min(candidates.len());
+    for (_, key) in candidates.into_iter().take(to_remove) {
+        entries.remove(&key);
+        last_used.remove(&key);
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub(crate) fn hips_survey_system(
     mut commands: Commands,
@@ -491,7 +644,11 @@ pub(crate) fn hips_survey_system(
                     RenderAssetUsages::RENDER_WORLD,
                 );
                 let handle = images.add(image);
-                image_cache.images.insert((tile.depth, tile.hash), handle);
+                let key = (tile.depth, tile.hash);
+                image_cache.images.insert(key, handle);
+                image_cache.tick += 1;
+                let stamp = image_cache.tick;
+                image_cache.last_used.insert(key, stamp);
             }
             TileLoadResult::Failed {
                 generation,
@@ -532,7 +689,11 @@ pub(crate) fn hips_survey_system(
         }
         active_survey_tiles.tiles.clear();
         image_cache.images.clear();
+        image_cache.last_used.clear();
+        image_cache.tick = 0;
         mesh_cache.meshes.clear();
+        mesh_cache.last_used.clear();
+        mesh_cache.tick = 0;
         loader.generation = loader.generation.wrapping_add(1);
         loader.clear_pending();
         loader.in_flight.clear();
@@ -577,7 +738,6 @@ pub(crate) fn hips_survey_system(
     let theta_y = camera.fov_y * 0.5;
     let half_diag = (theta_y * theta_y + (theta_y * aspect as f64).powi(2)).sqrt() * 1.1;
 
-    let mut desired_set = HashSet::new();
     let survey_arc = Arc::new(settings.survey.clone());
 
     let visible_cells = HipsGrid::query_visible_cells(center_icrs, half_diag, target_depth);
@@ -587,33 +747,26 @@ pub(crate) fn hips_survey_system(
         .collect();
     loader.retain_pending(&settings.survey.name, &visible_keys);
 
-    let mut missing_keys = Vec::new();
-    for hash in visible_cells {
-        let key = (target_depth, hash);
-        if image_cache.images.contains_key(&key) {
-            desired_set.insert(key);
-        } else {
-            if !loader.in_flight.contains(&key) && !loader.is_in_failure_cooldown(key) {
-                missing_keys.push(key);
-            }
-            let mut fallback_depth = target_depth;
-            let mut fallback_hash = hash;
-            while fallback_depth > 0 {
-                fallback_depth -= 1;
-                fallback_hash >>= 2;
-                let parent_key = (fallback_depth, fallback_hash);
-                if image_cache.images.contains_key(&parent_key) {
-                    desired_set.insert(parent_key);
-                    break;
-                }
-            }
-        }
-    }
+    let selection = select_survey_tiles(
+        &visible_cells,
+        target_depth,
+        settings.survey.max_depth,
+        center_icrs,
+        half_diag,
+        &image_cache.images,
+        DescendantFallbackLimits::default(),
+    );
+
+    let missing_keys: Vec<(u8, u64)> = selection
+        .missing_to_fetch
+        .into_iter()
+        .filter(|&key| !loader.in_flight.contains(&key) && !loader.is_in_failure_cooldown(key))
+        .collect();
     loader.enqueue(&survey_arc, &missing_keys);
 
     let mut to_remove = Vec::new();
     for (&key, &entity) in &active_survey_tiles.tiles {
-        if !desired_set.contains(&key) {
+        if !selection.desired.contains(&key) {
             commands.entity(entity).despawn();
             to_remove.push(key);
         }
@@ -622,7 +775,7 @@ pub(crate) fn hips_survey_system(
         active_survey_tiles.tiles.remove(&key);
     }
 
-    for key in desired_set {
+    for key in selection.desired {
         if active_survey_tiles.tiles.contains_key(&key) {
             continue;
         }
@@ -662,6 +815,17 @@ pub(crate) fn hips_survey_system(
         active_survey_tiles.tiles.insert(key, entity);
     }
 
+    if !active_survey_tiles.tiles.is_empty() {
+        image_cache.tick += 1;
+        let img_stamp = image_cache.tick;
+        mesh_cache.tick += 1;
+        let mesh_stamp = mesh_cache.tick;
+        for &key in active_survey_tiles.tiles.keys() {
+            image_cache.last_used.insert(key, img_stamp);
+            mesh_cache.last_used.insert(key, mesh_stamp);
+        }
+    }
+
     for &entity in active_survey_tiles.tiles.values() {
         if let Ok(mut mat) = tile_materials.get_mut(entity) {
             mat.uniforms.transform = transform;
@@ -670,14 +834,250 @@ pub(crate) fn hips_survey_system(
         }
     }
 
-    if mesh_cache.meshes.len() > 1024 {
-        mesh_cache
-            .meshes
-            .retain(|key, _| key.0 == 0 || active_survey_tiles.tiles.contains_key(key));
+    let mc = &mut *mesh_cache;
+    evict_lru_cache(
+        &mut mc.meshes,
+        &mut mc.last_used,
+        &active_survey_tiles.tiles,
+        MAX_CACHED_SURVEY_TILES,
+        TARGET_CACHED_SURVEY_TILES,
+    );
+    let ic = &mut *image_cache;
+    evict_lru_cache(
+        &mut ic.images,
+        &mut ic.last_used,
+        &active_survey_tiles.tiles,
+        MAX_CACHED_SURVEY_TILES,
+        TARGET_CACHED_SURVEY_TILES,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_cache(keys: &[(u8, u64)]) -> HashMap<(u8, u64), u8> {
+        keys.iter().map(|&k| (k, 1)).collect()
     }
-    if image_cache.images.len() > 1024 {
-        image_cache
-            .images
-            .retain(|key, _| key.0 == 0 || active_survey_tiles.tiles.contains_key(key));
+
+    #[test]
+    fn missing_target_tile_uses_ancestor_and_cached_descendants() {
+        let center = DVec3::X;
+        let visible = HipsGrid::query_visible_cells(center, 0.05, 4);
+        let h4 = visible[0];
+        let child0 = h4 << 2;
+        let child1 = (h4 << 2) | 1;
+        let cache = fake_cache(&[(0, h4 >> 8), (5, child0), (5, child1)]);
+
+        let sel = select_survey_tiles(
+            &[h4],
+            4,
+            9,
+            center,
+            0.25,
+            &cache,
+            DescendantFallbackLimits::default(),
+        );
+        assert!(sel.desired.contains(&(0, h4 >> 8)));
+        assert!(sel.desired.contains(&(5, child0)));
+        assert!(sel.desired.contains(&(5, child1)));
+        assert!(!sel.desired.contains(&(4, h4)));
+        assert_eq!(sel.missing_to_fetch, vec![(4, h4)]);
+    }
+
+    #[test]
+    fn loaded_target_tile_suppresses_cached_descendants() {
+        let center = DVec3::X;
+        let visible = HipsGrid::query_visible_cells(center, 0.05, 4);
+        let h4 = visible[0];
+        let cache = fake_cache(&[(0, h4 >> 8), (4, h4), (5, h4 << 2), (5, (h4 << 2) | 1)]);
+
+        let sel = select_survey_tiles(
+            &[h4],
+            4,
+            9,
+            center,
+            0.25,
+            &cache,
+            DescendantFallbackLimits::default(),
+        );
+        assert_eq!(sel.desired, HashSet::from([(4, h4)]));
+        assert_eq!(sel.missing_to_fetch, [] as [(u8, u64); 0]);
+    }
+
+    #[test]
+    fn shallower_descendant_suppresses_redundant_grandchildren() {
+        let center = DVec3::X;
+        let visible = HipsGrid::query_visible_cells(center, 0.05, 4);
+        let h4 = visible[0];
+        let c5_covered = h4 << 2;
+        let g6_covered = (c5_covered << 2) | 2;
+        let c5_uncovered = (h4 << 2) | 1;
+        let g6_uncovered = (c5_uncovered << 2) | 1;
+
+        let cache = fake_cache(&[
+            (0, h4 >> 8),
+            (5, c5_covered),
+            (6, g6_covered),
+            (6, g6_uncovered),
+        ]);
+
+        let sel = select_survey_tiles(
+            &[h4],
+            4,
+            9,
+            center,
+            0.25,
+            &cache,
+            DescendantFallbackLimits::default(),
+        );
+        assert!(sel.desired.contains(&(0, h4 >> 8)));
+        assert!(sel.desired.contains(&(5, c5_covered)));
+        assert!(sel.desired.contains(&(6, g6_uncovered)));
+        assert!(!sel.desired.contains(&(6, g6_covered)));
+    }
+
+    #[test]
+    fn descendant_fallback_respects_depth_delta_and_tile_count_limits() {
+        let center = DVec3::X;
+        let visible = HipsGrid::query_visible_cells(center, 0.05, 4);
+        let h4 = visible[0];
+
+        // 1. Depth delta limit (depth 4 + max_depth_delta 3 = max depth 7; depth 8 ignored).
+        let d7 = h4 << 6;
+        let d8 = ((h4 << 6) | 1) << 2;
+        let cache_depth = fake_cache(&[(0, h4 >> 8), (7, d7), (8, d8)]);
+
+        let sel_depth = select_survey_tiles(
+            &[h4],
+            4,
+            9,
+            center,
+            0.5,
+            &cache_depth,
+            DescendantFallbackLimits::default(),
+        );
+        assert!(sel_depth.desired.contains(&(7, d7)));
+        assert!(!sel_depth.desired.contains(&(8, d8)));
+
+        // 2. Tile count budget prioritizes shallower depth first, then closer to view center.
+        let d5_tile = (h4 << 2) | 3;
+        let mut cache_budget = fake_cache(&[(0, h4 >> 8), (5, d5_tile)]);
+
+        let mut d6_tiles = [h4 << 4, ((h4 << 2) | 1) << 2, ((h4 << 2) | 2) << 2];
+        d6_tiles.sort_unstable_by(|&a, &b| {
+            let da = HipsGrid::cell_center_icrs(6, a).dot(center);
+            let db = HipsGrid::cell_center_icrs(6, b).dot(center);
+            db.total_cmp(&da)
+        });
+        for &h6 in &d6_tiles {
+            cache_budget.insert((6, h6), 1);
+        }
+
+        let sel_budget = select_survey_tiles(
+            &[h4],
+            4,
+            9,
+            center,
+            0.5,
+            &cache_budget,
+            DescendantFallbackLimits {
+                max_depth_delta: 3,
+                max_tiles: 2,
+            },
+        );
+        assert!(sel_budget.desired.contains(&(0, h4 >> 8)));
+        assert!(sel_budget.desired.contains(&(5, d5_tile)));
+        assert!(sel_budget.desired.contains(&(6, d6_tiles[0])));
+        assert!(!sel_budget.desired.contains(&(6, d6_tiles[1])));
+        assert!(!sel_budget.desired.contains(&(6, d6_tiles[2])));
+
+        // 3. Off-screen descendants inside a large visible missing ancestor are culled by view cone.
+        let half_diag = 0.01_f64;
+        let visible_d1 = HipsGrid::query_visible_cells(center, half_diag, 1);
+        let h1 = visible_d1[0];
+        let mut d4_children: Vec<u64> = (0..64).map(|sub| (h1 << 6) | sub).collect();
+        d4_children.sort_unstable_by(|&a, &b| {
+            let da = HipsGrid::cell_center_icrs(4, a).dot(center);
+            let db = HipsGrid::cell_center_icrs(4, b).dot(center);
+            db.total_cmp(&da)
+        });
+        let near_d4 = d4_children[0];
+        let far_d4 = *d4_children.last().expect("non-empty depth-4 children");
+        assert!(
+            HipsGrid::cell_center_icrs(4, far_d4).dot(center)
+                < (half_diag + HipsGrid::max_cell_radius_rad(4)).cos()
+        );
+
+        let cache_cone = fake_cache(&[(0, h1 >> 2), (4, near_d4), (4, far_d4)]);
+
+        let sel_cone = select_survey_tiles(
+            &[h1],
+            1,
+            9,
+            center,
+            half_diag,
+            &cache_cone,
+            DescendantFallbackLimits::default(),
+        );
+        assert!(sel_cone.desired.contains(&(4, near_d4)));
+        assert!(!sel_cone.desired.contains(&(4, far_d4)));
+    }
+
+    #[test]
+    fn missing_tiles_prioritize_center_for_lifo_queue() {
+        let center = DVec3::X;
+        let visible = HipsGrid::query_visible_cells(center, 0.25, 4);
+        assert!(visible.len() >= 4);
+
+        let empty_cache: HashMap<(u8, u64), u8> = HashMap::new();
+        let sel = select_survey_tiles(
+            &visible,
+            4,
+            9,
+            center,
+            0.25,
+            &empty_cache,
+            DescendantFallbackLimits::default(),
+        );
+        assert_eq!(sel.missing_to_fetch.len(), visible.len());
+
+        let dots: Vec<f64> = sel
+            .missing_to_fetch
+            .iter()
+            .map(|&(d, h)| HipsGrid::cell_center_icrs(d, h).dot(center))
+            .collect();
+        for pair in dots.windows(2) {
+            assert!(
+                pair[0] <= pair[1] + 1e-12,
+                "missing tiles must be ordered farthest-first for LIFO pop: {} > {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn lru_eviction_preserves_depth_zero_active_and_most_recent_tiles() {
+        let mut entries = fake_cache(&[(0, 3), (4, 10), (4, 11), (5, 20), (5, 21)]);
+        let mut last_used = HashMap::from([
+            ((0_u8, 3_u64), 1_u64),
+            ((4, 10), 2),
+            ((4, 11), 3),
+            ((5, 20), 5),
+            ((5, 21), 10),
+        ]);
+        let active = HashMap::from([((4_u8, 10_u64), Entity::PLACEHOLDER)]);
+
+        evict_lru_cache(&mut entries, &mut last_used, &active, 3, 3);
+
+        assert_eq!(entries.len(), 3);
+        assert!(entries.contains_key(&(0, 3)));
+        assert!(entries.contains_key(&(4, 10)));
+        assert!(entries.contains_key(&(5, 21)));
+        assert!(!entries.contains_key(&(4, 11)));
+        assert!(!entries.contains_key(&(5, 20)));
+        assert!(!last_used.contains_key(&(4, 11)));
+        assert!(!last_used.contains_key(&(5, 20)));
     }
 }
