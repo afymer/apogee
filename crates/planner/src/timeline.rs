@@ -7,9 +7,9 @@ use celestial::solar::{lunar_ephemeris, solar_altitude_deg};
 use client::GlobalDaemonState;
 use glam::DVec3;
 use gpui::{
-    App, Bounds, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Render, Window, canvas, div, fill, hsla, point, prelude::*, px, rgb,
-    size,
+    App, Bounds, Context, DispatchPhase, Entity, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Render, Window, canvas, div, fill, hsla, point,
+    prelude::*, px, rgb, size,
 };
 use hifitime::Epoch;
 use horizon::GlobalHorizons;
@@ -597,6 +597,90 @@ impl NightTimelineView {
             .into_any_element()
     }
 
+    fn finish_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn handle_drag_move(
+        &mut self,
+        ev: &MouseMoveEvent,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.drag.is_none() {
+            return;
+        }
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.finish_drag(cx);
+            return;
+        }
+        let Some(sampled) = &self.sampled else {
+            return;
+        };
+        let width = f32::from(bounds.size.width).max(1.0);
+        let raw_x = f32::from(ev.position.x) - f32::from(bounds.origin.x);
+        let span = sampled.window_end_secs - sampled.window_start_secs;
+
+        match &mut self.drag {
+            Some(TimelineDrag::MoveBlocks {
+                base_starts,
+                anchor_cursor_unix,
+            }) => {
+                if is_session_locked(cx) {
+                    self.finish_drag(cx);
+                    return;
+                }
+                let raw_frac = f64::from(raw_x / width);
+                let cursor_unix = (sampled.window_start_secs + raw_frac * span).round() as i64;
+                let raw_delta = cursor_unix.saturating_sub(*anchor_cursor_unix);
+                let step = if ev.modifiers.shift { 60 } else { 300 };
+                let snapped_delta = ((raw_delta as f64 / step as f64).round() as i64) * step;
+                let base_snapshot = base_starts.clone();
+                let win_start = sampled.window_start_secs.round() as i64;
+                let win_end = sampled.window_end_secs.round() as i64;
+                if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                    plan.update(cx, |m, cx| {
+                        m.move_targets_from_baseline(
+                            &base_snapshot,
+                            snapped_delta,
+                            win_start,
+                            win_end,
+                            cx,
+                        );
+                    });
+                }
+            }
+            Some(TimelineDrag::MarqueeSelect { start_x, current_x }) => {
+                *current_x = raw_x.clamp(0.0, width);
+                let x_lo = start_x.min(*current_x);
+                let x_hi = start_x.max(*current_x);
+                let t_lo =
+                    (sampled.window_start_secs + f64::from(x_lo / width) * span).round() as i64;
+                let t_hi =
+                    (sampled.window_start_secs + f64::from(x_hi / width) * span).round() as i64;
+                if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                    plan.update(cx, |m, cx| {
+                        let ids: Vec<String> = m
+                            .plan()
+                            .targets
+                            .iter()
+                            .filter(|tgt| {
+                                tgt.start_unix_secs <= t_hi
+                                    && tgt.footprint_end_unix_secs() >= t_lo
+                            })
+                            .map(|tgt| tgt.id.clone())
+                            .collect();
+                        m.set_selected_targets(ids, None, cx);
+                    });
+                }
+                cx.notify();
+            }
+            None => {}
+        }
+    }
+
     fn render_target_blocks_track(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(sampled) = self.sampled.clone() else {
             return div().h(px(BLOCK_TRACK_HEIGHT_PX)).into_any_element();
@@ -660,6 +744,7 @@ impl NightTimelineView {
             None
         };
 
+        let view_entity = cx.entity().clone();
         let colors = cx.theme().colors();
         let sampled_bg_down = sampled.clone();
         let bounds_bg_down = self.track_bounds.clone();
@@ -681,7 +766,27 @@ impl NightTimelineView {
                             *guard = Some(bounds);
                         }
                     },
-                    |_, (), _, _| {},
+                    move |bounds, (), window, _cx| {
+                        let entity = view_entity.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                            if phase == DispatchPhase::Capture {
+                                entity.update(cx, |this, cx| {
+                                    this.handle_drag_move(event, bounds, cx);
+                                });
+                            }
+                        });
+
+                        let entity = view_entity.clone();
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+                            if phase == DispatchPhase::Capture
+                                && event.button == MouseButton::Left
+                            {
+                                entity.update(cx, |this, cx| {
+                                    this.finish_drag(cx);
+                                });
+                            }
+                        });
+                    },
                 )
                 .absolute()
                 .size_full(),
@@ -719,87 +824,6 @@ impl NightTimelineView {
                     cx.notify();
                 }),
             )
-            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
-                let Some(sampled) = &this.sampled else {
-                    return;
-                };
-                let Some(bounds) = this.track_bounds.lock().ok().and_then(|g| *g) else {
-                    return;
-                };
-                let width = f32::from(bounds.size.width).max(1.0);
-                let local_x =
-                    (f32::from(ev.position.x) - f32::from(bounds.origin.x)).clamp(0.0, width);
-                let frac = f64::from(local_x / width);
-                let span = sampled.window_end_secs - sampled.window_start_secs;
-
-                match &mut this.drag {
-                    Some(TimelineDrag::MoveBlocks {
-                        base_starts,
-                        anchor_cursor_unix,
-                    }) => {
-                        if is_session_locked(cx) {
-                            this.drag = None;
-                            return;
-                        }
-                        let cursor_unix = (sampled.window_start_secs + frac * span).round() as i64;
-                        let raw_delta = cursor_unix.saturating_sub(*anchor_cursor_unix);
-                        let step = if ev.modifiers.shift { 60 } else { 300 };
-                        let snapped_delta = ((raw_delta as f64 / step as f64).round() as i64) * step;
-                        let base_snapshot = base_starts.clone();
-                        let win_start = sampled.window_start_secs.round() as i64;
-                        let win_end = sampled.window_end_secs.round() as i64;
-                        if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                        {
-                            plan.update(cx, |m, cx| {
-                                m.move_targets_from_baseline(
-                                    &base_snapshot,
-                                    snapped_delta,
-                                    win_start,
-                                    win_end,
-                                    cx,
-                                );
-                            });
-                        }
-                    }
-                    Some(TimelineDrag::MarqueeSelect { start_x, current_x }) => {
-                        *current_x = local_x;
-                        let x_lo = start_x.min(*current_x);
-                        let x_hi = start_x.max(*current_x);
-                        let t_lo = (sampled.window_start_secs + f64::from(x_lo / width) * span)
-                            .round() as i64;
-                        let t_hi = (sampled.window_start_secs + f64::from(x_hi / width) * span)
-                            .round() as i64;
-                        if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                        {
-                            plan.update(cx, |m, cx| {
-                                let ids: Vec<String> = m
-                                    .plan()
-                                    .targets
-                                    .iter()
-                                    .filter(|tgt| {
-                                        tgt.start_unix_secs <= t_hi
-                                            && tgt.footprint_end_unix_secs() >= t_lo
-                                    })
-                                    .map(|tgt| tgt.id.clone())
-                                    .collect();
-                                m.set_selected_targets(ids, None, cx);
-                            });
-                        }
-                        cx.notify();
-                    }
-                    None => {}
-                }
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                if this.drag.take().is_some() {
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                if this.drag.take().is_some() {
-                    cx.notify();
-                }
-            }))
             .children(blocks.into_iter().map(
                 |(
                     idx,
