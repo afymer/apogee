@@ -6,8 +6,9 @@ use std::{
 };
 
 use celestial::{
-    DailyTargetVisibility, HorizonProfile, ObservationContext, SolarSystemBody, StarMetadata,
-    compute_solar_system_visibility_with_horizon, compute_target_visibility_with_horizon,
+    DailyTargetVisibility, DsoGroup, DsoRecord, HorizonProfile, ObservationContext,
+    SolarSystemBody, StarMetadata, compute_solar_system_visibility_with_horizon,
+    compute_target_visibility_with_horizon,
     coords::{Angle, cartesian_to_canonical_spherical, topocentric_enu_to_spherical},
     sample_day_equatorial_track, sample_day_solar_system_track,
 };
@@ -23,7 +24,8 @@ use hifitime::Epoch;
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverModel, paint_twilight_gradient, sample_day_profile};
 use planetarium::{
-    StarSpatialIndex, bp_rp_to_srgb, estimate_teff_kelvin, spectral_class_from_bp_rp,
+    DsoSpatialIndex, StarSpatialIndex, bp_rp_to_srgb, estimate_teff_kelvin,
+    spectral_class_from_bp_rp,
 };
 use settings::OpenSkySearch;
 use ui::{
@@ -33,7 +35,7 @@ use ui::{
 use workspace::{WorkspaceKind, workbench::Workbench};
 
 use crate::star_details::{
-    GlobalStarSelection, GlobalVisibilityGraphPrefs, SelectedObject, SelectedObjectId,
+    GlobalStarSelection, GlobalVisibilityGraphPrefs, SelectedDso, SelectedObject, SelectedObjectId,
     SelectedStar, VisibilityGraphCenter, alt_to_y_fraction, format_local_hour_hm, paint_disc,
     rasterize_visibility_curve_only,
 };
@@ -46,7 +48,7 @@ const MINI_GRAPH_PAD_Y: f32 = 3.5;
 const MINI_GRAPH_SAMPLES: usize = 65;
 
 const MAG_SLIDER_MIN: f32 = -2.0;
-const MAG_SLIDER_MAX: f32 = 12.0;
+const MAG_SLIDER_MAX: f32 = 16.0;
 const ALT_SLIDER_MIN: f32 = -90.0;
 const ALT_SLIDER_MAX: f32 = 90.0;
 const PEAK_SLIDER_MIN: f32 = 0.0;
@@ -86,18 +88,36 @@ pub enum CategoryFilter {
     #[default]
     All,
     SolarSystem,
+    Messier,
+    Ngc,
     Stars,
 }
 
 impl CategoryFilter {
-    const ALL: [Self; 3] = [Self::All, Self::SolarSystem, Self::Stars];
+    const ALL: [Self; 5] = [
+        Self::All,
+        Self::SolarSystem,
+        Self::Messier,
+        Self::Ngc,
+        Self::Stars,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::All => "All",
             Self::SolarSystem => "Solar System",
+            Self::Messier => "Messier",
+            Self::Ngc => "NGC",
             Self::Stars => "Stars",
         }
+    }
+
+    const fn includes_dsos(self) -> bool {
+        matches!(self, Self::All | Self::Messier | Self::Ngc)
+    }
+
+    const fn includes_stars(self) -> bool {
+        matches!(self, Self::All | Self::Stars)
     }
 }
 
@@ -180,6 +200,7 @@ pub struct SkySearchFilters {
     pub min_alt_deg: Option<f64>,
     pub min_peak_alt_deg: Option<f64>,
     pub spectral_class: Option<&'static str>,
+    pub dso_group: Option<DsoGroup>,
     pub sort: SortMode,
     pub sort_direction: SortDirection,
 }
@@ -194,6 +215,7 @@ impl Default for SkySearchFilters {
             min_alt_deg: None,
             min_peak_alt_deg: None,
             spectral_class: None,
+            dso_group: None,
             sort: SortMode::Relevance,
             sort_direction: SortMode::Relevance.default_direction(),
         }
@@ -210,6 +232,7 @@ impl SkySearchFilters {
             + usize::from(self.min_alt_deg.is_some())
             + usize::from(self.min_peak_alt_deg.is_some())
             + usize::from(self.spectral_class.is_some())
+            + usize::from(self.dso_group.is_some())
     }
 }
 
@@ -333,54 +356,201 @@ impl SearchableStar {
     }
 }
 
+fn normalize_catalog_query_compact(compact: &str) -> String {
+    for prefix in ["messier", "m", "ngc", "ic"] {
+        if let Some(rest) = compact.strip_prefix(prefix)
+            && rest.starts_with(|c: char| c.is_ascii_digit())
+        {
+            let trimmed = rest.trim_start_matches('0');
+            let out_prefix = if prefix == "messier" { "m" } else { prefix };
+            return if trimmed.is_empty() {
+                format!("{out_prefix}0")
+            } else {
+                format!("{out_prefix}{trimmed}")
+            };
+        }
+    }
+    compact.to_string()
+}
+
+#[derive(Clone, Debug)]
+struct DsoSearchNames {
+    messier_compact: Option<String>,
+    messier_word_lower: Option<String>,
+    ngc_compact: Option<String>,
+    ic_compact: Option<String>,
+    alt_ngc_compacts: Vec<String>,
+    common_names_lower: Vec<String>,
+    kind_lower: String,
+    group_lower: String,
+    hubble_lower: Option<String>,
+    constellation_lower: Option<String>,
+}
+
+impl DsoSearchNames {
+    fn from_record(record: &DsoRecord) -> Self {
+        let normalize_with_prefix = |prefix: &str, id: &str| -> String {
+            let lower = id.trim().to_lowercase().replace([' ', '-'], "");
+            if lower.starts_with("ngc") || lower.starts_with("ic") {
+                normalize_catalog_query_compact(&lower)
+            } else {
+                normalize_catalog_query_compact(&format!("{prefix}{lower}"))
+            }
+        };
+        let messier_compact = record.messier.map(|m| format!("m{m}"));
+        let messier_word_lower = record.messier.map(|m| format!("messier {m}"));
+        let ngc_compact = record
+            .ngc
+            .as_deref()
+            .map(|s| normalize_with_prefix("ngc", s));
+        let ic_compact = record
+            .ic
+            .as_deref()
+            .map(|s| normalize_with_prefix("ic", s));
+        let alt_ngc_compacts = record
+            .alt_ngc
+            .iter()
+            .map(|s| normalize_with_prefix("ngc", s))
+            .collect();
+        let common_names_lower = record
+            .common_names
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        let kind_lower = record.kind.label().to_lowercase();
+        let group_lower = record.kind.group().label().to_lowercase();
+        let hubble_lower = record.hubble_type.as_deref().map(str::to_lowercase);
+        let constellation_lower = record.constellation_str().map(str::to_lowercase);
+
+        Self {
+            messier_compact,
+            messier_word_lower,
+            ngc_compact,
+            ic_compact,
+            alt_ngc_compacts,
+            common_names_lower,
+            kind_lower,
+            group_lower,
+            hubble_lower,
+            constellation_lower,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SearchableDso {
+    catalog_index: u32,
+    icrs_dir: DVec3,
+    known_mag: Option<f32>,
+    display_mag: f32,
+    record: DsoRecord,
+    names: DsoSearchNames,
+}
+
+impl SearchableDso {
+    fn from_record(catalog_index: u32, record: &DsoRecord) -> Option<Self> {
+        let icrs_dir = record.icrs_dir();
+        if icrs_dir == DVec3::ZERO {
+            return None;
+        }
+        Some(Self {
+            catalog_index,
+            icrs_dir,
+            known_mag: record.sort_mag(),
+            display_mag: record.effective_display_mag(),
+            names: DsoSearchNames::from_record(record),
+            record: record.clone(),
+        })
+    }
+
+    fn to_selected_dso(&self) -> SelectedDso {
+        SelectedDso {
+            catalog_index: self.catalog_index,
+            record: self.record.clone(),
+        }
+    }
+}
+
+fn build_searchable_stars(index: &StarSpatialIndex) -> Arc<Vec<SearchableStar>> {
+    let mut stars = Vec::new();
+    for (catalog_index, record, metadata) in index.iter_stars() {
+        let icrs_dir = DVec3::new(
+            f64::from(record.pos[0]),
+            f64::from(record.pos[1]),
+            f64::from(record.pos[2]),
+        )
+        .normalize_or_zero();
+        if icrs_dir == DVec3::ZERO {
+            continue;
+        }
+        let (ra, dec) = cartesian_to_canonical_spherical(icrs_dir);
+        let bp_rp = record.color_index();
+        let meta_owned = metadata.cloned();
+        let names = meta_owned
+            .as_ref()
+            .map(|m| Box::new(StarSearchNames::from_metadata(m)));
+        stars.push(SearchableStar {
+            catalog_index,
+            ra_deg: ra.degrees(),
+            dec_deg: dec.degrees(),
+            icrs_dir,
+            mag: record.mag(),
+            bp_rp,
+            srgb: bp_rp_to_srgb(bp_rp),
+            spectral_class: spectral_class_from_bp_rp(bp_rp),
+            estimated_teff_k: estimate_teff_kelvin(bp_rp),
+            metadata: meta_owned,
+            names,
+        });
+    }
+
+    stars.sort_unstable_by(|a, b| {
+        a.mag
+            .partial_cmp(&b.mag)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.catalog_index.cmp(&b.catalog_index))
+    });
+
+    Arc::new(stars)
+}
+
+fn build_searchable_dsos(index: &DsoSpatialIndex) -> Arc<Vec<SearchableDso>> {
+    let mut dsos = Vec::new();
+    for (catalog_index, record) in index.iter_dsos() {
+        if let Some(dso) = SearchableDso::from_record(catalog_index, record) {
+            dsos.push(dso);
+        }
+    }
+
+    dsos.sort_unstable_by(|a, b| {
+        a.known_mag
+            .is_none()
+            .cmp(&b.known_mag.is_none())
+            .then_with(|| {
+                a.display_mag
+                    .partial_cmp(&b.display_mag)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| a.catalog_index.cmp(&b.catalog_index))
+    });
+
+    Arc::new(dsos)
+}
+
 /// Pre-indexed sky catalog sorted brightest-first for fast interactive search and filtering.
 #[derive(Clone, Debug, Default)]
 pub struct SkySearchIndex {
-    stars: Vec<SearchableStar>,
+    stars: Arc<Vec<SearchableStar>>,
+    dsos: Arc<Vec<SearchableDso>>,
 }
 
 impl SkySearchIndex {
+    #[cfg(test)]
     pub fn from_spatial_index(index: &StarSpatialIndex) -> Self {
-        let mut stars = Vec::new();
-        for (catalog_index, record, metadata) in index.iter_stars() {
-            let icrs_dir = DVec3::new(
-                f64::from(record.pos[0]),
-                f64::from(record.pos[1]),
-                f64::from(record.pos[2]),
-            )
-            .normalize_or_zero();
-            if icrs_dir == DVec3::ZERO {
-                continue;
-            }
-            let (ra, dec) = cartesian_to_canonical_spherical(icrs_dir);
-            let bp_rp = record.color_index();
-            let meta_owned = metadata.cloned();
-            let names = meta_owned
-                .as_ref()
-                .map(|m| Box::new(StarSearchNames::from_metadata(m)));
-            stars.push(SearchableStar {
-                catalog_index,
-                ra_deg: ra.degrees(),
-                dec_deg: dec.degrees(),
-                icrs_dir,
-                mag: record.mag(),
-                bp_rp,
-                srgb: bp_rp_to_srgb(bp_rp),
-                spectral_class: spectral_class_from_bp_rp(bp_rp),
-                estimated_teff_k: estimate_teff_kelvin(bp_rp),
-                metadata: meta_owned,
-                names,
-            });
+        Self {
+            stars: build_searchable_stars(index),
+            dsos: Arc::default(),
         }
-
-        stars.sort_unstable_by(|a, b| {
-            a.mag
-                .partial_cmp(&b.mag)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.catalog_index.cmp(&b.catalog_index))
-        });
-
-        Self { stars }
     }
 }
 
@@ -573,6 +743,114 @@ fn match_star(star: &SearchableStar, query: &QuerySpec) -> Option<u32> {
     }
 }
 
+fn match_dso(dso: &SearchableDso, query: &QuerySpec) -> Option<u32> {
+    let names = &dso.names;
+    let raw_cat = normalize_catalog_query_compact(&query.raw_compact);
+    let primary_ids = [
+        names.messier_compact.as_deref(),
+        names.ngc_compact.as_deref(),
+        names.ic_compact.as_deref(),
+    ];
+
+    if !raw_cat.is_empty() && primary_ids.into_iter().flatten().any(|id| id == raw_cat) {
+        return Some(0);
+    }
+    if names.common_names_lower.iter().any(|n| n == &query.raw_lower) {
+        return Some(0);
+    }
+
+    if !raw_cat.is_empty() && names.alt_ngc_compacts.iter().any(|id| id == &raw_cat) {
+        return Some(1);
+    }
+    if names
+        .common_names_lower
+        .iter()
+        .any(|n| n.starts_with(&query.raw_lower))
+    {
+        return Some(1);
+    }
+    if !raw_cat.is_empty()
+        && primary_ids
+            .into_iter()
+            .flatten()
+            .any(|id| id.starts_with(&raw_cat))
+    {
+        return Some(1);
+    }
+
+    if !raw_cat.is_empty()
+        && (names
+            .alt_ngc_compacts
+            .iter()
+            .any(|id| id.starts_with(&raw_cat) || id.contains(&raw_cat))
+            || primary_ids
+                .into_iter()
+                .flatten()
+                .any(|id| id.contains(&raw_cat)))
+    {
+        return Some(3);
+    }
+
+    let token_matches = |tok: &str, compact: &str| -> bool {
+        let tok_cat = normalize_catalog_query_compact(compact);
+        if !tok_cat.is_empty()
+            && (primary_ids
+                .into_iter()
+                .flatten()
+                .any(|id| id.contains(&tok_cat))
+                || names.alt_ngc_compacts.iter().any(|id| id.contains(&tok_cat)))
+        {
+            return true;
+        }
+        if names
+            .messier_word_lower
+            .as_deref()
+            .is_some_and(|m| m.contains(tok))
+        {
+            return true;
+        }
+        if names.common_names_lower.iter().any(|n| n.contains(tok)) {
+            return true;
+        }
+        if names.kind_lower.contains(tok) || names.group_lower.contains(tok) {
+            return true;
+        }
+        if names.hubble_lower.as_deref().is_some_and(|h| h.contains(tok)) {
+            return true;
+        }
+        names
+            .constellation_lower
+            .as_deref()
+            .is_some_and(|c| c.contains(tok))
+    };
+
+    if !query
+        .tokens
+        .iter()
+        .all(|(tok, compact)| token_matches(tok, compact))
+    {
+        return None;
+    }
+
+    if names
+        .common_names_lower
+        .iter()
+        .any(|n| n.contains(&query.raw_lower))
+        || names
+            .messier_word_lower
+            .as_deref()
+            .is_some_and(|m| m.contains(&query.raw_lower))
+    {
+        Some(2)
+    } else if names.kind_lower.contains(&query.raw_lower)
+        || names.group_lower.contains(&query.raw_lower)
+    {
+        Some(4)
+    } else {
+        Some(5)
+    }
+}
+
 fn dir_az_alt_deg(eq_to_topo: DMat3, icrs_dir: DVec3) -> (f64, f64) {
     let enu = eq_to_topo.mul_vec3(icrs_dir);
     let (az, alt) = topocentric_enu_to_spherical(enu);
@@ -624,16 +902,75 @@ fn up_row(mat: DMat3) -> DVec3 {
     DVec3::new(mat.x_axis.z, mat.y_axis.z, mat.z_axis.z)
 }
 
+struct FixedVisibilityContext<'a> {
+    visibility: VisibilityFilter,
+    eq_to_topo: DMat3,
+    eq_up_row: DVec3,
+    sin_min_alt: Option<f64>,
+    need_exact_alt: bool,
+    night_mats: &'a [(Epoch, DMat3)],
+    night_up_rows: &'a [DVec3],
+    horizon: Option<&'a HorizonProfile>,
+}
+
+impl FixedVisibilityContext<'_> {
+    fn evaluate(&self, icrs_dir: DVec3) -> Option<(f64, bool)> {
+        // Fast dot-product altitude check before any trig!
+        let up_z = self.eq_up_row.dot(icrs_dir);
+        if let Some(min_sin) = self.sin_min_alt
+            && up_z < min_sin
+        {
+            return None;
+        }
+
+        let (alt_deg, visible_now) = if self.need_exact_alt {
+            let (az_deg, alt_deg) = dir_az_alt_deg(self.eq_to_topo, icrs_dir);
+            (alt_deg, is_above_horizon(az_deg, alt_deg, self.horizon))
+        } else {
+            // Defer asin/to_degrees until after top-K selection.
+            (up_z, up_z >= 0.0)
+        };
+
+        match self.visibility {
+            VisibilityFilter::Any => {}
+            VisibilityFilter::UpNow => {
+                if !visible_now {
+                    return None;
+                }
+            }
+            VisibilityFilter::Tonight => {
+                let up_tonight = if let Some(prof) = self.horizon {
+                    self.night_mats.iter().any(|(_, mat)| {
+                        let (az, alt) = dir_az_alt_deg(*mat, icrs_dir);
+                        prof.is_visible(az, alt)
+                    })
+                } else {
+                    self.night_up_rows
+                        .iter()
+                        .any(|row| row.dot(icrs_dir) >= 0.0)
+                };
+                if !up_tonight {
+                    return None;
+                }
+            }
+        }
+
+        Some((alt_deg, visible_now))
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CandidateRef {
     SolarSystem(SolarSystemBody),
     Star(usize),
+    Dso(usize),
 }
 
 struct RankedCandidate {
     target: CandidateRef,
     rank_tier: u32,
     mag: f32,
+    has_known_mag: bool,
     current_alt_deg: f64,
     is_visible_now: bool,
     has_proper_name: bool,
@@ -661,11 +998,26 @@ fn execute_search(
         Vec::new()
     };
     let night_up_rows: Vec<DVec3> = night_mats.iter().map(|(_, m)| up_row(*m)).collect();
+    let fixed_ctx = FixedVisibilityContext {
+        visibility: filters.visibility,
+        eq_to_topo,
+        eq_up_row,
+        sin_min_alt,
+        need_exact_alt: need_exact_alt_during_scan,
+        night_mats: &night_mats,
+        night_up_rows: &night_up_rows,
+        horizon,
+    };
 
     let mut candidates: Vec<RankedCandidate> = Vec::new();
 
     // 1. Solar System bodies
-    if filters.category != CategoryFilter::Stars && filters.spectral_class.is_none() {
+    if matches!(
+        filters.category,
+        CategoryFilter::All | CategoryFilter::SolarSystem
+    ) && filters.spectral_class.is_none()
+        && filters.dso_group.is_none()
+    {
         for body in SolarSystemBody::ALL {
             let eph = body.ephemeris(obs_ctx.location, obs_ctx.epoch);
             if let Some(min_mag) = filters.min_mag
@@ -725,6 +1077,7 @@ fn execute_search(
                 target: CandidateRef::SolarSystem(body),
                 rank_tier,
                 mag: eph.apparent_magnitude,
+                has_known_mag: true,
                 current_alt_deg: eph.alt_deg,
                 is_visible_now: visible_now,
                 has_proper_name: true,
@@ -733,8 +1086,80 @@ fn execute_search(
         }
     }
 
-    // 2. Catalog stars (zero heap allocations during scan!)
-    if filters.category != CategoryFilter::SolarSystem
+    // 2. Messier & NGC deep-sky objects
+    if filters.category.includes_dsos()
+        && filters.spectral_class.is_none()
+        && let Some(index) = catalog
+    {
+        for (dso_idx, dso) in index.dsos.iter().enumerate() {
+            match filters.category {
+                CategoryFilter::Messier if !dso.record.is_messier() => continue,
+                CategoryFilter::Ngc if !dso.record.is_ngc() => continue,
+                _ => {}
+            }
+            if let Some(group) = filters.dso_group
+                && dso.record.kind.group() != group
+            {
+                continue;
+            }
+            if let Some(min_mag) = filters.min_mag {
+                let Some(m) = dso.known_mag else {
+                    continue;
+                };
+                if m < min_mag {
+                    continue;
+                }
+            }
+            if let Some(max_mag) = filters.max_mag {
+                let Some(m) = dso.known_mag else {
+                    continue;
+                };
+                if m > max_mag {
+                    continue;
+                }
+            }
+            if let Some(min_peak) = filters.min_peak_alt_deg
+                && analytical_max_altitude_deg(lat_deg, dso.record.dec_deg) < min_peak
+            {
+                continue;
+            }
+
+            let rank_tier = match query.as_ref() {
+                Some(q) => match match_dso(dso, q) {
+                    Some(tier) => tier,
+                    None => continue,
+                },
+                None => {
+                    if dso.record.is_messier() {
+                        1
+                    } else if dso.record.primary_common_name().is_some() {
+                        2
+                    } else {
+                        3
+                    }
+                }
+            };
+
+            let Some((alt_deg, visible_now)) = fixed_ctx.evaluate(dso.icrs_dir) else {
+                continue;
+            };
+
+            candidates.push(RankedCandidate {
+                target: CandidateRef::Dso(dso_idx),
+                rank_tier,
+                mag: dso.display_mag,
+                has_known_mag: dso.known_mag.is_some(),
+                current_alt_deg: alt_deg,
+                is_visible_now: visible_now,
+                has_proper_name: dso.record.primary_common_name().is_some(),
+                has_bayer: dso.record.is_messier(),
+            });
+        }
+    }
+
+    // 3. Catalog stars (zero heap allocations during scan!)
+    if filters.category.includes_stars()
+        && filters.dso_group.is_none()
         && let Some(index) = catalog
     {
         for (star_idx, star) in index.stars.iter().enumerate() {
@@ -788,45 +1213,9 @@ fn execute_search(
                 }
             };
 
-            // Fast dot-product altitude check before any trig!
-            let up_z = eq_up_row.dot(star.icrs_dir);
-            if let Some(min_sin) = sin_min_alt
-                && up_z < min_sin
-            {
+            let Some((alt_deg, visible_now)) = fixed_ctx.evaluate(star.icrs_dir) else {
                 continue;
-            }
-
-            let (alt_deg, visible_now) = if need_exact_alt_during_scan {
-                let (az_deg, alt_deg) = dir_az_alt_deg(eq_to_topo, star.icrs_dir);
-                (alt_deg, is_above_horizon(az_deg, alt_deg, horizon))
-            } else {
-                // Defer asin/to_degrees until after top-K selection.
-                (up_z, up_z >= 0.0)
             };
-
-            match filters.visibility {
-                VisibilityFilter::Any => {}
-                VisibilityFilter::UpNow => {
-                    if !visible_now {
-                        continue;
-                    }
-                }
-                VisibilityFilter::Tonight => {
-                    let up_tonight = if let Some(prof) = horizon {
-                        night_mats.iter().any(|(_, mat)| {
-                            let (az, alt) = dir_az_alt_deg(*mat, star.icrs_dir);
-                            prof.is_visible(az, alt)
-                        })
-                    } else {
-                        night_up_rows
-                            .iter()
-                            .any(|row| row.dot(star.icrs_dir) >= 0.0)
-                    };
-                    if !up_tonight {
-                        continue;
-                    }
-                }
-            }
 
             let has_proper_name = star
                 .metadata
@@ -843,6 +1232,7 @@ fn execute_search(
                 target: CandidateRef::Star(star_idx),
                 rank_tier,
                 mag: star.mag,
+                has_known_mag: true,
                 current_alt_deg: alt_deg,
                 is_visible_now: visible_now,
                 has_proper_name,
@@ -854,23 +1244,34 @@ fn execute_search(
     let total_matches = candidates.len();
 
     let cmp_candidates = |a: &RankedCandidate, b: &RankedCandidate| {
+        if filters.sort == SortMode::Magnitude {
+            return b.has_known_mag.cmp(&a.has_known_mag).then_with(|| {
+                let ord = a
+                    .mag
+                    .partial_cmp(&b.mag)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.rank_tier.cmp(&b.rank_tier));
+                match filters.sort_direction {
+                    SortDirection::Ascending => ord,
+                    SortDirection::Descending => ord.reverse(),
+                }
+            });
+        }
+
         let base_ord = match filters.sort {
             SortMode::Relevance => a
                 .rank_tier
                 .cmp(&b.rank_tier)
                 .then_with(|| b.has_proper_name.cmp(&a.has_proper_name))
                 .then_with(|| b.has_bayer.cmp(&a.has_bayer))
+                .then_with(|| b.has_known_mag.cmp(&a.has_known_mag))
                 .then_with(|| a.mag.partial_cmp(&b.mag).unwrap_or(Ordering::Equal)),
-            SortMode::Magnitude => a
-                .mag
-                .partial_cmp(&b.mag)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.rank_tier.cmp(&b.rank_tier)),
             SortMode::Altitude => a
                 .current_alt_deg
                 .partial_cmp(&b.current_alt_deg)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.mag.partial_cmp(&b.mag).unwrap_or(Ordering::Equal)),
+            SortMode::Magnitude => Ordering::Equal,
         };
 
         match filters.sort_direction {
@@ -885,6 +1286,34 @@ fn execute_search(
     }
     candidates.sort_by(cmp_candidates);
 
+    let decode_alt = |val: f64| {
+        if need_exact_alt_during_scan {
+            val
+        } else {
+            val.clamp(-1.0, 1.0).asin().to_degrees()
+        }
+    };
+
+    let fixed_equatorial = |ra_deg: f64, dec_deg: f64| {
+        let ra = Angle::from_degrees(ra_deg);
+        let dec = Angle::from_degrees(dec_deg);
+        let track = sample_day_equatorial_track(
+            obs_ctx.location,
+            local_midnight_unix_secs,
+            ra,
+            dec,
+            MINI_GRAPH_SAMPLES,
+        );
+        let vis = compute_target_visibility_with_horizon(
+            obs_ctx.location,
+            local_midnight_unix_secs,
+            ra,
+            dec,
+            horizon,
+        );
+        (track, vis)
+    };
+
     let results = candidates
         .into_iter()
         .filter_map(|cand| {
@@ -894,35 +1323,30 @@ fn execute_search(
                 }
                 CandidateRef::Star(idx) => {
                     let star = catalog?.stars.get(idx)?;
-                    let alt_deg = if need_exact_alt_during_scan {
-                        cand.current_alt_deg
-                    } else {
-                        cand.current_alt_deg.clamp(-1.0, 1.0).asin().to_degrees()
-                    };
-                    (SelectedObject::Star(star.to_selected_star()), alt_deg)
+                    (
+                        SelectedObject::Star(star.to_selected_star()),
+                        decode_alt(cand.current_alt_deg),
+                    )
+                }
+                CandidateRef::Dso(idx) => {
+                    let dso = catalog?.dsos.get(idx)?;
+                    (
+                        SelectedObject::Dso(dso.to_selected_dso()),
+                        decode_alt(cand.current_alt_deg),
+                    )
                 }
             };
 
             let (title, subtitle, mag_label, track, visibility) = match &object {
                 SelectedObject::Star(star) => {
                     let (title, subtitle) = star.display_title_and_subtitle();
-                    let ra = Angle::from_degrees(star.ra_deg);
-                    let dec = Angle::from_degrees(star.dec_deg);
-                    let track = sample_day_equatorial_track(
-                        obs_ctx.location,
-                        local_midnight_unix_secs,
-                        ra,
-                        dec,
-                        MINI_GRAPH_SAMPLES,
-                    );
-                    let vis = compute_target_visibility_with_horizon(
-                        obs_ctx.location,
-                        local_midnight_unix_secs,
-                        ra,
-                        dec,
-                        horizon,
-                    );
+                    let (track, vis) = fixed_equatorial(star.ra_deg, star.dec_deg);
                     (title, subtitle, format!("G {:.2}", star.mag), track, vis)
+                }
+                SelectedObject::Dso(dso) => {
+                    let (title, subtitle) = dso.record.display_title_and_subtitle();
+                    let (track, vis) = fixed_equatorial(dso.record.ra_deg, dso.record.dec_deg);
+                    (title, subtitle, dso.record.mag_label(), track, vis)
                 }
                 SelectedObject::SolarSystem(body) => {
                     let eph = body.ephemeris(obs_ctx.location, obs_ctx.epoch);
@@ -983,8 +1407,11 @@ fn execute_search(
 
 #[derive(Default)]
 pub struct SkyCatalogModel {
+    stars: Option<Arc<Vec<SearchableStar>>>,
+    dsos: Option<Arc<Vec<SearchableDso>>>,
+    stars_building: bool,
+    dsos_building: bool,
     index: Option<Arc<SkySearchIndex>>,
-    is_building: bool,
 }
 
 impl SkyCatalogModel {
@@ -993,7 +1420,23 @@ impl SkyCatalogModel {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.index.is_some()
+        self.stars.is_some() && self.dsos.is_some()
+    }
+
+    pub fn is_ready_for(&self, category: CategoryFilter) -> bool {
+        match category {
+            CategoryFilter::SolarSystem => true,
+            CategoryFilter::Messier | CategoryFilter::Ngc => self.dsos.is_some(),
+            CategoryFilter::Stars => self.stars.is_some(),
+            CategoryFilter::All => self.is_ready(),
+        }
+    }
+
+    fn rebuild_index(&mut self) {
+        self.index = Some(Arc::new(SkySearchIndex {
+            stars: self.stars.clone().unwrap_or_default(),
+            dsos: self.dsos.clone().unwrap_or_default(),
+        }));
     }
 }
 
@@ -1017,10 +1460,10 @@ pub fn publish_star_index(spatial_index: Arc<StarSpatialIndex>, cx: &mut App) {
     };
 
     let should_build = catalog_entity.update(cx, |model, _| {
-        if model.index.is_some() || model.is_building {
+        if model.stars.is_some() || model.stars_building {
             false
         } else {
-            model.is_building = true;
+            model.stars_building = true;
             true
         }
     });
@@ -1031,11 +1474,45 @@ pub fn publish_star_index(spatial_index: Arc<StarSpatialIndex>, cx: &mut App) {
     cx.spawn(async move |cx| {
         let built = cx
             .background_executor()
-            .spawn(async move { Arc::new(SkySearchIndex::from_spatial_index(&spatial_index)) })
+            .spawn(async move { build_searchable_stars(&spatial_index) })
             .await;
         catalog_entity.update(cx, |model, cx| {
-            model.index = Some(built);
-            model.is_building = false;
+            model.stars = Some(built);
+            model.stars_building = false;
+            model.rebuild_index();
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// Publishes a loaded [`DsoSpatialIndex`] to the global sky search catalog, indexing it on a background thread.
+pub fn publish_dso_index(dso_index: Arc<DsoSpatialIndex>, cx: &mut App) {
+    let Some(catalog_entity) = cx.try_global::<GlobalSkyCatalog>().map(|g| g.0.clone()) else {
+        return;
+    };
+
+    let should_build = catalog_entity.update(cx, |model, _| {
+        if model.dsos.is_some() || model.dsos_building {
+            false
+        } else {
+            model.dsos_building = true;
+            true
+        }
+    });
+    if !should_build {
+        return;
+    }
+
+    cx.spawn(async move |cx| {
+        let built = cx
+            .background_executor()
+            .spawn(async move { build_searchable_dsos(&dso_index) })
+            .await;
+        catalog_entity.update(cx, |model, cx| {
+            model.dsos = Some(built);
+            model.dsos_building = false;
+            model.rebuild_index();
             cx.notify();
         });
     })
@@ -1118,7 +1595,7 @@ impl SkySearchOverlay {
     ) -> Self {
         let query_input = cx.new(|cx| {
             TextField::new("", window, cx)
-                .placeholder("Search stars, Sun, Moon, Bayer (α CMa / alpha cma), HIP, HD, HR…")
+                .placeholder("Search Messier, NGC, stars, planets, Bayer (α CMa), HIP, HD, HR…")
                 .select_all_on_focus(true)
                 .frameless(true)
         });
@@ -1562,8 +2039,11 @@ impl SkySearchOverlay {
                 None,
                 move |this, cx| {
                     this.filters.category = cat;
-                    if cat == CategoryFilter::SolarSystem {
+                    if !cat.includes_stars() {
                         this.filters.spectral_class = None;
+                    }
+                    if !cat.includes_dsos() {
+                        this.filters.dso_group = None;
                     }
                     this.selected_index = 0;
                     this.scroll_handle.set_offset(point(px(0.0), px(0.0)));
@@ -1670,7 +2150,7 @@ impl SkySearchOverlay {
             .tooltip(Tooltip::text(if self.filters_expanded {
                 "Collapse advanced filters"
             } else {
-                "Expand magnitude, altitude & spectral filters"
+                "Expand magnitude, altitude, DSO & spectral filters"
             }))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.filters_expanded = !this.filters_expanded;
@@ -1695,6 +2175,51 @@ impl SkySearchOverlay {
             );
 
         let expanded_drawer = if self.filters_expanded {
+            let dso_group_tint = |group: DsoGroup| -> Hsla {
+                let srgb = group.srgb();
+                Rgba {
+                    r: srgb[0],
+                    g: srgb[1],
+                    b: srgb[2],
+                    a: 1.0,
+                }
+                .into()
+            };
+
+            let mut dso_type_row = h_flex().items_center().gap_1().flex_wrap().child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(text_muted)
+                    .mr_1()
+                    .child("DSO Type"),
+            );
+            for (i, group) in DsoGroup::ALL.iter().enumerate() {
+                let group = *group;
+                dso_type_row = dso_type_row.child(Self::render_filter_pill(
+                    ("sky_search_dso_group", i),
+                    group.label().to_string(),
+                    self.filters.dso_group == Some(group),
+                    Some(dso_group_tint(group)),
+                    None,
+                    move |this, cx| {
+                        if this.filters.dso_group == Some(group) {
+                            this.filters.dso_group = None;
+                        } else {
+                            this.filters.dso_group = Some(group);
+                            this.filters.spectral_class = None;
+                            if !this.filters.category.includes_dsos() {
+                                this.filters.category = CategoryFilter::All;
+                            }
+                        }
+                        this.selected_index = 0;
+                        this.scroll_handle.set_offset(point(px(0.0), px(0.0)));
+                        this.schedule_search(None, cx);
+                        cx.notify();
+                    },
+                    cx,
+                ));
+            }
+
             let spectral_tint = |sp: &str| -> Hsla {
                 let bp_rp = match sp {
                     "O" => -0.35,
@@ -1735,7 +2260,8 @@ impl SkySearchOverlay {
                             this.filters.spectral_class = None;
                         } else {
                             this.filters.spectral_class = Some(sp);
-                            if this.filters.category == CategoryFilter::SolarSystem {
+                            this.filters.dso_group = None;
+                            if !this.filters.category.includes_stars() {
                                 this.filters.category = CategoryFilter::Stars;
                             }
                         }
@@ -1823,7 +2349,16 @@ impl SkySearchOverlay {
                                 self.min_peak_slider.clone().into_any_element(),
                             )),
                     )
-                    .when(self.filters.category != CategoryFilter::SolarSystem, |el| {
+                    .when(self.filters.category.includes_dsos(), |el| {
+                        el.child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .child(dso_type_row),
+                        )
+                    })
+                    .when(self.filters.category.includes_stars(), |el| {
                         el.child(
                             h_flex()
                                 .w_full()
@@ -1903,7 +2438,10 @@ impl SkySearchOverlay {
     ) -> gpui::AnyElement {
         let colors = cx.theme().colors();
         let is_selected = idx == self.selected_index;
-        let is_solar_system = matches!(item.object, SelectedObject::SolarSystem(_));
+        let is_accent_badge = matches!(
+            item.object,
+            SelectedObject::SolarSystem(_) | SelectedObject::Dso(_)
+        );
 
         let star_rgb = Rgba {
             r: item.srgb[0],
@@ -2035,19 +2573,19 @@ impl SkySearchOverlay {
                                     .px_1p5()
                                     .py(px(0.5))
                                     .rounded_sm()
-                                    .bg(if is_solar_system {
+                                    .bg(if is_accent_badge {
                                         star_color.opacity(0.18)
                                     } else {
                                         colors.element_background
                                     })
                                     .border_1()
-                                    .border_color(if is_solar_system {
+                                    .border_color(if is_accent_badge {
                                         star_color.opacity(0.45)
                                     } else {
                                         colors.border_variant
                                     })
                                     .text_size(px(9.5))
-                                    .text_color(if is_solar_system {
+                                    .text_color(if is_accent_badge {
                                         star_color
                                     } else {
                                         colors.text_muted
@@ -2241,7 +2779,7 @@ impl Render for SkySearchOverlay {
         let has_query = !self.query_text.is_empty();
         let catalog_ready = cx
             .try_global::<GlobalSkyCatalog>()
-            .is_some_and(|g| g.0.read(cx).is_ready());
+            .is_some_and(|g| g.0.read(cx).is_ready_for(self.filters.category));
         let epoch_secs = cx
             .try_global::<GlobalObserver>()
             .map(|g| {
@@ -2270,22 +2808,23 @@ impl Render for SkySearchOverlay {
         }
         let colors = cx.theme().colors();
 
-        let match_summary =
-            if !catalog_ready && self.filters.category != CategoryFilter::SolarSystem {
-                "Indexing star catalog…".to_string()
-            } else if self.total_matches == 0 {
-                "No matching objects".to_string()
-            } else if self.total_matches > self.results.len() {
-                format!(
-                    "Showing {} of {} matches",
-                    self.results.len(),
-                    self.total_matches
-                )
-            } else if self.total_matches == 1 {
-                "1 object".to_string()
-            } else {
-                format!("{} objects", self.total_matches)
-            };
+        let match_summary = if !catalog_ready && self.total_matches == 0 {
+            "Indexing sky catalogs…".to_string()
+        } else if !catalog_ready {
+            format!("{} objects (indexing catalogs…)", self.total_matches)
+        } else if self.total_matches == 0 {
+            "No matching objects".to_string()
+        } else if self.total_matches > self.results.len() {
+            format!(
+                "Showing {} of {} matches",
+                self.results.len(),
+                self.total_matches
+            )
+        } else if self.total_matches == 1 {
+            "1 object".to_string()
+        } else {
+            format!("{} objects", self.total_matches)
+        };
 
         gpui::deferred(
             div()
@@ -2876,5 +3415,394 @@ mod tests {
             overlay.read_with(&vcx, |o, _| o.is_open),
             "Ctrl+F keybinding must open the overlay"
         );
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestDso<'a> {
+        ra_deg: f64,
+        dec_deg: f64,
+        kind: celestial::DsoKind,
+        constellation: [u8; 3],
+        messier: Option<u16>,
+        ngc: Option<&'a str>,
+        ic: Option<&'a str>,
+        alt_ngc: &'a [&'a str],
+        common_names: &'a [&'a str],
+        v_mag: Option<f32>,
+    }
+
+    fn make_dso(spec: TestDso<'_>) -> DsoRecord {
+        DsoRecord {
+            ra_deg: spec.ra_deg,
+            dec_deg: spec.dec_deg,
+            kind: spec.kind,
+            constellation: spec.constellation,
+            messier: spec.messier,
+            ngc: spec.ngc.map(str::to_string),
+            ic: spec.ic.map(str::to_string),
+            alt_ngc: spec.alt_ngc.iter().map(|s| (*s).to_string()).collect(),
+            common_names: spec.common_names.iter().map(|s| (*s).to_string()).collect(),
+            v_mag: spec.v_mag,
+            b_mag: None,
+            surface_brightness: None,
+            major_arcmin: Some(30.0),
+            minor_arcmin: Some(20.0),
+            position_angle_deg: None,
+            hubble_type: None,
+        }
+    }
+
+    fn sample_dso_index() -> DsoSpatialIndex {
+        use celestial::DsoKind;
+        let records = vec![
+            // M31 / NGC 224 — Andromeda Galaxy (Dec +41.27°, circumpolar-high peak in Paris ~82.4°)
+            make_dso(TestDso {
+                ra_deg: 10.6847,
+                dec_deg: 41.2687,
+                kind: DsoKind::Galaxy,
+                constellation: *b"And",
+                messier: Some(31),
+                ngc: Some("224"),
+                ic: None,
+                alt_ngc: &[],
+                common_names: &["Andromeda Galaxy"],
+                v_mag: Some(3.44),
+            }),
+            // M1 / NGC 1952 — Crab Nebula
+            make_dso(TestDso {
+                ra_deg: 83.6331,
+                dec_deg: 22.0145,
+                kind: DsoKind::SupernovaRemnant,
+                constellation: *b"Tau",
+                messier: Some(1),
+                ngc: Some("1952"),
+                ic: None,
+                alt_ngc: &[],
+                common_names: &["Crab Nebula"],
+                v_mag: Some(8.4),
+            }),
+            // M10 / NGC 6254 — Globular Cluster
+            make_dso(TestDso {
+                ra_deg: 254.2877,
+                dec_deg: -4.1003,
+                kind: DsoKind::GlobularCluster,
+                constellation: *b"Oph",
+                messier: Some(10),
+                ngc: Some("6254"),
+                ic: None,
+                alt_ngc: &[],
+                common_names: &[],
+                v_mag: Some(6.6),
+            }),
+            // M101 / NGC 5457 — Pinwheel Galaxy (Dec +54.35°, peak in Paris ~84.5°)
+            make_dso(TestDso {
+                ra_deg: 210.8024,
+                dec_deg: 54.3488,
+                kind: DsoKind::Galaxy,
+                constellation: *b"UMa",
+                messier: Some(101),
+                ngc: Some("5457"),
+                ic: None,
+                alt_ngc: &[],
+                common_names: &["Pinwheel Galaxy"],
+                v_mag: Some(7.86),
+            }),
+            // M45 — Messier-only (no NGC ID)
+            make_dso(TestDso {
+                ra_deg: 56.75,
+                dec_deg: 24.1167,
+                kind: DsoKind::OpenCluster,
+                constellation: *b"Tau",
+                messier: Some(45),
+                ngc: None,
+                ic: None,
+                alt_ngc: &[],
+                common_names: &["Pleiades"],
+                v_mag: Some(1.6),
+            }),
+            // NGC 7000 — North America Nebula (unknown magnitude, Dec +44.33°)
+            make_dso(TestDso {
+                ra_deg: 314.68,
+                dec_deg: 44.33,
+                kind: DsoKind::HiiRegion,
+                constellation: *b"Cyg",
+                messier: None,
+                ngc: Some("7000"),
+                ic: None,
+                alt_ngc: &[],
+                common_names: &["North America Nebula"],
+                v_mag: None,
+            }),
+            // NGC 2237 — Rosette Nebula with alt_ngc ["2244"]
+            make_dso(TestDso {
+                ra_deg: 98.0,
+                dec_deg: 4.95,
+                kind: DsoKind::EmissionNebula,
+                constellation: *b"Mon",
+                messier: None,
+                ngc: Some("2237"),
+                ic: None,
+                alt_ngc: &["2244"],
+                common_names: &["Rosette Nebula"],
+                v_mag: Some(9.0),
+            }),
+            // NGC 5139 — Omega Centauri (Dec -47.48°, never rises in Paris)
+            make_dso(TestDso {
+                ra_deg: 201.697,
+                dec_deg: -47.479,
+                kind: DsoKind::GlobularCluster,
+                constellation: *b"Cen",
+                messier: None,
+                ngc: Some("5139"),
+                ic: None,
+                alt_ngc: &[],
+                common_names: &["Omega Centauri"],
+                v_mag: Some(3.9),
+            }),
+            // IC 1805 — IC-only Heart Nebula (not Messier, not NGC)
+            make_dso(TestDso {
+                ra_deg: 38.17,
+                dec_deg: 61.45,
+                kind: DsoKind::ClusterNebula,
+                constellation: *b"Cas",
+                messier: None,
+                ngc: None,
+                ic: Some("1805"),
+                alt_ngc: &[],
+                common_names: &["Heart Nebula"],
+                v_mag: Some(6.5),
+            }),
+        ];
+        DsoSpatialIndex::build(records)
+    }
+
+    fn sample_combined_catalog() -> SkySearchIndex {
+        let stars = sample_catalog();
+        let dsos = sample_dso_index();
+        SkySearchIndex {
+            stars: stars.stars,
+            dsos: build_searchable_dsos(&dsos),
+        }
+    }
+
+    #[test]
+    fn searches_messier_ngc_alt_ngc_and_common_names() {
+        let catalog = sample_combined_catalog();
+        let (obs, midnight, solar) = paris_context();
+        let default_filters = SkySearchFilters::default();
+
+        for (query, expected) in [
+            ("M31", "M31"),
+            ("m 031", "M31"),
+            ("messier 31", "M31"),
+            ("NGC 7000", "NGC 7000"),
+            ("ngc0224", "M31"),
+            ("NGC 2244", "NGC 2237"),
+            ("Andromeda", "M31"),
+            ("North America", "NGC 7000"),
+            ("IC 1805", "IC 1805"),
+        ] {
+            let (results, _) = execute_search(
+                Some(&catalog),
+                query,
+                default_filters,
+                obs,
+                midnight,
+                &solar,
+                None,
+            );
+            assert!(!results.is_empty(), "expected match for query '{query}'");
+            assert_eq!(
+                results[0].title, expected,
+                "query '{query}' should rank {expected} first"
+            );
+        }
+
+        // Exact Messier match "M1" must rank strictly ahead of prefix matches "M10" / "M101"
+        let (m1_results, _) = execute_search(
+            Some(&catalog),
+            "M1",
+            SkySearchFilters {
+                category: CategoryFilter::Messier,
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        let titles: Vec<&str> = m1_results.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles.first().copied(), Some("M1"));
+        assert!(titles.contains(&"M10"));
+        assert!(titles.contains(&"M101"));
+    }
+
+    #[test]
+    fn filters_and_sorts_dsos_by_category_group_magnitude_and_visibility() {
+        let catalog = sample_combined_catalog();
+        let (obs, midnight, solar) = paris_context();
+
+        // Category: Messier excludes non-Messier NGCs, IC objects, stars, and solar system bodies
+        let (messier_only, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                category: CategoryFilter::Messier,
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        assert_eq!(messier_only.len(), 5);
+        assert!(
+            messier_only
+                .iter()
+                .all(|r| matches!(r.object, SelectedObject::Dso(ref d) if d.record.is_messier()))
+        );
+
+        // Category: NGC includes NGC-designated entries (incl. M31/M1/M10/M101) and excludes M45 & IC 1805
+        let (ngc_only, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                category: CategoryFilter::Ngc,
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        let ngc_titles: Vec<&str> = ngc_only.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(ngc_only.len(), 7);
+        assert!(!ngc_titles.contains(&"M45"));
+        assert!(!ngc_titles.contains(&"IC 1805"));
+        assert!(ngc_titles.contains(&"NGC 7000"));
+        assert!(ngc_titles.contains(&"NGC 2237"));
+
+        // DSO group: Galaxy returns only galaxies (M31, M101)
+        let (galaxies, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                dso_group: Some(DsoGroup::Galaxy),
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        assert_eq!(galaxies.len(), 2);
+        assert!(
+            galaxies
+                .iter()
+                .all(|r| r.title == "M31" || r.title == "M101")
+        );
+
+        // DSO group: Nebula returns all 4 nebulae
+        let (nebulae, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                dso_group: Some(DsoGroup::Nebula),
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        assert_eq!(nebulae.len(), 4);
+
+        // Magnitude bounds exclude unknown-magnitude NGC 7000
+        let (bounded, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                category: CategoryFilter::Ngc,
+                max_mag: Some(15.0),
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        assert!(bounded.iter().all(|r| r.title != "NGC 7000"));
+        assert_eq!(bounded.len(), 6);
+
+        // Magnitude sort places unknown-magnitude NGC 7000 last in BOTH ascending and descending
+        let (mag_asc, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                category: CategoryFilter::Ngc,
+                sort: SortMode::Magnitude,
+                sort_direction: SortDirection::Ascending,
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        assert_eq!(mag_asc.first().map(|r| r.title.as_str()), Some("M31"));
+        assert_eq!(mag_asc.last().map(|r| r.title.as_str()), Some("NGC 7000"));
+
+        let (mag_desc, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                category: CategoryFilter::Ngc,
+                sort: SortMode::Magnitude,
+                sort_direction: SortDirection::Descending,
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        assert_eq!(mag_desc.first().map(|r| r.title.as_str()), Some("NGC 2237"));
+        assert_eq!(mag_desc.last().map(|r| r.title.as_str()), Some("NGC 7000"));
+
+        // Min peak altitude >= 75° in Paris excludes M1 (~63°) & Omega Cen (<0°) and keeps high-dec DSOs
+        let (high_peak, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                category: CategoryFilter::Messier,
+                min_peak_alt_deg: Some(75.0),
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        let peak_titles: Vec<&str> = high_peak.iter().map(|r| r.title.as_str()).collect();
+        assert!(peak_titles.contains(&"M31"));
+        assert!(peak_titles.contains(&"M101"));
+        assert!(!peak_titles.contains(&"M1"));
+
+        // Tonight visibility in Paris excludes NGC 5139 (Omega Centauri, Dec -47.5°) and keeps M31
+        let (tonight_ngc, _) = execute_search(
+            Some(&catalog),
+            "",
+            SkySearchFilters {
+                category: CategoryFilter::Ngc,
+                visibility: VisibilityFilter::Tonight,
+                ..Default::default()
+            },
+            obs,
+            midnight,
+            &solar,
+            None,
+        );
+        assert!(tonight_ngc.iter().all(|r| r.title != "NGC 5139"));
+        assert!(tonight_ngc.iter().any(|r| r.title == "M31"));
     }
 }

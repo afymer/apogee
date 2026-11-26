@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use celestial::{
-    DailyTargetVisibility, HorizonProfile, SolarSystemBody, StarMetadata,
+    DailyTargetVisibility, DsoRecord, HorizonProfile, SolarSystemBody, StarMetadata,
     compute_solar_system_visibility_with_horizon, compute_target_visibility_with_horizon,
     coords::{Angle, canonical_spherical_to_cartesian},
     sample_day_equatorial_track, sample_day_solar_system_track,
@@ -21,7 +21,7 @@ use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_da
 pub use observer::{GlobalVisibilityGraphPrefs, VisibilityGraphCenter, VisibilityGraphPrefsModel};
 use observer::{GraphCenterToggleStyle, graph_axis_labels, graph_center_toggle};
 use planner::GlobalNightPlan;
-use planetarium::{PickedSolarSystemBody, PickedStar};
+use planetarium::{PickedDso, PickedSolarSystemBody, PickedStar};
 use protocol::{ConnectionState, MountCommand, MountStatus};
 use settings::{CenterOnSelection, ToggleObjectDetails};
 use status_bar::{format_altaz, format_radec};
@@ -61,6 +61,7 @@ const ICON_TRAJECTORY: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SelectedObjectId {
     Star(u32),
+    Dso(u32),
     SolarSystem(SolarSystemBody),
 }
 
@@ -130,16 +131,41 @@ impl SelectedStar {
     }
 }
 
-/// Unified selected celestial object in the planetarium (either a catalog star or a solar-system body).
+/// Selected Messier / NGC deep-sky object with catalog metadata.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelectedDso {
+    pub catalog_index: u32,
+    pub record: DsoRecord,
+}
+
+impl SelectedDso {
+    pub fn from_picked(picked: &PickedDso) -> Self {
+        Self {
+            catalog_index: picked.catalog_index,
+            record: picked.record.clone(),
+        }
+    }
+
+    pub fn icrs_dir(&self) -> DVec3 {
+        self.record.icrs_dir()
+    }
+}
+
+/// Unified selected celestial object in the planetarium (star, deep-sky object, or solar-system body).
 #[derive(Clone, Debug, PartialEq)]
 pub enum SelectedObject {
     Star(SelectedStar),
+    Dso(SelectedDso),
     SolarSystem(SolarSystemBody),
 }
 
 impl SelectedObject {
     pub fn from_picked_star(star: &PickedStar) -> Self {
         Self::Star(SelectedStar::from_picked(star))
+    }
+
+    pub fn from_picked_dso(picked: &PickedDso) -> Self {
+        Self::Dso(SelectedDso::from_picked(picked))
     }
 
     pub fn from_picked_solar_system(picked: &PickedSolarSystemBody) -> Self {
@@ -149,6 +175,7 @@ impl SelectedObject {
     pub fn id(&self) -> SelectedObjectId {
         match self {
             Self::Star(s) => SelectedObjectId::Star(s.catalog_index),
+            Self::Dso(d) => SelectedObjectId::Dso(d.catalog_index),
             Self::SolarSystem(body) => SelectedObjectId::SolarSystem(*body),
         }
     }
@@ -156,6 +183,7 @@ impl SelectedObject {
     pub fn category_badge(&self) -> &'static str {
         match self {
             Self::Star(_) => "Star",
+            Self::Dso(d) => d.record.kind.short_label(),
             Self::SolarSystem(body) => body.category_label(),
         }
     }
@@ -163,6 +191,7 @@ impl SelectedObject {
     pub fn srgb(&self) -> [f32; 3] {
         match self {
             Self::Star(s) => s.srgb,
+            Self::Dso(d) => d.record.kind.srgb(),
             Self::SolarSystem(body) => body.srgb(),
         }
     }
@@ -519,6 +548,19 @@ impl StarDetailsPanel {
             SelectedObject::Star(star) => {
                 let ra = Angle::from_degrees(star.ra_deg);
                 let dec = Angle::from_degrees(star.dec_deg);
+                let track = sample_day_equatorial_track(loc, window_start, ra, dec, 97);
+                let vis = compute_target_visibility_with_horizon(
+                    loc,
+                    window_start,
+                    ra,
+                    dec,
+                    active_profile.as_ref(),
+                );
+                (track, vis)
+            }
+            SelectedObject::Dso(dso) => {
+                let ra = Angle::from_degrees(dso.record.ra_deg);
+                let dec = Angle::from_degrees(dso.record.dec_deg);
                 let track = sample_day_equatorial_track(loc, window_start, ra, dec, 97);
                 let vis = compute_target_visibility_with_horizon(
                     loc,
@@ -1267,7 +1309,7 @@ impl Render for StarDetailsPanel {
                         .text_size(px(12.0))
                         .text_color(colors.text_muted)
                         .child(
-                            "Click a star, planet, moon, or the Sun to inspect visibility and details",
+                            "Click a star, deep-sky object, planet, moon, or the Sun to inspect visibility and details",
                         ),
                 )
                 .into_any_element();
@@ -1291,7 +1333,8 @@ impl Render for StarDetailsPanel {
             .unwrap_or_default();
 
         let category_badge = selected_obj.category_badge();
-        let is_solar_system = matches!(selected_obj, SelectedObject::SolarSystem(_));
+        let is_accent_badge =
+            matches!(selected_obj, SelectedObject::SolarSystem(_) | SelectedObject::Dso(_));
 
         let (title, subtitle, ra_deg, dec_deg, az_deg, alt_deg, solar_eph) = match &selected_obj {
             SelectedObject::Star(star) => {
@@ -1305,6 +1348,22 @@ impl Render for StarDetailsPanel {
                     subtitle,
                     star.ra_deg,
                     star.dec_deg,
+                    az.degrees(),
+                    alt.degrees(),
+                    None,
+                )
+            }
+            SelectedObject::Dso(dso) => {
+                let (title, subtitle) = dso.record.display_title_and_subtitle();
+                let (az, alt) = obs_ctx.equatorial_to_topocentric_coords(
+                    Angle::from_degrees(dso.record.ra_deg),
+                    Angle::from_degrees(dso.record.dec_deg),
+                );
+                (
+                    title,
+                    subtitle,
+                    dso.record.ra_deg,
+                    dso.record.dec_deg,
                     az.degrees(),
                     alt.degrees(),
                     None,
@@ -1556,6 +1615,7 @@ impl Render for StarDetailsPanel {
         let (az_text, alt_text) = format_altaz(az_deg, alt_deg, 10.0);
         let ids_summary = match &selected_obj {
             SelectedObject::Star(star) => star.catalog_ids_summary(),
+            SelectedObject::Dso(dso) => dso.record.catalog_ids_summary(),
             SelectedObject::SolarSystem(_) => None,
         };
 
@@ -1573,6 +1633,43 @@ impl Render for StarDetailsPanel {
                     .child(metric_cell("BP-RP", format!("{:+.2}", star.bp_rp)))
                     .child(metric_cell("Teff", format!("~{} K", star.estimated_teff_k))),
             ],
+            (SelectedObject::Dso(dso), _) => {
+                let mut rows = vec![
+                    h_flex()
+                        .gap_3()
+                        .child(metric_cell("Mag", dso.record.mag_detail_label()))
+                        .child(metric_cell("Type", dso.record.kind.label().to_string())),
+                ];
+                let mut extra: Vec<(&'static str, String)> = Vec::new();
+                if let Some(size) = dso.record.angular_size_label() {
+                    extra.push(("Size", size));
+                }
+                if let Some(pa) = dso.record.position_angle_deg.filter(|v| v.is_finite()) {
+                    extra.push(("PA", format!("{pa:.0}°")));
+                }
+                if let Some(sb) = dso.record.surface_brightness.filter(|v| v.is_finite()) {
+                    extra.push(("Surf Br", format!("{sb:.1} mag/″²")));
+                }
+                if let Some(hubble) = dso
+                    .record
+                    .hubble_type
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                {
+                    extra.push(("Morph", hubble.to_string()));
+                }
+                if let Some(con) = dso.record.constellation_str() {
+                    extra.push(("Const", con.to_string()));
+                }
+                for pair in extra.chunks(2) {
+                    let mut row = h_flex().gap_3();
+                    for (k, v) in pair {
+                        row = row.child(metric_cell(k, v.clone()));
+                    }
+                    rows.push(row);
+                }
+                rows
+            }
             (SelectedObject::SolarSystem(SolarSystemBody::Sun), Some(eph)) => {
                 let dist_au = eph.distance_km / 149_597_870.7;
                 let diam_arcmin = eph.angular_radius_deg * 2.0 * 60.0;
@@ -1722,19 +1819,19 @@ impl Render for StarDetailsPanel {
                                             .px_1p5()
                                             .py(px(1.0))
                                             .rounded_sm()
-                                            .bg(if is_solar_system {
+                                            .bg(if is_accent_badge {
                                                 star_color.opacity(0.18)
                                             } else {
                                                 colors.element_background
                                             })
                                             .border_1()
-                                            .border_color(if is_solar_system {
+                                            .border_color(if is_accent_badge {
                                                 star_color.opacity(0.45)
                                             } else {
                                                 colors.border_variant
                                             })
                                             .text_size(px(9.5))
-                                            .text_color(if is_solar_system {
+                                            .text_color(if is_accent_badge {
                                                 star_color
                                             } else {
                                                 colors.text_muted
@@ -2123,5 +2220,44 @@ mod tests {
             *events.borrow(),
             vec![PanelEvent::Activate, PanelEvent::Toggle]
         );
+    }
+
+    #[gpui::test]
+    fn dso_selection_preserves_identity_and_metadata(cx: &mut TestAppContext) {
+        let selection = cx.new(|_| StarSelectionModel::default());
+        let record = DsoRecord {
+            ra_deg: 10.684_79,
+            dec_deg: 41.269_06,
+            kind: celestial::DsoKind::Galaxy,
+            constellation: *b"And",
+            messier: Some(31),
+            ngc: Some("224".to_string()),
+            ic: None,
+            alt_ngc: Vec::new(),
+            common_names: vec!["Andromeda Galaxy".to_string()],
+            v_mag: Some(3.44),
+            b_mag: Some(4.29),
+            surface_brightness: Some(23.58),
+            major_arcmin: Some(177.83),
+            minor_arcmin: Some(69.66),
+            position_angle_deg: Some(35.0),
+            hubble_type: Some("Sb".to_string()),
+        };
+
+        let obj = SelectedObject::Dso(SelectedDso {
+            catalog_index: 42,
+            record: record.clone(),
+        });
+        assert_eq!(obj.id(), SelectedObjectId::Dso(42));
+        assert_eq!(obj.category_badge(), "Galaxy");
+        assert_eq!(obj.srgb(), record.kind.srgb());
+
+        selection.update(cx, |model, cx| {
+            model.select_and_center(obj.clone(), cx);
+        });
+        selection.read_with(cx, |model, _| {
+            assert_eq!(model.selected_object(), Some(&obj));
+            assert!(model.center_requested());
+        });
     }
 }

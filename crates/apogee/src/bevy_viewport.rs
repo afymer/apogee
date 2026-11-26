@@ -14,18 +14,18 @@ use components::{Slider, SliderEvent};
 use futures::StreamExt;
 use glam::DVec3;
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Rgba, ScrollDelta, ScrollWheelEvent, Task, WeakEntity, Window, div, point,
-    prelude::*, px, rgb, svg,
+    AnyElement, App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Rgba, ScrollDelta, ScrollWheelEvent, Task, WeakEntity, Window,
+    div, point, prelude::*, px, rgb, svg,
 };
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
 use planetarium::{
-    BevyBridge, HorizonImageData, HorizonLayerData, ObserverClockSpec, PickedSolarSystemBody,
-    PickedStar, PlanetariumRenderer, PlanetariumViewInfo, StarRenderParams, StarSpatialIndex,
-    TrackingTarget, TrajectoryRenderData, ViewMode, pick_solar_system_body,
-    rendered_solar_system_disc_radius_px,
+    BevyBridge, DsoRenderParams, DsoSpatialIndex, HorizonImageData, HorizonLayerData,
+    ObserverClockSpec, PickedDso, PickedSolarSystemBody, PickedStar, PlanetariumRenderer,
+    PlanetariumViewInfo, StarRenderParams, StarSpatialIndex, TrackingTarget, TrajectoryRenderData,
+    ViewMode, pick_solar_system_body, rendered_solar_system_disc_radius_px,
 };
 use planner::GlobalNightPlan;
 use settings::{
@@ -109,6 +109,7 @@ const ICON_COORDS_EQUATORIAL: &[u8] = br##"<svg width="24" height="24" viewBox="
 #[derive(Clone, Debug, PartialEq)]
 enum HoveredObject {
     Star(PickedStar),
+    Dso(PickedDso),
     SolarSystem(PickedSolarSystemBody),
 }
 
@@ -116,6 +117,7 @@ impl HoveredObject {
     fn id(&self) -> SelectedObjectId {
         match self {
             Self::Star(s) => SelectedObjectId::Star(s.catalog_index),
+            Self::Dso(d) => SelectedObjectId::Dso(d.catalog_index),
             Self::SolarSystem(b) => SelectedObjectId::SolarSystem(b.body),
         }
     }
@@ -123,6 +125,7 @@ impl HoveredObject {
     fn screen_ndc(&self) -> [f64; 2] {
         match self {
             Self::Star(s) => s.screen_ndc,
+            Self::Dso(d) => d.screen_ndc,
             Self::SolarSystem(b) => b.screen_ndc,
         }
     }
@@ -130,6 +133,7 @@ impl HoveredObject {
     fn rendered_radius_px(&self) -> f32 {
         match self {
             Self::Star(s) => s.rendered_radius_px,
+            Self::Dso(d) => d.rendered_radius_px,
             Self::SolarSystem(b) => b.rendered_radius_px,
         }
     }
@@ -137,6 +141,7 @@ impl HoveredObject {
     fn srgb(&self) -> [f32; 3] {
         match self {
             Self::Star(s) => s.srgb,
+            Self::Dso(d) => d.record.kind.srgb(),
             Self::SolarSystem(b) => b.body.srgb(),
         }
     }
@@ -144,6 +149,7 @@ impl HoveredObject {
     fn title_and_badge(&self) -> (String, String) {
         match self {
             Self::Star(s) => (s.display_title_and_subtitle().0, format!("G {:.2}", s.mag)),
+            Self::Dso(d) => (d.record.hover_title(), d.record.mag_label()),
             Self::SolarSystem(b) => match b.ephemeris.lunar_phase {
                 Some(phase) => (
                     b.body.name().to_string(),
@@ -164,6 +170,7 @@ impl HoveredObject {
     fn to_selected(&self) -> SelectedObject {
         match self {
             Self::Star(s) => SelectedObject::from_picked_star(s),
+            Self::Dso(d) => SelectedObject::from_picked_dso(d),
             Self::SolarSystem(b) => SelectedObject::from_picked_solar_system(b),
         }
     }
@@ -197,6 +204,7 @@ pub struct PlanetariumPanel {
     cursor_position: Option<Point<Pixels>>,
     latest_view_info: PlanetariumViewInfo,
     star_index: Option<Arc<StarSpatialIndex>>,
+    dso_index: Option<Arc<DsoSpatialIndex>>,
     hovered_object: Option<HoveredObject>,
     hover_preview_visible: bool,
     hover_preview_target_id: Option<SelectedObjectId>,
@@ -219,6 +227,8 @@ pub struct PlanetariumPanel {
     last_synced_hips_survey_enabled: Option<bool>,
     last_synced_hips_survey_opacity: Option<f32>,
     last_synced_stars_opacity: Option<f32>,
+    last_synced_dso_opacity: Option<f32>,
+    last_synced_dso_filter: Option<(bool, bool)>,
     last_synced_solar_system_opacity: Option<f32>,
     last_synced_altaz_grid_opacity: Option<f32>,
     last_synced_equatorial_grid_opacity: Option<f32>,
@@ -239,6 +249,9 @@ pub struct PlanetariumPanel {
 fn tracking_target_for_selected(selected: &SelectedObject) -> TrackingTarget {
     match selected {
         SelectedObject::Star(star) => TrackingTarget::equatorial_deg(star.ra_deg, star.dec_deg),
+        SelectedObject::Dso(dso) => {
+            TrackingTarget::equatorial_deg(dso.record.ra_deg, dso.record.dec_deg)
+        }
         SelectedObject::SolarSystem(body) => TrackingTarget::SolarSystem(*body),
     }
 }
@@ -351,6 +364,8 @@ impl PlanetariumPanel {
                 initial_hips_survey_enabled,
                 initial_hips_survey_opacity,
                 initial_stars_opacity,
+                initial_dso_opacity,
+                initial_dso_filter,
                 initial_solar_system_opacity,
                 initial_altaz_grid_opacity,
                 initial_equatorial_grid_opacity,
@@ -364,6 +379,8 @@ impl PlanetariumPanel {
                 let hips_enabled = model.hips_survey_enabled();
                 let hips_opacity = model.hips_survey_opacity();
                 let stars = model.effective_stars_opacity();
+                let dso_opacity = model.effective_dso_opacity();
+                let dso_filter = (model.dso_show_messier(), model.dso_show_ngc());
                 let solar_system = model.effective_solar_system_opacity();
                 let altaz_grid = model.effective_altaz_grid_opacity();
                 let eq_grid = model.effective_equatorial_grid_opacity();
@@ -375,6 +392,8 @@ impl PlanetariumPanel {
                 bridge.set_hips_survey_visible(hips_enabled);
                 bridge.set_hips_survey_opacity(hips_opacity);
                 bridge.set_star_opacity(stars);
+                bridge.set_dso_opacity(dso_opacity);
+                bridge.set_dso_catalog_filter(dso_filter.0, dso_filter.1);
                 bridge.set_solar_system_opacity(solar_system);
                 bridge.set_altaz_grid_opacity(altaz_grid);
                 bridge.set_equatorial_grid_opacity(eq_grid);
@@ -387,13 +406,15 @@ impl PlanetariumPanel {
                     Some(hips_enabled),
                     Some(hips_opacity),
                     Some(stars),
+                    Some(dso_opacity),
+                    Some(dso_filter),
                     Some(solar_system),
                     Some(altaz_grid),
                     Some(eq_grid),
                 )
             } else {
                 (
-                    None, None, None, None, None, None, None, None, None, None, None,
+                    None, None, None, None, None, None, None, None, None, None, None, None, None,
                 )
             };
 
@@ -483,6 +504,20 @@ impl PlanetariumPanel {
                         this.last_synced_stars_opacity = Some(next_stars);
                         this.bridge.set_star_opacity(next_stars);
                     }
+                    let next_dso_opacity = model_ref.effective_dso_opacity();
+                    if this
+                        .last_synced_dso_opacity
+                        .map_or(true, |prev| (prev - next_dso_opacity).abs() > 1e-5)
+                    {
+                        this.last_synced_dso_opacity = Some(next_dso_opacity);
+                        this.bridge.set_dso_opacity(next_dso_opacity);
+                    }
+                    let next_dso_filter = (model_ref.dso_show_messier(), model_ref.dso_show_ngc());
+                    if this.last_synced_dso_filter != Some(next_dso_filter) {
+                        this.last_synced_dso_filter = Some(next_dso_filter);
+                        this.bridge
+                            .set_dso_catalog_filter(next_dso_filter.0, next_dso_filter.1);
+                    }
                     let next_solar_system = model_ref.effective_solar_system_opacity();
                     if this
                         .last_synced_solar_system_opacity
@@ -539,6 +574,10 @@ impl PlanetariumPanel {
             let initial_star_index = bridge.star_index();
             if let Some(index) = initial_star_index.as_ref() {
                 sky_search::publish_star_index(index.clone(), cx);
+            }
+            let initial_dso_index = bridge.dso_index();
+            if let Some(index) = initial_dso_index.as_ref() {
+                sky_search::publish_dso_index(index.clone(), cx);
             }
             let initial_scale_factor = f64::from(window.scale_factor());
 
@@ -607,6 +646,7 @@ impl PlanetariumPanel {
                 cursor_position: None,
                 latest_view_info: initial_view_info,
                 star_index: initial_star_index,
+                dso_index: initial_dso_index,
                 hovered_object: None,
                 hover_preview_visible: false,
                 hover_preview_target_id: None,
@@ -629,6 +669,8 @@ impl PlanetariumPanel {
                 last_synced_hips_survey_enabled: initial_hips_survey_enabled,
                 last_synced_hips_survey_opacity: initial_hips_survey_opacity,
                 last_synced_stars_opacity: initial_stars_opacity,
+                last_synced_dso_opacity: initial_dso_opacity,
+                last_synced_dso_filter: initial_dso_filter,
                 last_synced_solar_system_opacity: initial_solar_system_opacity,
                 last_synced_altaz_grid_opacity: initial_altaz_grid_opacity,
                 last_synced_equatorial_grid_opacity: initial_equatorial_grid_opacity,
@@ -811,18 +853,33 @@ impl PlanetariumPanel {
         self.update_hovered_star(cx);
     }
 
-    fn layer_visibility_flags(&self, cx: &App) -> (bool, bool, bool, bool) {
+    fn layer_visibility_flags(&self, cx: &App) -> LayerVisibilityFlags {
         cx.try_global::<GlobalSettings>()
             .map(|g| {
                 let m = g.0.read(cx);
-                (
-                    m.effective_stars_opacity() > 1e-4,
-                    m.effective_solar_system_opacity() > 1e-4,
-                    m.effective_ground_opacity() >= 0.95,
-                    m.effective_horizon_opacity() >= 0.95,
-                )
+                let show_messier = m.dso_show_messier();
+                let show_ngc = m.dso_show_ngc();
+                LayerVisibilityFlags {
+                    stars: m.effective_stars_opacity() > 1e-4,
+                    dso_opacity: m.effective_dso_opacity(),
+                    dso: m.effective_dso_opacity() > 1e-4 && (show_messier || show_ngc),
+                    dso_show_messier: show_messier,
+                    dso_show_ngc: show_ngc,
+                    solar_system: m.effective_solar_system_opacity() > 1e-4,
+                    occlude_ground: m.effective_ground_opacity() >= 0.95,
+                    occlude_custom_horizon: m.effective_horizon_opacity() >= 0.95,
+                }
             })
-            .unwrap_or((true, true, true, true))
+            .unwrap_or(LayerVisibilityFlags {
+                stars: true,
+                dso_opacity: 1.0,
+                dso: true,
+                dso_show_messier: true,
+                dso_show_ngc: true,
+                solar_system: true,
+                occlude_ground: true,
+                occlude_custom_horizon: true,
+            })
     }
 
     fn ensure_star_index(&mut self, cx: &mut App) -> Option<&Arc<StarSpatialIndex>> {
@@ -835,45 +892,59 @@ impl PlanetariumPanel {
         self.star_index.as_ref()
     }
 
+    fn ensure_dso_index(&mut self, cx: &mut App) -> Option<&Arc<DsoSpatialIndex>> {
+        if self.dso_index.is_none() {
+            if let Some(index) = self.bridge.dso_index() {
+                sky_search::publish_dso_index(index.clone(), cx);
+                self.dso_index = Some(index);
+            }
+        }
+        self.dso_index.as_ref()
+    }
+
     fn pick_object_at_cursor(&mut self, cx: &mut App) -> Option<HoveredObject> {
         let (ndc, bounds) = (
             self.cursor_ndc()?,
             self.viewport_bounds.lock().ok().and_then(|g| *g)?,
         );
-        let (stars_visible, solar_system_visible, occlude_ground, occlude_custom_horizon) =
-            self.layer_visibility_flags(cx);
-        let horizon_occluder = if occlude_custom_horizon {
-            self.active_horizon_profile.as_ref()
-        } else {
-            None
-        };
+        let flags = self.layer_visibility_flags(cx);
         let w = f64::from(f32::from(bounds.size.width));
         let h = f64::from(f32::from(bounds.size.height));
 
-        if solar_system_visible {
+        if flags.solar_system {
+            let horizon_occluder = flags
+                .occlude_custom_horizon
+                .then_some(self.active_horizon_profile.as_ref())
+                .flatten();
             if let Some(body) = pick_solar_system_body(
                 &self.latest_view_info,
                 ndc,
                 (w, h),
                 self.last_scale_factor,
-                occlude_ground,
+                flags.occlude_ground,
                 horizon_occluder,
             ) {
                 return Some(HoveredObject::SolarSystem(body));
             }
         }
 
-        if !stars_visible {
+        if !flags.stars && !flags.dso {
             return None;
         }
+        let dso_index = flags
+            .dso
+            .then(|| self.ensure_dso_index(cx).cloned())
+            .flatten();
+        let star_index = flags
+            .stars
+            .then(|| self.ensure_star_index(cx).cloned())
+            .flatten();
+        let horizon_occluder = flags
+            .occlude_custom_horizon
+            .then_some(self.active_horizon_profile.as_ref())
+            .flatten();
         let view_info = self.latest_view_info;
         let scale_factor = self.last_scale_factor;
-        let index = self.ensure_star_index(cx)?.clone();
-        let star_horizon_occluder = if occlude_custom_horizon {
-            self.active_horizon_profile.as_ref()
-        } else {
-            None
-        };
         let atmo_strength = cx
             .try_global::<GlobalSettings>()
             .map_or(1.0, |g| g.0.read(cx).effective_atmosphere_strength());
@@ -881,22 +952,55 @@ impl PlanetariumPanel {
             view_info.observer.location,
             view_info.observer.epoch,
         ) as f32;
-        let star_params = StarRenderParams::for_sky(
-            sun_alt_deg,
-            view_info.projection.fov_y.radians() as f32,
-            atmo_strength,
-        );
-        index
-            .pick(
+        let fov_y_rad = view_info.projection.fov_y.radians() as f32;
+
+        let picked_dso = dso_index.as_ref().and_then(|index| {
+            let dso_params = DsoRenderParams::for_sky(
+                sun_alt_deg,
+                fov_y_rad,
+                atmo_strength,
+                flags.dso_show_messier,
+                flags.dso_show_ngc,
+            );
+            index.pick(
+                &view_info,
+                ndc,
+                (w, h),
+                scale_factor,
+                &dso_params,
+                flags.occlude_ground,
+                horizon_occluder,
+            )
+        });
+
+        let picked_star = star_index.as_ref().and_then(|index| {
+            let star_params = StarRenderParams::for_sky(sun_alt_deg, fov_y_rad, atmo_strength);
+            index.pick(
                 &view_info,
                 ndc,
                 (w, h),
                 scale_factor,
                 &star_params,
-                occlude_ground,
-                star_horizon_occluder,
+                flags.occlude_ground,
+                horizon_occluder,
             )
-            .map(HoveredObject::Star)
+        });
+
+        match (picked_dso, picked_star) {
+            (Some(d), Some(s)) => {
+                let star_dx = (s.screen_ndc[0] - ndc.0) * 0.5 * w;
+                let star_dy = (s.screen_ndc[1] - ndc.1) * 0.5 * h;
+                let star_dist = star_dx.hypot(star_dy);
+                if d.hit_on_perimeter || (star_dist < 7.0 && d.center_dist_logical > 14.0) {
+                    Some(HoveredObject::Star(s))
+                } else {
+                    Some(HoveredObject::Dso(d))
+                }
+            }
+            (Some(d), None) => Some(HoveredObject::Dso(d)),
+            (None, Some(s)) => Some(HoveredObject::Star(s)),
+            (None, None) => None,
+        }
     }
 
     fn compute_hovered_star(&mut self, cx: &mut Context<Self>) -> bool {
@@ -998,7 +1102,9 @@ impl PlanetariumPanel {
             });
 
         let (window_start_secs, duration_hours, is_faded, cache_time_bucket) = match selected {
-            SelectedObject::Star(_) => (midnight, 24.0, false, midnight.round() as i64),
+            SelectedObject::Star(_) | SelectedObject::Dso(_) => {
+                (midnight, 24.0, false, midnight.round() as i64)
+            }
             SelectedObject::SolarSystem(_) => {
                 let start = epoch_secs - SOLAR_SYSTEM_TRAJ_HALF_WINDOW_HOURS * 3600.0;
                 // Quantize to 1-minute steps so the [-6h..+6h] arc tracks smoothly without per-frame rebuilds.
@@ -1028,6 +1134,14 @@ impl PlanetariumPanel {
                     window_start_secs,
                     Angle::from_degrees(star.ra_deg),
                     Angle::from_degrees(star.dec_deg),
+                    self.active_horizon_profile.as_ref(),
+                    145,
+                ),
+                SelectedObject::Dso(dso) => compute_equatorial_daily_trajectory(
+                    loc,
+                    window_start_secs,
+                    Angle::from_degrees(dso.record.ra_deg),
+                    Angle::from_degrees(dso.record.dec_deg),
                     self.active_horizon_profile.as_ref(),
                     145,
                 ),
@@ -1063,6 +1177,7 @@ impl PlanetariumPanel {
 
     fn on_bevy_frame(&mut self, cx: &mut Context<Self>) {
         let _ = self.ensure_star_index(cx);
+        let _ = self.ensure_dso_index(cx);
         self.latest_view_info = self.bridge.view_info();
         self.sync_status_bar(cx);
         let _ = self.compute_hovered_star(cx);
@@ -1354,11 +1469,13 @@ impl Render for PlanetariumPanel {
             .unwrap_or((None, true));
         let selected_target_id = selected_object.as_ref().map(SelectedObject::id);
 
-        let (stars_visible, solar_system_visible, occlude_ground, occlude_custom_horizon) =
-            self.layer_visibility_flags(cx);
+        let flags = self.layer_visibility_flags(cx);
+        let occlude_ground = flags.occlude_ground;
+        let occlude_custom_horizon = flags.occlude_custom_horizon;
         let selected_layer_visible = match selected_object.as_ref() {
-            Some(SelectedObject::Star(_)) => stars_visible,
-            Some(SelectedObject::SolarSystem(_)) => solar_system_visible,
+            Some(SelectedObject::Star(_)) => flags.stars,
+            Some(SelectedObject::Dso(_)) => flags.dso,
+            Some(SelectedObject::SolarSystem(_)) => flags.solar_system,
             None => false,
         };
 
@@ -1419,6 +1536,21 @@ impl Render for PlanetariumPanel {
                         star.icrs_dir(),
                         StarRenderParams::default().rendered_radius_px(star.mag, fov_y_rad),
                     ),
+                    SelectedObject::Dso(dso) => {
+                        let focal_px = (bh * scale_factor)
+                            / (2.0 * (0.5 * f64::from(fov_y_rad)).tan().max(1e-6));
+                        let semi_major_rad = 0.5
+                            * f64::from(
+                                dso.record
+                                    .major_arcmin
+                                    .filter(|v| v.is_finite() && *v > 0.0)
+                                    .unwrap_or(0.0),
+                            )
+                            * (std::f64::consts::PI / 10_800.0);
+                        let true_a_px = (semi_major_rad * focal_px) as f32;
+                        let min_icon_r = if dso.record.is_messier() { 7.5 } else { 6.0 };
+                        (dso.icrs_dir(), true_a_px.max(min_icon_r))
+                    }
                     SelectedObject::SolarSystem(body) => {
                         let eph = body.ephemeris(obs_ctx.location, obs_ctx.epoch);
                         let px = rendered_solar_system_disc_radius_px(
@@ -1513,6 +1645,14 @@ impl Render for PlanetariumPanel {
                         self.trajectory_is_faded,
                     ))
                 });
+
+        let hovered_id = self
+            .hovered_object
+            .as_ref()
+            .filter(|_| self.hover_preview_visible)
+            .map(HoveredObject::id);
+        let dso_labels_overlay =
+            self.render_dso_labels(flags, proj_size, selected_target_id, hovered_id, scale_factor, cx);
 
         let hovered_overlay = self
             .hovered_object
@@ -1792,6 +1932,7 @@ impl Render for PlanetariumPanel {
                     None => surface.size_full(),
                 }
             }))
+            .child(dso_labels_overlay)
             .when_some(
                 trajectory_overlay,
                 |el,
@@ -2422,7 +2563,121 @@ fn paint_directional_mount_arrow(
     }
 }
 
+#[derive(Clone, Copy)]
+struct LayerVisibilityFlags {
+    stars: bool,
+    dso_opacity: f32,
+    dso: bool,
+    dso_show_messier: bool,
+    dso_show_ngc: bool,
+    solar_system: bool,
+    occlude_ground: bool,
+    occlude_custom_horizon: bool,
+}
+
 impl PlanetariumPanel {
+    fn render_dso_labels(
+        &self,
+        flags: LayerVisibilityFlags,
+        proj_size: Option<(f64, f64)>,
+        selected_id: Option<SelectedObjectId>,
+        hovered_id: Option<SelectedObjectId>,
+        scale_factor: f64,
+        cx: &App,
+    ) -> AnyElement {
+        if !flags.dso {
+            return gpui::Empty.into_any_element();
+        }
+        let (Some((bw, bh)), Some(dso_index)) = (proj_size, self.dso_index.as_ref()) else {
+            return gpui::Empty.into_any_element();
+        };
+        if bw <= 20.0 || bh <= 20.0 {
+            return gpui::Empty.into_any_element();
+        }
+
+        let atmo_strength = cx
+            .try_global::<GlobalSettings>()
+            .map_or(1.0, |g| g.0.read(cx).effective_atmosphere_strength());
+        let sun_alt_deg = celestial::solar::solar_altitude_deg(
+            self.latest_view_info.observer.location,
+            self.latest_view_info.observer.epoch,
+        ) as f32;
+        let fov_y_rad = self.latest_view_info.projection.fov_y.radians() as f32;
+        let dso_params = DsoRenderParams::for_sky(
+            sun_alt_deg,
+            fov_y_rad,
+            atmo_strength,
+            flags.dso_show_messier,
+            flags.dso_show_ngc,
+        );
+        let horizon_occluder = if flags.occlude_custom_horizon {
+            self.active_horizon_profile.as_ref()
+        } else {
+            None
+        };
+
+        let labels = dso_index.visible_labels(
+            &self.latest_view_info,
+            (bw, bh),
+            scale_factor,
+            &dso_params,
+            flags.occlude_ground,
+            horizon_occluder,
+            24,
+        );
+        if labels.is_empty() {
+            return gpui::Empty.into_any_element();
+        }
+
+        let safe_scale = scale_factor.max(0.25);
+        div()
+            .size_full()
+            .absolute()
+            .top_0()
+            .left_0()
+            .children(labels.into_iter().filter_map(|label| {
+                let dso_id = SelectedObjectId::Dso(label.catalog_index);
+                if Some(dso_id) == selected_id || Some(dso_id) == hovered_id {
+                    return None;
+                }
+                let alpha = (label.alpha * flags.dso_opacity).clamp(0.0, 1.0);
+                if alpha <= 0.12 {
+                    return None;
+                }
+                let sx = (label.screen_ndc[0] * 0.5 + 0.5) * bw;
+                let sy = (0.5 - label.screen_ndc[1] * 0.5) * bh;
+                let r_logical = (f64::from(label.rendered_radius_px) / safe_scale).min(48.0);
+                let lx = (sx + r_logical + 5.0) as f32;
+                let ly = (sy - 7.5) as f32;
+
+                let label_color: Hsla = Rgba {
+                    r: label.srgb[0],
+                    g: label.srgb[1],
+                    b: label.srgb[2],
+                    a: (alpha * 0.92).min(0.95),
+                }
+                .into();
+
+                Some(
+                    div()
+                        .id(("dso_label", label.catalog_index as usize))
+                        .absolute()
+                        .left(px(lx))
+                        .top(px(ly))
+                        .px_1()
+                        .py(px(0.5))
+                        .rounded_xs()
+                        .bg(rgb(0x050811).alpha(0.42 * alpha))
+                        .font_buffer(cx)
+                        .text_size(px(10.5))
+                        .text_color(label_color)
+                        .whitespace_nowrap()
+                        .child(label.text),
+                )
+            }))
+            .into_any_element()
+    }
+
     fn follow_mount(&mut self, ra_deg: f64, dec_deg: f64, cx: &mut Context<Self>) {
         self.is_following_mount = true;
         self.bridge
