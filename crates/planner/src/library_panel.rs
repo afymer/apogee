@@ -8,7 +8,10 @@ use gpui::{
 use jiff::Span;
 use jiff::civil::Date;
 use observer::GlobalObserver;
-use ui::{ActiveTheme, Button, ButtonStyle, Color, Divider, Label, LabelSize, prelude::*};
+use ui::{
+    ActiveTheme, Button, ButtonStyle, Color, Divider, IconButton, IconButtonShape, IconName,
+    IconSize, Label, LabelSize, Tooltip, prelude::*,
+};
 use workspace::{
     WorkspaceKind,
     dock::DockPosition,
@@ -191,10 +194,12 @@ impl PlanLibraryPanel {
                     .justify_between()
                     .items_center()
                     .child(
-                        Button::new("pl_prev_night_btn", "<")
+                        IconButton::new("pl_prev_night_btn", IconName::ChevronLeft)
+                            .shape(IconButtonShape::Square)
+                            .icon_size(IconSize::XSmall)
                             .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
                             .disabled(locked)
+                            .tooltip(Tooltip::text("Previous night"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.shift_night_date(-1, cx);
                             })),
@@ -205,10 +210,12 @@ impl PlanLibraryPanel {
                             .color(Color::Default),
                     )
                     .child(
-                        Button::new("pl_next_night_btn", ">")
+                        IconButton::new("pl_next_night_btn", IconName::ChevronRight)
+                            .shape(IconButtonShape::Square)
+                            .icon_size(IconSize::XSmall)
                             .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
                             .disabled(locked)
+                            .tooltip(Tooltip::text("Next night"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.shift_night_date(1, cx);
                             })),
@@ -241,11 +248,6 @@ impl PlanLibraryPanel {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.submit_manual_target(cx);
                     })),
-            )
-            .child(
-                Label::new("Or click Add to Plan in Explore")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
             )
             .into_any_element()
     }
@@ -306,10 +308,12 @@ impl PlanLibraryPanel {
                             )
                             .when(!is_builtin, |el| {
                                 el.child(
-                                    Button::new(("pl_del_tpl", idx), "x")
+                                    IconButton::new(("pl_del_tpl", idx), IconName::Trash)
+                                        .shape(IconButtonShape::Square)
+                                        .icon_size(IconSize::XSmall)
                                         .style(ButtonStyle::Subtle)
-                                        .label_size(LabelSize::XSmall)
                                         .disabled(locked)
+                                        .tooltip(Tooltip::text("Delete template"))
                                         .on_click(cx.listener(move |_, _, _, cx| {
                                             if let Some(plan) = cx
                                                 .try_global::<GlobalNightPlan>()

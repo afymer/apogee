@@ -106,6 +106,12 @@ pub struct PlanModel {
 
 impl PlanModel {
     pub fn new(store: DocumentStore, mut catalog: PlannerCatalog) -> Self {
+        for target in &mut catalog.plan.targets {
+            target.enabled = true;
+            for step in &mut target.steps {
+                step.enabled = true;
+            }
+        }
         Self::resolve_overlaps_in_plan(&mut catalog.plan);
         let selected_target_id = catalog.plan.targets.first().map(|t| t.id.clone());
         let mut selected_target_ids = HashSet::new();
@@ -865,6 +871,93 @@ pub fn format_unix_hm(unix_secs: i64, utc_offset_secs: i32) -> String {
     format!("{:02}:{:02}", dt.hour(), dt.minute())
 }
 
+/// Parses `"HH:MM"` / `"H:MM"` / `"HHMM"` / `"HH"` against the observation night (`night_date`:
+/// `>= 12:00` on `night_date`, `< 12:00` on `night_date + 1d`, or closest match to `reference_unix_secs`).
+pub fn parse_hm_to_night_unix_secs(
+    input: &str,
+    night_date: &str,
+    utc_offset_secs: i32,
+    reference_unix_secs: i64,
+) -> Option<i64> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (hour, minute) = if trimmed.contains(':') {
+        let mut parts = trimmed.split(':');
+        let h_str = parts.next()?.trim();
+        let m_str = parts.next()?.trim();
+        let s_str = parts.next();
+        if parts.next().is_some()
+            || h_str.is_empty()
+            || m_str.is_empty()
+            || !h_str.bytes().all(|b| b.is_ascii_digit())
+            || !m_str.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        if let Some(sec_raw) = s_str {
+            let sec_trim = sec_raw.trim();
+            if sec_trim.is_empty() || !sec_trim.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            if sec_trim.parse::<u32>().ok()? >= 60 {
+                return None;
+            }
+        }
+        (h_str.parse::<u32>().ok()?, m_str.parse::<u32>().ok()?)
+    } else if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        match trimmed.len() {
+            1 | 2 => (trimmed.parse::<u32>().ok()?, 0),
+            4 => (
+                trimmed[..2].parse::<u32>().ok()?,
+                trimmed[2..].parse::<u32>().ok()?,
+            ),
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+
+    if hour >= 24 || minute >= 60 {
+        return None;
+    }
+
+    let offset = Offset::from_seconds(utc_offset_secs).ok()?;
+    let tz = offset.to_time_zone();
+
+    if let Ok(evening_date) = night_date.trim().parse::<jiff::civil::Date>() {
+        let target_date = if hour >= 12 {
+            evening_date
+        } else {
+            evening_date.checked_add(Span::new().days(1)).ok()?
+        };
+        let dt = target_date.at(hour as i8, minute as i8, 0, 0);
+        return dt.to_zoned(tz).ok().map(|z| z.timestamp().as_second());
+    }
+
+    let base_date = Timestamp::from_second(reference_unix_secs)
+        .ok()?
+        .to_zoned(tz.clone())
+        .date();
+    let candidates = [
+        base_date.checked_sub(Span::new().days(1)).ok(),
+        Some(base_date),
+        base_date.checked_add(Span::new().days(1)).ok(),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .filter_map(|d| {
+            d.at(hour as i8, minute as i8, 0, 0)
+                .to_zoned(tz.clone())
+                .ok()
+                .map(|z| z.timestamp().as_second())
+        })
+        .min_by_key(|&ts| (ts - reference_unix_secs).abs())
+}
+
 pub fn format_radec_compact(ra_deg: f64, dec_deg: f64) -> String {
     let ra_hours = ra_deg.rem_euclid(360.0) / 15.0;
     let ra_h = ra_hours.floor() as u32;
@@ -1030,5 +1123,42 @@ mod tests {
             assert_eq!(m.count_targets_near(0.01, 12.0), 1);
             assert_eq!(m.count_targets_near(180.0, 12.0), 0);
         });
+    }
+
+    #[test]
+    fn parse_hm_resolves_evening_and_post_midnight_dates() {
+        let utc_plus_1 = 3600;
+        let night = "2026-11-26";
+
+        let evening_ts =
+            parse_hm_to_night_unix_secs("22:30", night, utc_plus_1, 0).expect("valid evening");
+        assert_eq!(format_unix_hm(evening_ts, utc_plus_1), "22:30");
+
+        let midnight_ts =
+            parse_hm_to_night_unix_secs("00:00", night, utc_plus_1, 0).expect("valid midnight");
+        assert_eq!(format_unix_hm(midnight_ts, utc_plus_1), "00:00");
+        assert_eq!(midnight_ts - evening_ts, 90 * 60);
+
+        let morning_ts =
+            parse_hm_to_night_unix_secs("02:15", night, utc_plus_1, 0).expect("valid morning");
+        assert_eq!(format_unix_hm(morning_ts, utc_plus_1), "02:15");
+        assert_eq!(morning_ts - midnight_ts, (2 * 60 + 15) * 60);
+
+        let compact_hm =
+            parse_hm_to_night_unix_secs("6:25", night, utc_plus_1, 0).expect("compact h:mm");
+        assert_eq!(format_unix_hm(compact_hm, utc_plus_1), "06:25");
+
+        let four_digit =
+            parse_hm_to_night_unix_secs("0625", night, utc_plus_1, 0).expect("4-digit hhmm");
+        assert_eq!(four_digit, compact_hm);
+
+        let hour_only =
+            parse_hm_to_night_unix_secs("21", night, utc_plus_1, 0).expect("hour only");
+        assert_eq!(format_unix_hm(hour_only, utc_plus_1), "21:00");
+
+        assert!(parse_hm_to_night_unix_secs("", night, utc_plus_1, 0).is_none());
+        assert!(parse_hm_to_night_unix_secs("25:00", night, utc_plus_1, 0).is_none());
+        assert!(parse_hm_to_night_unix_secs("12:60", night, utc_plus_1, 0).is_none());
+        assert!(parse_hm_to_night_unix_secs("abc", night, utc_plus_1, 0).is_none());
     }
 }

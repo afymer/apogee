@@ -17,7 +17,7 @@ use jiff::Span;
 use jiff::civil::Date;
 use jiff::tz::Offset;
 use observer::{GlobalObserver, solar_altitude_to_sky_color};
-use ui::{ActiveTheme, Button, ButtonStyle, Color, Label, LabelSize, prelude::*};
+use ui::{ActiveTheme, Button, ButtonStyle, Color, Label, LabelSize, Tooltip, prelude::*};
 
 use crate::state::{
     GlobalNightPlan, format_duration_compact, format_unix_hm, is_session_locked,
@@ -25,7 +25,7 @@ use crate::state::{
 
 const GRAPH_SAMPLES: usize = 97;
 const GRAPH_HEIGHT_PX: f32 = 190.0;
-const BLOCK_TRACK_HEIGHT_PX: f32 = 44.0;
+const BLOCK_TRACK_HEIGHT_PX: f32 = 34.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TimelineWindowMode {
@@ -37,8 +37,8 @@ pub enum TimelineWindowMode {
 impl TimelineWindowMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Night16h => "16h Night",
-            Self::FullDay24h => "24h Day",
+            Self::Night16h => "16h",
+            Self::FullDay24h => "24h",
         }
     }
 
@@ -498,6 +498,17 @@ impl NightTimelineView {
                 .map(|t| t.min_moon_sep_deg)
         });
 
+        let moon_tooltip = match selected_min_sep {
+            Some(sep) => format!(
+                "Moon illumination {:.0}% - Min separation {:.0} deg (click to toggle curve)",
+                moon_illum, sep
+            ),
+            None => format!(
+                "Moon illumination {:.0}% (click to toggle Moon separation curve)",
+                moon_illum
+            ),
+        };
+
         h_flex()
             .w_full()
             .justify_between()
@@ -508,13 +519,13 @@ impl NightTimelineView {
                     .items_center()
                     .gap_2()
                     .child(
-                        Label::new("Night Timeline & Visibility")
+                        Label::new("Night Timeline")
                             .size(LabelSize::Small)
                             .color(Color::Default),
                     )
                     .when(selected_count > 1, |el| {
                         el.child(
-                            Label::new(format!("{selected_count} selected · drag to move together"))
+                            Label::new(format!("{selected_count} selected"))
                                 .size(LabelSize::XSmall)
                                 .color(Color::Accent),
                         )
@@ -523,39 +534,26 @@ impl NightTimelineView {
             .child(
                 h_flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .child(
-                        Label::new(format!("Moon {:.0}%", moon_illum))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .when_some(selected_min_sep, |el, sep| {
-                        el.child(
-                            Label::new(format!("Min Sep {:.0}°", sep))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                    })
-                    .child(
-                        Button::new(
-                            "timeline_moon_sep_btn",
-                            if self.show_moon_sep {
-                                "Moon Sep: On"
+                        Button::new("timeline_moon_sep_btn", format!("Moon {:.0}%", moon_illum))
+                            .style(if self.show_moon_sep {
+                                ButtonStyle::Tinted(ui::TintColor::Accent)
                             } else {
-                                "Moon Sep: Off"
-                            },
-                        )
-                        .style(ButtonStyle::Subtle)
-                        .label_size(LabelSize::XSmall)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_moon_sep = !this.show_moon_sep;
-                            cx.notify();
-                        })),
+                                ButtonStyle::Subtle
+                            })
+                            .label_size(LabelSize::XSmall)
+                            .tooltip(Tooltip::text(moon_tooltip))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_moon_sep = !this.show_moon_sep;
+                                cx.notify();
+                            })),
                     )
                     .child(
                         Button::new("timeline_mode_btn", self.mode.label())
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::XSmall)
+                            .tooltip(Tooltip::text("Toggle 16h night / 24h day timeline window"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.mode = this.mode.toggle();
                                 this.ensure_samples_fresh(cx);
@@ -814,6 +812,8 @@ impl NightTimelineView {
                     };
                     let sampled_for_down = sampled.clone();
                     let bounds_for_down = self.track_bounds.clone();
+                    let show_time = width_px >= 120.0;
+                    let tip = format!("{name}  {start_text} ({dur_text})");
                     div()
                         .id(("timeline_block", idx))
                         .absolute()
@@ -827,10 +827,12 @@ impl NightTimelineView {
                         .border_1()
                         .border_color(border_col)
                         .flex()
-                        .flex_col()
-                        .justify_center()
+                        .items_center()
+                        .justify_between()
+                        .gap_1()
                         .overflow_hidden()
                         .cursor_pointer()
+                        .tooltip(Tooltip::text(tip))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
@@ -889,15 +891,24 @@ impl NightTimelineView {
                             }),
                         )
                         .child(
-                            Label::new(name)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Default),
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(12.0))
+                                .text_color(cx.theme().colors().text)
+                                .child(name),
                         )
-                        .child(
-                            Label::new(format!("{start_text} · {dur_text}"))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        )
+                        .when(show_time, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .font_buffer(cx)
+                                    .text_size(px(11.0))
+                                    .text_color(cx.theme().colors().text_muted)
+                                    .child(start_text),
+                            )
+                        })
                 },
             ))
             .when_some(marquee_rect, |el, (x0, w)| {

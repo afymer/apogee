@@ -8,7 +8,10 @@ use protocol::{
     CameraStatus, ConnectionState, DaemonStatus, NightPlanRunRequest, SequencePhase,
     SequenceStatus, ViewerMessage,
 };
-use ui::{ActiveTheme, Button, ButtonStyle, Color, Divider, Label, LabelSize, prelude::*};
+use ui::{
+    ActiveTheme, Button, ButtonStyle, Color, Divider, Icon, IconName, IconSize, Label, LabelSize,
+    prelude::*,
+};
 use workspace::{
     WorkspaceKind,
     dock::DockPosition,
@@ -69,6 +72,56 @@ impl PlanPolicyPanel {
         self.send_viewer_message(ViewerMessage::StartNightPlan(req), cx);
     }
 
+    fn render_toggle_row(
+        id: &'static str,
+        label: &'static str,
+        active: bool,
+        disabled: bool,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let indicator = div()
+            .size(px(14.0))
+            .rounded_xs()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_1()
+            .border_color(if active {
+                colors.text_accent
+            } else {
+                colors.border
+            })
+            .when(active, |el| {
+                el.bg(colors.text_accent.opacity(0.16))
+                    .child(Icon::new(IconName::Check).size(IconSize::XSmall).color(Color::Accent))
+            });
+
+        h_flex()
+            .id(id)
+            .w_full()
+            .justify_between()
+            .items_center()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .when(!disabled, |el| {
+                el.cursor_pointer()
+                    .hover(|s| s.bg(colors.ghost_element_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+            })
+            .when(disabled, |el| el.opacity(0.55))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(if active { colors.text } else { colors.text_muted })
+                    .child(label),
+            )
+            .child(indicator)
+            .into_any_element()
+    }
+
     fn render_sequence_status_card(&self, seq: &SequenceStatus, cx: &mut Context<Self>) -> AnyElement {
         let phase_color = match seq.phase {
             SequencePhase::Running => Color::Accent,
@@ -103,10 +156,23 @@ impl PlanPolicyPanel {
             .child(
                 h_flex()
                     .justify_between()
+                    .items_center()
+                    .gap_2()
                     .child(
-                        Label::new(format!("{} · {}", seq.target_name, seq.phase.label()))
-                            .size(LabelSize::Small)
-                            .color(phase_color),
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                Label::new(seq.target_name.clone())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Default),
+                            )
+                            .child(
+                                Label::new(seq.phase.label())
+                                    .size(LabelSize::Small)
+                                    .color(phase_color),
+                            ),
                     )
                     .child(
                         Label::new(format!("{}/{}", seq.completed, seq.total))
@@ -249,37 +315,28 @@ impl PlanPolicyPanel {
                     .color(Color::Default),
             )
             .child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        Button::new("pp_run_tonight_btn", format!("Run Tonight ({plan_frames}f)"))
-                            .style(if can_run_plan {
-                                ButtonStyle::Filled
-                            } else {
-                                ButtonStyle::Subtle
-                            })
-                            .disabled(!can_run_plan)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.run_night_plan(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(
-                            "pp_start_now_btn",
-                            if self.start_immediately {
-                                "Start Now: On"
-                            } else {
-                                "Start Now: Off"
-                            },
-                        )
-                        .style(ButtonStyle::Subtle)
-                        .label_size(LabelSize::Small)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.start_immediately = !this.start_immediately;
-                            cx.notify();
-                        })),
-                    ),
+                Button::new("pp_run_tonight_btn", format!("Run Tonight ({plan_frames}f)"))
+                    .style(if can_run_plan {
+                        ButtonStyle::Filled
+                    } else {
+                        ButtonStyle::Subtle
+                    })
+                    .disabled(!can_run_plan)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.run_night_plan(cx);
+                    })),
             )
+            .child(Self::render_toggle_row(
+                "pp_start_now_btn",
+                "Start Immediately",
+                self.start_immediately,
+                false,
+                |this, cx| {
+                    this.start_immediately = !this.start_immediately;
+                    cx.notify();
+                },
+                cx,
+            ))
             .children(
                 seq_status
                     .as_ref()
@@ -294,7 +351,7 @@ impl PlanPolicyPanel {
             .and_then(|g| g.0.read(cx).selected_target().cloned());
 
         v_flex()
-            .gap_1p5()
+            .gap_1()
             .child(
                 Label::new("Selected Target Policy")
                     .size(LabelSize::Small)
@@ -312,19 +369,12 @@ impl PlanPolicyPanel {
                 let tid2 = t.id.clone();
                 let slew = t.slew_to_target;
                 let flip = t.auto_meridian_flip;
-                el.child(
-                    Button::new(
-                        "pp_target_slew_btn",
-                        if slew {
-                            "Slew to Target: On"
-                        } else {
-                            "Slew to Target: Off"
-                        },
-                    )
-                    .style(ButtonStyle::Subtle)
-                    .label_size(LabelSize::Small)
-                    .disabled(locked)
-                    .on_click(cx.listener(move |_, _, _, cx| {
+                el.child(Self::render_toggle_row(
+                    "pp_target_slew_btn",
+                    "Slew to Target",
+                    slew,
+                    locked,
+                    move |_, cx| {
                         if let Some(plan) =
                             cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
                         {
@@ -333,21 +383,15 @@ impl PlanPolicyPanel {
                                 m.set_target_policy(&tid, !slew, flip, cx);
                             });
                         }
-                    })),
-                )
-                .child(
-                    Button::new(
-                        "pp_target_flip_btn",
-                        if flip {
-                            "Auto Meridian Flip: On"
-                        } else {
-                            "Auto Meridian Flip: Off"
-                        },
-                    )
-                    .style(ButtonStyle::Subtle)
-                    .label_size(LabelSize::Small)
-                    .disabled(locked)
-                    .on_click(cx.listener(move |_, _, _, cx| {
+                    },
+                    cx,
+                ))
+                .child(Self::render_toggle_row(
+                    "pp_target_flip_btn",
+                    "Auto Meridian Flip",
+                    flip,
+                    locked,
+                    move |_, cx| {
                         if let Some(plan) =
                             cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
                         {
@@ -356,8 +400,9 @@ impl PlanPolicyPanel {
                                 m.set_target_policy(&tid, slew, !flip, cx);
                             });
                         }
-                    })),
-                )
+                    },
+                    cx,
+                ))
             })
             .into_any_element()
     }
@@ -369,45 +414,32 @@ impl PlanPolicyPanel {
             .unwrap_or_default();
 
         v_flex()
-            .gap_1p5()
+            .gap_1()
             .child(
                 Label::new("Night Automation Policy")
                     .size(LabelSize::Small)
                     .color(Color::Default),
             )
-            .child(
-                Button::new(
-                    "pp_park_end_btn",
-                    if policy.park_at_end {
-                        "Park Mount at End: On"
-                    } else {
-                        "Park Mount at End: Off"
-                    },
-                )
-                .style(ButtonStyle::Subtle)
-                .label_size(LabelSize::Small)
-                .disabled(locked)
-                .on_click(cx.listener(|_, _, _, cx| {
+            .child(Self::render_toggle_row(
+                "pp_park_end_btn",
+                "Park Mount at End",
+                policy.park_at_end,
+                locked,
+                |_, cx| {
                     if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
                         plan.update(cx, |m, cx| {
                             m.update_policy(|p| p.park_at_end = !p.park_at_end, cx);
                         });
                     }
-                })),
-            )
-            .child(
-                Button::new(
-                    "pp_def_slew_btn",
-                    if policy.default_slew_to_target {
-                        "Default Slew: On"
-                    } else {
-                        "Default Slew: Off"
-                    },
-                )
-                .style(ButtonStyle::Subtle)
-                .label_size(LabelSize::Small)
-                .disabled(locked)
-                .on_click(cx.listener(|_, _, _, cx| {
+                },
+                cx,
+            ))
+            .child(Self::render_toggle_row(
+                "pp_def_slew_btn",
+                "Default Slew to Target",
+                policy.default_slew_to_target,
+                locked,
+                |_, cx| {
                     if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
                         plan.update(cx, |m, cx| {
                             m.update_policy(
@@ -416,21 +448,15 @@ impl PlanPolicyPanel {
                             );
                         });
                     }
-                })),
-            )
-            .child(
-                Button::new(
-                    "pp_def_flip_btn",
-                    if policy.default_auto_meridian_flip {
-                        "Default Auto Flip: On"
-                    } else {
-                        "Default Auto Flip: Off"
-                    },
-                )
-                .style(ButtonStyle::Subtle)
-                .label_size(LabelSize::Small)
-                .disabled(locked)
-                .on_click(cx.listener(|_, _, _, cx| {
+                },
+                cx,
+            ))
+            .child(Self::render_toggle_row(
+                "pp_def_flip_btn",
+                "Default Auto Flip",
+                policy.default_auto_meridian_flip,
+                locked,
+                |_, cx| {
                     if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
                         plan.update(cx, |m, cx| {
                             m.update_policy(
@@ -439,8 +465,9 @@ impl PlanPolicyPanel {
                             );
                         });
                     }
-                })),
-            )
+                },
+                cx,
+            ))
             .into_any_element()
     }
 }
@@ -461,12 +488,6 @@ impl Render for PlanPolicyPanel {
             .child(self.render_target_policy_section(locked, cx))
             .child(Divider::horizontal())
             .child(self.render_night_policy_section(locked, cx))
-            .child(Divider::horizontal())
-            .child(
-                Label::new("Future rig rules (filter wheel, focuser, cooler, dithering) will live here.")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
     }
 }
 
