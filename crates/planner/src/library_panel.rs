@@ -1,5 +1,5 @@
 use celestial::coords::{parse_dec_degrees, parse_ra_degrees};
-use client::GlobalDaemonState;
+use client::{DaemonCommandSender, GlobalDaemonState};
 use components::TextField;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Pixels,
@@ -8,9 +8,13 @@ use gpui::{
 use jiff::Span;
 use jiff::civil::Date;
 use observer::GlobalObserver;
+use protocol::{
+    CameraStatus, ConnectionState, DaemonStatus, NightPlanRunRequest, SequencePhase,
+    SequenceStatus, ViewerMessage,
+};
 use ui::{
     ActiveTheme, Button, ButtonStyle, Color, Divider, IconButton, IconButtonShape, IconName,
-    IconSize, Label, LabelSize, Tooltip, prelude::*,
+    IconSize, Label, LabelSize, ToggleState, Tooltip, prelude::*,
 };
 use workspace::{
     WorkspaceKind,
@@ -18,14 +22,17 @@ use workspace::{
     panel::{Panel, PanelEvent},
 };
 
-use crate::state::{GlobalNightPlan, is_session_locked, observer_evening_date_and_start};
+use crate::state::{
+    GlobalNightPlan, format_unix_hm, is_session_locked, observer_evening_date_and_start,
+};
 
+/// Left dock panel holding session-wide controls: schedule date, execution, night policies, and target entry.
 pub struct PlanLibraryPanel {
     focus_handle: FocusHandle,
+    start_immediately: bool,
     name_input: Entity<TextField>,
     ra_input: Entity<TextField>,
     dec_input: Entity<TextField>,
-    template_name_input: Entity<TextField>,
     add_error: Option<String>,
 }
 
@@ -58,18 +65,39 @@ impl PlanLibraryPanel {
                     .placeholder("+41d 16m 09s")
                     .monospace(true)
             });
-            let template_name_input =
-                cx.new(|cx| TextField::new("", window, cx).placeholder("Template name"));
 
             Self {
                 focus_handle: cx.focus_handle(),
+                start_immediately: false,
                 name_input,
                 ra_input,
                 dec_input,
-                template_name_input,
                 add_error: None,
             }
         })
+    }
+
+    fn send_viewer_message(&self, msg: ViewerMessage, cx: &App) {
+        if let Some(sender) = cx.try_global::<DaemonCommandSender>()
+            && sender.0.try_send(msg).is_err()
+        {
+            tracing::error!("Failed to send command to daemon");
+        }
+    }
+
+    fn run_night_plan(&self, cx: &mut Context<Self>) {
+        let Some(plan) = cx
+            .try_global::<GlobalNightPlan>()
+            .map(|g| g.0.read(cx).plan().clone())
+        else {
+            return;
+        };
+        let req = NightPlanRunRequest {
+            run_id: client::next_frame_id(),
+            plan,
+            start_immediately: self.start_immediately,
+        };
+        self.send_viewer_message(ViewerMessage::StartNightPlan(req), cx);
     }
 
     fn shift_night_date(&self, delta_days: i64, cx: &mut Context<Self>) {
@@ -224,6 +252,294 @@ impl PlanLibraryPanel {
             .into_any_element()
     }
 
+    fn render_sequence_status_card(&self, seq: &SequenceStatus, cx: &mut Context<Self>) -> AnyElement {
+        let phase_color = match seq.phase {
+            SequencePhase::Running => Color::Accent,
+            SequencePhase::WaitingForStart
+            | SequencePhase::SlewingToTarget
+            | SequencePhase::Paused
+            | SequencePhase::WaitingForMeridianFlip
+            | SequencePhase::Parking => Color::Warning,
+            SequencePhase::Completed => Color::Success,
+            SequencePhase::Aborted | SequencePhase::Failed => Color::Error,
+            SequencePhase::Idle => Color::Muted,
+        };
+        let frac = if seq.total > 0 {
+            (seq.completed as f32 / seq.total as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let is_active = seq.phase.is_active();
+        let is_paused = seq.phase == SequencePhase::Paused;
+        let has_plan_id = seq.plan_id.is_some();
+        let utc_offset = cx
+            .try_global::<GlobalObserver>()
+            .map_or(0, |g| g.0.read(cx).effective_utc_offset_secs());
+
+        v_flex()
+            .gap_1p5()
+            .p_2()
+            .rounded_sm()
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                Label::new(seq.target_name.clone())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Default),
+                            )
+                            .child(
+                                Label::new(seq.phase.label())
+                                    .size(LabelSize::Small)
+                                    .color(phase_color),
+                            ),
+                    )
+                    .child(
+                        Label::new(format!("{}/{}", seq.completed, seq.total))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+            .when(seq.total_targets > 0 && has_plan_id, |el| {
+                el.child(
+                    Label::new(format!(
+                        "Target {}/{}",
+                        seq.current_target_index, seq.total_targets
+                    ))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+            })
+            .when_some(seq.waiting_until_unix_secs, |el, ts| {
+                el.child(
+                    Label::new(format!("Waiting until {}", format_unix_hm(ts, utc_offset)))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                )
+            })
+            .child(
+                div()
+                    .w_full()
+                    .h(px(6.0))
+                    .rounded_sm()
+                    .bg(cx.theme().colors().surface_background)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(frac))
+                            .rounded_sm()
+                            .bg(cx.theme().colors().border_focused),
+                    ),
+            )
+            .when(seq.total_steps > 0, |el| {
+                let ft = seq
+                    .current_frame_type
+                    .map(|f| format!(" {}", f.label()))
+                    .unwrap_or_default();
+                el.child(
+                    Label::new(format!(
+                        "Step {}/{}{}: {}/{}",
+                        seq.current_step,
+                        seq.total_steps,
+                        ft,
+                        seq.current_step_completed,
+                        seq.current_step_total
+                    ))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+            })
+            .children(seq.message.clone().map(|m| {
+                Label::new(m)
+                    .size(LabelSize::XSmall)
+                    .color(if seq.phase == SequencePhase::Failed {
+                        Color::Error
+                    } else {
+                        Color::Muted
+                    })
+            }))
+            .when(is_active, |el| {
+                el.child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new(
+                                "pp_pause_resume_btn",
+                                if is_paused { "Resume" } else { "Pause" },
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if is_paused {
+                                    if has_plan_id
+                                        && let Some(plan) = cx
+                                            .try_global::<GlobalNightPlan>()
+                                            .map(|g| g.0.read(cx).plan().clone())
+                                    {
+                                        this.send_viewer_message(
+                                            ViewerMessage::UpdateNightPlan(plan),
+                                            cx,
+                                        );
+                                    }
+                                    this.send_viewer_message(ViewerMessage::ResumeSequence, cx);
+                                } else {
+                                    this.send_viewer_message(ViewerMessage::PauseSequence, cx);
+                                }
+                            })),
+                        )
+                        .child(
+                            Button::new("pp_abort_btn", "Abort")
+                                .style(ButtonStyle::Subtle)
+                                .label_size(LabelSize::Small)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.send_viewer_message(ViewerMessage::Abort, cx);
+                                })),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_run_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (hw_ready, is_capturing, seq_status) = cx
+            .try_global::<GlobalDaemonState>()
+            .map(|g| {
+                let m = g.0.read(cx);
+                let ready = m.state.connection == ConnectionState::Connected
+                    && m.state.camera == CameraStatus::Ready;
+                let capturing = m.state.daemon == DaemonStatus::Capturing;
+                (ready, capturing, m.state.sequence.clone())
+            })
+            .unwrap_or((false, false, None));
+
+        let plan_frames: u32 = cx
+            .try_global::<GlobalNightPlan>()
+            .map(|g| {
+                g.0.read(cx)
+                    .plan()
+                    .targets
+                    .iter()
+                    .filter(|t| t.enabled)
+                    .map(|t| t.total_frames())
+                    .sum()
+            })
+            .unwrap_or(0);
+
+        let can_run_plan = hw_ready && !is_capturing && plan_frames > 0;
+        let panel_entity = cx.entity();
+
+        v_flex()
+            .gap_2()
+            .child(
+                Label::new("Session Execution")
+                    .size(LabelSize::Small)
+                    .color(Color::Default),
+            )
+            .child(
+                Button::new("pp_run_tonight_btn", format!("Run Tonight ({plan_frames}f)"))
+                    .style(if can_run_plan {
+                        ButtonStyle::Filled
+                    } else {
+                        ButtonStyle::Subtle
+                    })
+                    .disabled(!can_run_plan)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.run_night_plan(cx);
+                    })),
+            )
+            .child(crate::render_switch_row(
+                "pp_start_now_btn",
+                "Start Immediately",
+                self.start_immediately,
+                false,
+                move |state, _, cx| {
+                    let next = *state == ToggleState::Selected;
+                    panel_entity.update(cx, |this, cx| {
+                        this.start_immediately = next;
+                        cx.notify();
+                    });
+                },
+                cx,
+            ))
+            .children(
+                seq_status
+                    .as_ref()
+                    .map(|seq| self.render_sequence_status_card(seq, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_night_policy_section(&self, locked: bool, cx: &App) -> AnyElement {
+        let policy = cx
+            .try_global::<GlobalNightPlan>()
+            .map(|g| g.0.read(cx).plan().policy)
+            .unwrap_or_default();
+
+        v_flex()
+            .gap_1()
+            .child(
+                Label::new("Night Automation")
+                    .size(LabelSize::Small)
+                    .color(Color::Default),
+            )
+            .child(crate::render_switch_row(
+                "pp_park_end_btn",
+                "Park Mount at End",
+                policy.park_at_end,
+                locked,
+                |state, _, cx| {
+                    let next = *state == ToggleState::Selected;
+                    if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                        plan.update(cx, |m, cx| {
+                            m.update_policy(|p| p.park_at_end = next, cx);
+                        });
+                    }
+                },
+                cx,
+            ))
+            .child(crate::render_switch_row(
+                "pp_def_slew_btn",
+                "Default Slew to Target",
+                policy.default_slew_to_target,
+                locked,
+                |state, _, cx| {
+                    let next = *state == ToggleState::Selected;
+                    if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                        plan.update(cx, |m, cx| {
+                            m.update_policy(|p| p.default_slew_to_target = next, cx);
+                        });
+                    }
+                },
+                cx,
+            ))
+            .child(crate::render_switch_row(
+                "pp_def_flip_btn",
+                "Default Auto Flip",
+                policy.default_auto_meridian_flip,
+                locked,
+                |state, _, cx| {
+                    let next = *state == ToggleState::Selected;
+                    if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                        plan.update(cx, |m, cx| {
+                            m.update_policy(|p| p.default_auto_meridian_flip = next, cx);
+                        });
+                    }
+                },
+                cx,
+            ))
+            .into_any_element()
+    }
+
     fn render_add_target_section(&self, locked: bool, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .gap_1p5()
@@ -251,115 +567,6 @@ impl PlanLibraryPanel {
             )
             .into_any_element()
     }
-
-    fn render_templates_section(&self, locked: bool, cx: &mut Context<Self>) -> AnyElement {
-        let (templates, selected_id, selected_count) = cx
-            .try_global::<GlobalNightPlan>()
-            .map(|g| {
-                let m = g.0.read(cx);
-                (
-                    m.all_templates(),
-                    m.selected_target_id().map(str::to_string),
-                    m.selected_target_ids().len(),
-                )
-            })
-            .unwrap_or_default();
-
-        let has_selected = selected_id.is_some() || selected_count > 0;
-
-        v_flex()
-            .gap_1p5()
-            .child(
-                Label::new("Sequence Templates")
-                    .size(LabelSize::Small)
-                    .color(Color::Default),
-            )
-            .children(templates.into_iter().enumerate().map(|(idx, tpl)| {
-                let tpl_id = tpl.id.clone();
-                let tpl_del_id = tpl.id.clone();
-                let is_builtin = tpl.builtin;
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        Label::new(tpl.name)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new(("pl_apply_tpl", idx), "Apply")
-                                    .style(ButtonStyle::Subtle)
-                                    .label_size(LabelSize::XSmall)
-                                    .disabled(locked || !has_selected)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        if let Some(plan) =
-                                            cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                                        {
-                                            let tid = tpl_id.clone();
-                                            plan.update(cx, |m, cx| {
-                                                m.apply_template_to_selected(&tid, cx);
-                                            });
-                                        }
-                                    })),
-                            )
-                            .when(!is_builtin, |el| {
-                                el.child(
-                                    IconButton::new(("pl_del_tpl", idx), IconName::Trash)
-                                        .shape(IconButtonShape::Square)
-                                        .icon_size(IconSize::XSmall)
-                                        .style(ButtonStyle::Subtle)
-                                        .disabled(locked)
-                                        .tooltip(Tooltip::text("Delete template"))
-                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                            if let Some(plan) = cx
-                                                .try_global::<GlobalNightPlan>()
-                                                .map(|g| g.0.clone())
-                                            {
-                                                let tid = tpl_del_id.clone();
-                                                plan.update(cx, |m, cx| {
-                                                    m.delete_user_template(&tid, cx);
-                                                });
-                                            }
-                                        })),
-                                )
-                            }),
-                    )
-            }))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(div().flex_1().child(self.template_name_input.clone()))
-                    .child(
-                        Button::new("pl_save_tpl_btn", "Save")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .disabled(locked || selected_id.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let name = this.template_name_input.read(cx).text().to_string();
-                                if let Some(plan) =
-                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                                {
-                                    let sid = plan
-                                        .read(cx)
-                                        .selected_target_id()
-                                        .map(str::to_string);
-                                    if let Some(target_id) = sid {
-                                        plan.update(cx, |m, cx| {
-                                            m.save_template_from_target(&target_id, name, cx);
-                                        });
-                                        this.template_name_input
-                                            .update(cx, |f, cx| f.set_text("", cx));
-                                    }
-                                }
-                            })),
-                    ),
-            )
-            .into_any_element()
-    }
 }
 
 impl Render for PlanLibraryPanel {
@@ -379,9 +586,11 @@ impl Render for PlanLibraryPanel {
             .overflow_y_scroll()
             .child(self.render_date_header(&night_date, locked, cx))
             .child(Divider::horizontal())
-            .child(self.render_add_target_section(locked, cx))
+            .child(self.render_run_section(cx))
             .child(Divider::horizontal())
-            .child(self.render_templates_section(locked, cx))
+            .child(self.render_night_policy_section(locked, cx))
+            .child(Divider::horizontal())
+            .child(self.render_add_target_section(locked, cx))
     }
 }
 
@@ -397,7 +606,7 @@ impl Panel for PlanLibraryPanel {
     }
 
     fn title(&self, _cx: &App) -> gpui::SharedString {
-        "Plan".into()
+        "Session".into()
     }
 
     fn position(&self, _cx: &App) -> DockPosition {

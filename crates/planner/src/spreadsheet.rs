@@ -523,6 +523,7 @@ impl SequenceSpreadsheetView {
                 .when(is_selected, |el| el.bg(colors.ghost_element_selected))
                 .hover(|s| s.bg(colors.element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
                     this.open_dropdown = None;
                     if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
                         let t_ref = tid.clone();
@@ -1104,7 +1105,6 @@ impl SequenceSpreadsheetView {
             });
 
         let tid_hover = target.id.clone();
-        let tid_sel = target.id.clone();
         let tid_add = target.id.clone();
         let tid_menu = target.id.clone();
         let tid_del = target.id.clone();
@@ -1139,20 +1139,6 @@ impl SequenceSpreadsheetView {
                 if this.hovered_target_id != next {
                     this.hovered_target_id = next;
                     cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |_, ev: &gpui::ClickEvent, _, cx| {
-                if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
-                    let tid = tid_sel.clone();
-                    let mods = ev.modifiers();
-                    let is_mod = mods.control || mods.platform || mods.shift;
-                    plan.update(cx, |m, cx| {
-                        if is_mod {
-                            m.toggle_target_selection(&tid, cx);
-                        } else {
-                            m.select_target(Some(tid), cx);
-                        }
-                    });
                 }
             }))
             .child(div().w(px(STRIPE_W)).h_full().flex_none().bg(accent_dot))
@@ -1336,7 +1322,6 @@ impl SequenceSpreadsheetView {
         let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
         let stripe_col = hsla(hue, 0.72, 0.54, 0.75);
         let tid_fov = target.id.clone();
-        let slew = target.slew_to_target;
         let flip = target.auto_meridian_flip;
         let radec = format_radec_compact(target.ra_deg, target.dec_deg);
         let progress = Self::slew_progress_label(target, seq_status);
@@ -1364,7 +1349,7 @@ impl SequenceSpreadsheetView {
                     .flex_none()
                     .px_2()
                     .text_size(px(12.0))
-                    .text_color(if slew { colors.text } else { colors.text_muted })
+                    .text_color(colors.text)
                     .child("Slew"),
             )
             .child(
@@ -1439,7 +1424,7 @@ impl SequenceSpreadsheetView {
                     .font_buffer(cx)
                     .text_size(px(12.0))
                     .text_color(colors.text_muted)
-                    .child(if slew { "Auto" } else { "Skip" }),
+                    .child("Auto"),
             )
             .child(
                 grid_cell(grid_border)
@@ -1770,6 +1755,7 @@ impl SequenceSpreadsheetView {
                                 .style(ButtonStyle::Subtle)
                                 .tooltip(Tooltip::text("Duplicate stage"))
                                 .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
                                     if let Some(plan) =
                                         cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
                                     {
@@ -1787,6 +1773,7 @@ impl SequenceSpreadsheetView {
                                 .style(ButtonStyle::Subtle)
                                 .tooltip(Tooltip::text("Remove stage"))
                                 .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
                                     if let Some(plan) =
                                         cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
                                     {
@@ -1811,9 +1798,28 @@ impl SequenceSpreadsheetView {
         rctx: &SpreadsheetRenderCtx,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
+        let outline_col = hsla(hue, 0.85, 0.62, 0.90);
+        let tid_sel = target.id.clone();
+
         v_flex()
             .id(("sp_grp", target_idx))
+            .relative()
             .w_full()
+            .on_click(cx.listener(move |_, ev: &gpui::ClickEvent, _, cx| {
+                if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                    let tid = tid_sel.clone();
+                    let mods = ev.modifiers();
+                    let is_mod = mods.control || mods.platform || mods.shift;
+                    plan.update(cx, |m, cx| {
+                        if is_mod {
+                            m.toggle_target_selection(&tid, cx);
+                        } else {
+                            m.select_target(Some(tid), cx);
+                        }
+                    });
+                }
+            }))
             .drag_over::<DraggedTargetGroup>(move |style, dragged: &DraggedTargetGroup, _, cx| {
                 if dragged.from_idx == target_idx {
                     return style;
@@ -1844,10 +1850,21 @@ impl SequenceSpreadsheetView {
                 rctx,
                 cx,
             ))
-            .child(self.render_slew_row(target_idx, target, rctx.seq_status.as_ref(), cx))
+            .when(target.slew_to_target, |el| {
+                el.child(self.render_slew_row(target_idx, target, rctx.seq_status.as_ref(), cx))
+            })
             .children(group.rows.iter().enumerate().map(|(step_idx, row)| {
                 self.render_step_row(target_idx, target, step_idx, row, rctx, cx)
             }))
+            .when(is_selected, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_2()
+                        .border_color(outline_col),
+                )
+            })
             .into_any_element()
     }
 }
@@ -1930,7 +1947,7 @@ impl Render for SequenceSpreadsheetView {
                         .border_b_1()
                         .border_color(grid_border)
                         .child(
-                            Label::new("Session running - Pause in Policy panel to edit plan")
+                            Label::new("Session running - Pause in Session panel to edit plan")
                                 .size(LabelSize::XSmall)
                                 .color(Color::Warning),
                         ),

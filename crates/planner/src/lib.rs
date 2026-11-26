@@ -15,9 +15,41 @@ pub use state::{
 };
 pub use timeline::{NightTimelineView, TimelineWindowMode};
 
-use gpui::{App, AppContext};
+use gpui::{AnyElement, App, AppContext, Window, div, prelude::*, px};
 use persistence::{DocumentStore, PlannerCatalog};
+use ui::{ActiveTheme, Switch, SwitchColor, ToggleState, h_flex};
 use workspace::workbench::Workbench;
+
+pub(crate) fn render_switch_row(
+    id: &'static str,
+    label: &'static str,
+    checked: bool,
+    disabled: bool,
+    on_click: impl Fn(&ToggleState, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let colors = cx.theme().colors();
+    h_flex()
+        .w_full()
+        .justify_between()
+        .items_center()
+        .gap_2()
+        .py_0p5()
+        .when(disabled, |el| el.opacity(0.55))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(if checked { colors.text } else { colors.text_muted })
+                .child(label),
+        )
+        .child(
+            Switch::new(id, ToggleState::from(checked))
+                .color(SwitchColor::Accent)
+                .disabled(disabled)
+                .on_click(on_click),
+        )
+        .into_any_element()
+}
 
 pub fn init(cx: &mut App) {
     init_with_store(DocumentStore::open_default(), cx);
@@ -32,7 +64,7 @@ pub fn init_with_store(store: DocumentStore, cx: &mut App) {
         if let Some(window) = window {
             let library_panel = PlanLibraryPanel::build(window, cx);
             let center_panel = PlanCenterPanel::build(cx);
-            let policy_panel = PlanPolicyPanel::build(cx);
+            let policy_panel = PlanPolicyPanel::build(window, cx);
 
             cx.observe(&library_panel, |_this, _p, cx| cx.notify())
                 .detach();
