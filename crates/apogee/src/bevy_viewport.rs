@@ -232,6 +232,7 @@ pub struct PlanetariumPanel {
     last_synced_solar_system_opacity: Option<f32>,
     last_synced_altaz_grid_opacity: Option<f32>,
     last_synced_equatorial_grid_opacity: Option<f32>,
+    last_synced_trajectories_opacity: Option<f32>,
     last_synced_horizon_opacity: Option<f32>,
     last_synced_horizon_show_line: Option<bool>,
     last_synced_horizon_key: Option<(String, u64)>,
@@ -369,6 +370,7 @@ impl PlanetariumPanel {
                 initial_solar_system_opacity,
                 initial_altaz_grid_opacity,
                 initial_equatorial_grid_opacity,
+                initial_trajectories_opacity,
             ) = if let Some(entity) = settings_entity.as_ref() {
                 let model = entity.read(cx);
                 let show_grid = model.show_hips_grid();
@@ -384,6 +386,7 @@ impl PlanetariumPanel {
                 let solar_system = model.effective_solar_system_opacity();
                 let altaz_grid = model.effective_altaz_grid_opacity();
                 let eq_grid = model.effective_equatorial_grid_opacity();
+                let trajectories = model.effective_trajectories_opacity();
                 bridge.set_hips_grid_visible(show_grid);
                 bridge.set_atmosphere_strength(atmo);
                 bridge.set_ground_opacity(ground);
@@ -397,6 +400,7 @@ impl PlanetariumPanel {
                 bridge.set_solar_system_opacity(solar_system);
                 bridge.set_altaz_grid_opacity(altaz_grid);
                 bridge.set_equatorial_grid_opacity(eq_grid);
+                bridge.set_trajectory_opacity(trajectories);
                 (
                     Some(show_grid),
                     Some(atmo),
@@ -411,10 +415,12 @@ impl PlanetariumPanel {
                     Some(solar_system),
                     Some(altaz_grid),
                     Some(eq_grid),
+                    Some(trajectories),
                 )
             } else {
                 (
                     None, None, None, None, None, None, None, None, None, None, None, None, None,
+                    None,
                 )
             };
 
@@ -541,6 +547,14 @@ impl PlanetariumPanel {
                     {
                         this.last_synced_equatorial_grid_opacity = Some(next_eq_grid);
                         this.bridge.set_equatorial_grid_opacity(next_eq_grid);
+                    }
+                    let next_trajectories = model_ref.effective_trajectories_opacity();
+                    if this
+                        .last_synced_trajectories_opacity
+                        .map_or(true, |prev| (prev - next_trajectories).abs() > 1e-5)
+                    {
+                        this.last_synced_trajectories_opacity = Some(next_trajectories);
+                        this.bridge.set_trajectory_opacity(next_trajectories);
                     }
                     if let Some(layer) = this.active_opacity_layer {
                         let stored = layer.stored_opacity(model_ref);
@@ -674,6 +688,7 @@ impl PlanetariumPanel {
                 last_synced_solar_system_opacity: initial_solar_system_opacity,
                 last_synced_altaz_grid_opacity: initial_altaz_grid_opacity,
                 last_synced_equatorial_grid_opacity: initial_equatorial_grid_opacity,
+                last_synced_trajectories_opacity: initial_trajectories_opacity,
                 last_synced_horizon_opacity: initial_horizon_opacity,
                 last_synced_horizon_show_line: initial_horizon_show_line,
                 last_synced_horizon_key: None,
@@ -866,6 +881,8 @@ impl PlanetariumPanel {
                     dso_show_messier: show_messier,
                     dso_show_ngc: show_ngc,
                     solar_system: m.effective_solar_system_opacity() > 1e-4,
+                    trajectories_opacity: m.effective_trajectories_opacity(),
+                    trajectories: m.effective_trajectories_opacity() > 1e-4,
                     occlude_ground: m.effective_ground_opacity() >= 0.95,
                     occlude_custom_horizon: m.effective_horizon_opacity() >= 0.95,
                 }
@@ -877,6 +894,8 @@ impl PlanetariumPanel {
                 dso_show_messier: true,
                 dso_show_ngc: true,
                 solar_system: true,
+                trajectories_opacity: 1.0,
+                trajectories: true,
                 occlude_ground: true,
                 occlude_custom_horizon: true,
             })
@@ -1479,7 +1498,8 @@ impl Render for PlanetariumPanel {
             None => false,
         };
 
-        let trajectory_snapshot = if selected_layer_visible && show_trajectory {
+        let trajectory_active = selected_object.is_some() && show_trajectory;
+        let trajectory_snapshot = if trajectory_active {
             let traj = self.ensure_trajectory_fresh(selected_object.as_ref(), cx);
             if let (Some(key), Some(traj_arc), Some(selected)) = (
                 self.trajectory_cache_key.as_ref(),
@@ -1513,7 +1533,7 @@ impl Render for PlanetariumPanel {
                     }));
                 }
             }
-            traj
+            traj.filter(|_| flags.trajectories)
         } else {
             if self.last_synced_trajectory.take().is_some() {
                 self.bridge.set_trajectory(None);
@@ -1633,17 +1653,18 @@ impl Render for PlanetariumPanel {
                         event_badges.push((*event, sx, sy));
                     }
 
-                    Some((
+                    Some(TrajectoryOverlay {
                         srgb,
                         trajectory,
                         view_info,
-                        (bw, bh),
+                        proj_dims: (bw, bh),
                         occlude_ground,
                         event_badges,
-                        self.trajectory_start_local_hour,
-                        self.trajectory_duration_hours,
-                        self.trajectory_is_faded,
-                    ))
+                        start_local_hour: self.trajectory_start_local_hour,
+                        duration_hours: self.trajectory_duration_hours,
+                        is_faded: self.trajectory_is_faded,
+                        opacity: flags.trajectories_opacity,
+                    })
                 });
 
         let hovered_id = self
@@ -1782,9 +1803,9 @@ impl Render for PlanetariumPanel {
             pill_style,
             cx,
         );
-        let grid_pill = self.render_layer_pill(
-            "grid_quick_toggles",
-            &QuickLayer::GRID_LAYERS,
+        let overlay_pill = self.render_layer_pill(
+            "overlay_quick_toggles",
+            &QuickLayer::OVERLAY_LAYERS,
             pill_style,
             cx,
         );
@@ -1933,10 +1954,8 @@ impl Render for PlanetariumPanel {
                 }
             }))
             .child(dso_labels_overlay)
-            .when_some(
-                trajectory_overlay,
-                |el,
-                 (
+            .when_some(trajectory_overlay, |el, overlay| {
+                let TrajectoryOverlay {
                     srgb,
                     trajectory,
                     view_info,
@@ -1946,141 +1965,140 @@ impl Render for PlanetariumPanel {
                     start_local_hour,
                     duration_hours,
                     is_faded,
-                )| {
-                    let obj_rgb = Rgba {
-                        r: srgb[0],
-                        g: srgb[1],
-                        b: srgb[2],
-                        a: 1.0,
-                    };
-                    let obj_color: Hsla = obj_rgb.into();
-                    let badges_for_canvas = event_badges.clone();
-                    let (bw, bh) = proj_dims;
+                    opacity,
+                } = overlay;
+                let obj_rgb = Rgba {
+                    r: srgb[0],
+                    g: srgb[1],
+                    b: srgb[2],
+                    a: 1.0,
+                };
+                let obj_color: Hsla = obj_rgb.into();
+                let badges_for_canvas = event_badges.clone();
+                let (bw, bh) = proj_dims;
 
-                    el.child(
-                        gpui::canvas(
-                            |_bounds, _window, _cx| {},
-                            move |bounds, (), window, _cx| {
-                                let proj_bounds = Bounds::new(
-                                    bounds.origin,
-                                    gpui::size(px(bw as f32), px(bh as f32)),
-                                );
-                                paint_planetarium_trajectory(
-                                    proj_bounds,
-                                    &trajectory,
-                                    &view_info,
-                                    &badges_for_canvas,
-                                    obj_rgb,
-                                    occlude_ground,
-                                    start_local_hour,
-                                    duration_hours,
-                                    is_faded,
-                                    window,
-                                );
-                            },
-                        )
-                        .size_full()
-                        .absolute()
-                        .top_0()
-                        .left_0(),
+                el.child(
+                    gpui::canvas(
+                        |_bounds, _window, _cx| {},
+                        move |bounds, (), window, _cx| {
+                            let proj_bounds = Bounds::new(
+                                bounds.origin,
+                                gpui::size(px(bw as f32), px(bh as f32)),
+                            );
+                            paint_planetarium_trajectory(
+                                proj_bounds,
+                                &trajectory,
+                                &view_info,
+                                &badges_for_canvas,
+                                obj_rgb,
+                                occlude_ground,
+                                start_local_hour,
+                                duration_hours,
+                                is_faded,
+                                opacity,
+                                window,
+                            );
+                        },
                     )
-                    .children(
-                        event_badges
-                            .into_iter()
-                            .enumerate()
-                            .map(|(idx, (event, sx, sy))| {
-                                let display_hour = (start_local_hour + event.hour).rem_euclid(24.0);
-                                let (icon_glyph, kind_label, detail_text) = match event.kind {
-                                    TrajectoryPointKind::Transit => (
-                                        "▲",
-                                        "Transit",
-                                        format!(
-                                            "{} ({:+.0}°)",
-                                            format_local_hour_hm(display_hour),
-                                            event.alt_deg
-                                        ),
-                                    ),
-                                    TrajectoryPointKind::Rise => {
-                                        ("↗", "Rise", format_local_hour_hm(display_hour))
-                                    }
-                                    TrajectoryPointKind::Set => {
-                                        ("↘", "Set", format_local_hour_hm(display_hour))
-                                    }
-                                    TrajectoryPointKind::LowerTransit => (
-                                        "▼",
-                                        "Low",
-                                        format!(
-                                            "{} ({:+.0}°)",
-                                            format_local_hour_hm(display_hour),
-                                            event.alt_deg
-                                        ),
-                                    ),
-                                };
-
-                                let pill_y = match event.kind {
-                                    TrajectoryPointKind::Transit => (sy - 28.0).max(10.0),
-                                    TrajectoryPointKind::LowerTransit => (sy + 10.0).min(bh - 30.0),
-                                    TrajectoryPointKind::Rise | TrajectoryPointKind::Set => {
-                                        (sy - 24.0).clamp(10.0, (bh - 30.0).max(10.0))
-                                    }
-                                };
-                                let pill_x = (sx + 10.0).clamp(10.0, (bw - 148.0).max(10.0));
-                                let jump_offset_hour = event.hour;
-                                let tip_text = format!(
-                                    "{} at {} (Az {:.0}°, Alt {:+.1}°) — Click to jump",
-                                    event.kind.label(),
+                    .size_full()
+                    .absolute()
+                    .top_0()
+                    .left_0(),
+                )
+                .children(event_badges.into_iter().enumerate().map(
+                    |(idx, (event, sx, sy))| {
+                        let display_hour = (start_local_hour + event.hour).rem_euclid(24.0);
+                        let (icon_glyph, kind_label, detail_text) = match event.kind {
+                            TrajectoryPointKind::Transit => (
+                                "▲",
+                                "Transit",
+                                format!(
+                                    "{} ({:+.0}°)",
                                     format_local_hour_hm(display_hour),
-                                    event.az_deg,
                                     event.alt_deg
-                                );
+                                ),
+                            ),
+                            TrajectoryPointKind::Rise => {
+                                ("↗", "Rise", format_local_hour_hm(display_hour))
+                            }
+                            TrajectoryPointKind::Set => {
+                                ("↘", "Set", format_local_hour_hm(display_hour))
+                            }
+                            TrajectoryPointKind::LowerTransit => (
+                                "▼",
+                                "Low",
+                                format!(
+                                    "{} ({:+.0}°)",
+                                    format_local_hour_hm(display_hour),
+                                    event.alt_deg
+                                ),
+                            ),
+                        };
 
-                                h_flex()
-                                    .id(("trajectory_event_badge", idx))
-                                    .absolute()
-                                    .left(px(pill_x as f32))
-                                    .top(px(pill_y as f32))
-                                    .items_center()
-                                    .gap_1()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .bg(popover_bg)
-                                    .border_1()
-                                    .border_color(obj_color.opacity(0.55))
-                                    .shadow_md()
-                                    .cursor_pointer()
-                                    .hover(|s| s.border_color(obj_color.opacity(0.95)))
-                                    .tooltip(Tooltip::text(tip_text))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.jump_to_trajectory_offset_hour(jump_offset_hour, cx);
-                                    }))
-                                    .child(
-                                        div()
-                                            .text_size(px(9.5))
-                                            .text_color(obj_color)
-                                            .child(icon_glyph),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(text_color)
-                                            .child(kind_label),
-                                    )
-                                    .child(
-                                        div()
-                                            .font_buffer(cx)
-                                            .text_size(px(10.0))
-                                            .text_color(obj_color)
-                                            .child(detail_text),
-                                    )
-                            }),
-                    )
-                },
-            )
+                        let pill_y = match event.kind {
+                            TrajectoryPointKind::Transit => (sy - 28.0).max(10.0),
+                            TrajectoryPointKind::LowerTransit => (sy + 10.0).min(bh - 30.0),
+                            TrajectoryPointKind::Rise | TrajectoryPointKind::Set => {
+                                (sy - 24.0).clamp(10.0, (bh - 30.0).max(10.0))
+                            }
+                        };
+                        let pill_x = (sx + 10.0).clamp(10.0, (bw - 148.0).max(10.0));
+                        let jump_offset_hour = event.hour;
+                        let tip_text = format!(
+                            "{} at {} (Az {:.0}°, Alt {:+.1}°) — Click to jump",
+                            event.kind.label(),
+                            format_local_hour_hm(display_hour),
+                            event.az_deg,
+                            event.alt_deg
+                        );
+
+                        h_flex()
+                            .id(("trajectory_event_badge", idx))
+                            .absolute()
+                            .left(px(pill_x as f32))
+                            .top(px(pill_y as f32))
+                            .items_center()
+                            .gap_1()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(popover_bg)
+                            .border_1()
+                            .border_color(obj_color.opacity(0.55))
+                            .shadow_md()
+                            .opacity(opacity)
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(obj_color.opacity(0.95)))
+                            .tooltip(Tooltip::text(tip_text))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.jump_to_trajectory_offset_hour(jump_offset_hour, cx);
+                            }))
+                            .child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(obj_color)
+                                    .child(icon_glyph),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(text_color)
+                                    .child(kind_label),
+                            )
+                            .child(
+                                div()
+                                    .font_buffer(cx)
+                                    .text_size(px(10.0))
+                                    .text_color(obj_color)
+                                    .child(detail_text),
+                            )
+                    },
+                ))
+            })
             .when_some(
                 mount_overlay,
                 |el, (ra_deg, dec_deg, is_live, is_slewing, is_parked, sx, sy, on_screen, bw, bh)| {
@@ -2387,7 +2405,7 @@ impl Render for PlanetariumPanel {
                             .items_center()
                             .gap_1p5()
                             .child(sky_pill)
-                            .child(grid_pill)
+                            .child(overlay_pill)
                             .child(
                                 h_flex()
                                     .id("coord_mode_switch")
@@ -2563,6 +2581,19 @@ fn paint_directional_mount_arrow(
     }
 }
 
+struct TrajectoryOverlay {
+    srgb: [f32; 3],
+    trajectory: Arc<DailyTrajectory>,
+    view_info: PlanetariumViewInfo,
+    proj_dims: (f64, f64),
+    occlude_ground: bool,
+    event_badges: Vec<(celestial::TrajectoryEventPoint, f64, f64)>,
+    start_local_hour: f64,
+    duration_hours: f64,
+    is_faded: bool,
+    opacity: f32,
+}
+
 #[derive(Clone, Copy)]
 struct LayerVisibilityFlags {
     stars: bool,
@@ -2571,6 +2602,8 @@ struct LayerVisibilityFlags {
     dso_show_messier: bool,
     dso_show_ngc: bool,
     solar_system: bool,
+    trajectories_opacity: f32,
+    trajectories: bool,
     occlude_ground: bool,
     occlude_custom_horizon: bool,
 }
@@ -2812,11 +2845,13 @@ fn paint_planetarium_trajectory(
     start_local_hour: f64,
     duration_hours: f64,
     is_faded: bool,
+    opacity: f32,
     window: &mut Window,
 ) {
+    let opacity = opacity.clamp(0.0, 1.0);
     let width = f32::from(bounds.size.width);
     let height = f32::from(bounds.size.height);
-    if width <= 2.0 || height <= 2.0 || trajectory.samples.len() < 2 {
+    if width <= 2.0 || height <= 2.0 || trajectory.samples.len() < 2 || opacity <= 1e-4 {
         return;
     }
 
@@ -2865,16 +2900,20 @@ fn paint_planetarium_trajectory(
             obj_rgb.alpha(0.35)
         };
         let fill_color = Rgba {
-            a: base_fill.a * fade,
+            a: base_fill.a * fade * opacity,
             ..base_fill
         };
-        let tick_halo = rgb(0x050811).alpha(0.75 * fade);
+        let tick_halo = rgb(0x050811).alpha(0.75 * fade * opacity);
         paint_disc(window, pt, r, fill_color, 0.9, tick_halo);
     }
 
     // 2. Notable event point markers (Transit, Rise, Set, Lower Culmination)
     let dark_ring = rgb(0x060a14);
     let bright_ring = rgb(0xf4f8ff);
+    let crisp_event = Rgba {
+        a: crisp_color.a * opacity,
+        ..crisp_color
+    };
     for &(event, sx, sy) in event_badges {
         let pt = point(px(origin_x + sx as f32), px(origin_y + sy as f32));
         match event.kind {
@@ -2883,26 +2922,33 @@ fn paint_planetarium_trajectory(
                     window,
                     pt,
                     5.0,
-                    bright_ring.alpha(0.95),
+                    bright_ring.alpha(0.95 * opacity),
                     1.4,
-                    dark_ring.alpha(0.88),
+                    dark_ring.alpha(0.88 * opacity),
                 );
                 paint_disc(
                     window,
                     pt,
                     3.2,
-                    obj_rgb.alpha(1.0),
+                    obj_rgb.alpha(opacity),
                     0.0,
                     dark_ring.alpha(0.0),
                 );
             }
             TrajectoryPointKind::Rise | TrajectoryPointKind::Set => {
-                paint_disc(window, pt, 4.1, crisp_color, 1.3, dark_ring.alpha(0.85));
+                paint_disc(
+                    window,
+                    pt,
+                    4.1,
+                    crisp_event,
+                    1.3,
+                    dark_ring.alpha(0.85 * opacity),
+                );
                 paint_disc(
                     window,
                     pt,
                     2.2,
-                    dark_ring.alpha(0.9),
+                    dark_ring.alpha(0.9 * opacity),
                     0.0,
                     dark_ring.alpha(0.0),
                 );
@@ -2912,15 +2958,15 @@ fn paint_planetarium_trajectory(
                     window,
                     pt,
                     3.7,
-                    obj_rgb.alpha(0.85),
+                    obj_rgb.alpha(0.85 * opacity),
                     1.3,
-                    dark_ring.alpha(0.82),
+                    dark_ring.alpha(0.82 * opacity),
                 );
                 paint_disc(
                     window,
                     pt,
                     1.9,
-                    bright_ring.alpha(0.9),
+                    bright_ring.alpha(0.9 * opacity),
                     0.0,
                     dark_ring.alpha(0.0),
                 );

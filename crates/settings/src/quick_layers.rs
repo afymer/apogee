@@ -71,6 +71,13 @@ pub const ICON_LAYER_SKY_LIMITS: &[u8] = br##"<svg width="24" height="24" viewBo
   <circle cx="12" cy="9.2" r="1.3" fill="black"/>
 </svg>"##;
 
+pub const ICON_LAYER_TRAJECTORIES: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M3.5 17.5C6.5 8 17.5 8 20.5 17.5" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="12" cy="10.4" r="2.1" fill="black"/>
+  <circle cx="5.5" cy="14" r="1.2" fill="black"/>
+  <circle cx="18.5" cy="14" r="1.2" fill="black"/>
+</svg>"##;
+
 #[derive(Clone, Copy)]
 pub struct LayerPillStyle {
     pub pill_bg: Hsla,
@@ -108,6 +115,7 @@ pub enum QuickLayer {
     SolarSystem,
     AltAzGrid,
     EquatorialGrid,
+    Trajectories,
     SkyLimits,
 }
 
@@ -121,7 +129,8 @@ impl QuickLayer {
         Self::DeepSky,
         Self::SolarSystem,
     ];
-    pub const GRID_LAYERS: [Self; 2] = [Self::AltAzGrid, Self::EquatorialGrid];
+    pub const OVERLAY_LAYERS: [Self; 3] =
+        [Self::AltAzGrid, Self::EquatorialGrid, Self::Trajectories];
     pub const MOUNT_LAYERS: [Self; 1] = [Self::SkyLimits];
 
     pub fn key(self) -> &'static str {
@@ -135,6 +144,7 @@ impl QuickLayer {
             Self::SolarSystem => "solar_system",
             Self::AltAzGrid => "altaz_grid",
             Self::EquatorialGrid => "eq_grid",
+            Self::Trajectories => "trajectories",
             Self::SkyLimits => "sky_limits",
         }
     }
@@ -150,6 +160,7 @@ impl QuickLayer {
             Self::SolarSystem => "Solar System",
             Self::AltAzGrid => "Alt/Az Grid",
             Self::EquatorialGrid => "Equatorial Grid",
+            Self::Trajectories => "Trajectories",
             Self::SkyLimits => "Mount Limits",
         }
     }
@@ -165,6 +176,7 @@ impl QuickLayer {
             Self::SolarSystem => ICON_LAYER_SOLAR_SYSTEM,
             Self::AltAzGrid => ICON_GRID_ALTAZ,
             Self::EquatorialGrid => ICON_GRID_EQUATORIAL,
+            Self::Trajectories => ICON_LAYER_TRAJECTORIES,
             Self::SkyLimits => ICON_LAYER_SKY_LIMITS,
         }
     }
@@ -174,6 +186,7 @@ impl QuickLayer {
             Self::DeepSky => rgb(0xeb8278).into(),
             Self::AltAzGrid => rgb(0x66b5f5).into(),
             Self::EquatorialGrid => rgb(0xeb9b56).into(),
+            Self::Trajectories => rgb(0x5fd4c8).into(),
             Self::SolarSystem => rgb(0xf7c957).into(),
             Self::SkyLimits => rgb(0xf59447).into(),
             Self::Atmosphere | Self::Ground | Self::Horizon | Self::HipsSurvey | Self::Stars => {
@@ -193,6 +206,7 @@ impl QuickLayer {
             Self::SolarSystem => model.solar_system_enabled(),
             Self::AltAzGrid => model.altaz_grid_enabled(),
             Self::EquatorialGrid => model.equatorial_grid_enabled(),
+            Self::Trajectories => model.trajectories_enabled(),
             Self::SkyLimits => true,
         }
     }
@@ -208,6 +222,7 @@ impl QuickLayer {
             Self::SolarSystem => model.solar_system_opacity(),
             Self::AltAzGrid => model.altaz_grid_opacity(),
             Self::EquatorialGrid => model.equatorial_grid_opacity(),
+            Self::Trajectories => model.trajectories_opacity(),
             Self::SkyLimits => 1.0,
         }
     }
@@ -232,6 +247,7 @@ impl QuickLayer {
             Self::SolarSystem => model.set_solar_system_enabled(enabled, cx),
             Self::AltAzGrid => model.set_altaz_grid_enabled(enabled, cx),
             Self::EquatorialGrid => model.set_equatorial_grid_enabled(enabled, cx),
+            Self::Trajectories => model.set_trajectories_enabled(enabled, cx),
             Self::SkyLimits => {}
         }
     }
@@ -266,6 +282,7 @@ impl QuickLayer {
             Self::SolarSystem => model.preview_solar_system_opacity(value, cx),
             Self::AltAzGrid => model.preview_altaz_grid_opacity(value, cx),
             Self::EquatorialGrid => model.preview_equatorial_grid_opacity(value, cx),
+            Self::Trajectories => model.preview_trajectories_opacity(value, cx),
             Self::SkyLimits => {}
         }
     }
@@ -298,6 +315,7 @@ impl QuickLayer {
             Self::SolarSystem => model.commit_solar_system_opacity(value, cx),
             Self::AltAzGrid => model.commit_altaz_grid_opacity(value, cx),
             Self::EquatorialGrid => model.commit_equatorial_grid_opacity(value, cx),
+            Self::Trajectories => model.commit_trajectories_opacity(value, cx),
             Self::SkyLimits => {}
         }
     }

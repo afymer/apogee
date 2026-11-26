@@ -3,7 +3,7 @@ pub mod shortcuts;
 pub mod state;
 pub mod window;
 
-pub use quick_layers::{LayerPillStyle, QuickLayer};
+pub use quick_layers::{ICON_LAYER_TRAJECTORIES, LayerPillStyle, QuickLayer};
 
 pub use shortcuts::{
     CenterOnSelection, OpenKeyboardShortcuts, OpenSettings, OpenSkySearch, ShortcutSpec,

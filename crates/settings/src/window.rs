@@ -8,7 +8,7 @@ use gpui::{
 use persistence::{
     AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_DSO_OPACITY, DEFAULT_GRID_OPACITY,
     DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
-    DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY,
+    DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DEFAULT_TRAJECTORIES_OPACITY,
 };
 use ui::{
     ActiveTheme, Button, ButtonStyle, Color, Divider, DividerColor, Icon, IconButton, IconName,
@@ -385,6 +385,39 @@ fn default_categories() -> Vec<SettingsCategory> {
                                 min: 0.0,
                                 max: 1.0,
                                 default: DEFAULT_GRID_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
+                },
+                SettingsSection {
+                    title: "Trajectories",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_trajectories_enabled",
+                            title: "Show Trajectories",
+                            description: "Display sky trajectory paths, hourly ticks, and rise/transit/set markers for selected objects.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.trajectories.enabled,
+                                set: |model, value, cx| model.set_trajectories_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_trajectories_opacity",
+                            title: "Trajectories Opacity",
+                            description: "Adjust the opacity of rendered object trajectories and event markers.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.trajectories.opacity,
+                                preview: |model, value, cx| {
+                                    model.preview_trajectories_opacity(value, cx);
+                                },
+                                commit: |model, value, cx| {
+                                    model.commit_trajectories_opacity(value, cx);
+                                },
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_TRAJECTORIES_OPACITY,
                                 format: |v| format!("{:.0}%", v * 100.0),
                             },
                         },

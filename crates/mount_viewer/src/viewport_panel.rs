@@ -521,9 +521,9 @@ impl MountViewportPanel {
             pill_style,
             cx,
         );
-        let grid_pill = self.render_layer_pill(
-            "mount_grid_quick_toggles",
-            &QuickLayer::GRID_LAYERS,
+        let overlay_pill = self.render_layer_pill(
+            "mount_overlay_quick_toggles",
+            &QuickLayer::OVERLAY_LAYERS,
             scene,
             pill_style,
             cx,
@@ -556,7 +556,7 @@ impl MountViewportPanel {
                     .items_center()
                     .gap_1p5()
                     .child(sky_pill)
-                    .child(grid_pill)
+                    .child(overlay_pill)
                     .child(limits_pill),
             )
             .when_some(

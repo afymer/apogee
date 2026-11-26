@@ -23,7 +23,9 @@ use observer::{GraphCenterToggleStyle, graph_axis_labels, graph_center_toggle};
 use planner::GlobalNightPlan;
 use planetarium::{PickedDso, PickedSolarSystemBody, PickedStar};
 use protocol::{ConnectionState, MountCommand, MountStatus};
-use settings::{CenterOnSelection, ToggleObjectDetails};
+use settings::{
+    CenterOnSelection, GlobalSettings, ICON_LAYER_TRAJECTORIES, QuickLayer, ToggleObjectDetails,
+};
 use status_bar::{format_altaz, format_radec};
 use ui::{
     ActiveTheme, Button, ButtonCommon, ButtonStyle, Clickable, Disableable, FixedWidth, IconButton,
@@ -49,13 +51,6 @@ const ICON_CENTER_TARGET: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 
   <circle cx="12" cy="12" r="5.5" stroke="black" stroke-width="1.6"/>
   <circle cx="12" cy="12" r="1.4" fill="black"/>
   <path d="M12 3V6.5M12 17.5V21M3 12H6.5M17.5 12H21" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
-</svg>"##;
-
-const ICON_TRAJECTORY: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M3.5 17.5C6.5 8 17.5 8 20.5 17.5" stroke="black" stroke-width="1.6" stroke-linecap="round"/>
-  <circle cx="12" cy="10.4" r="2.1" fill="black"/>
-  <circle cx="5.5" cy="14" r="1.2" fill="black"/>
-  <circle cx="18.5" cy="14" r="1.2" fill="black"/>
 </svg>"##;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -263,6 +258,13 @@ impl StarSelectionModel {
         }
     }
 
+    pub fn set_show_trajectory(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.selected.is_some() && self.show_trajectory != show {
+            self.show_trajectory = show;
+            cx.notify();
+        }
+    }
+
     pub fn show_trajectory(&self) -> bool {
         self.show_trajectory
     }
@@ -461,6 +463,13 @@ impl StarDetailsPanel {
 
             if let Some(plan_entity) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
                 cx.observe(&plan_entity, |_this: &mut Self, _model, cx| {
+                    cx.notify();
+                })
+                .detach();
+            }
+
+            if let Some(settings_entity) = cx.try_global::<GlobalSettings>().map(|g| g.0.clone()) {
+                cx.observe(&settings_entity, |_this: &mut Self, _model, cx| {
                     cx.notify();
                 })
                 .detach();
@@ -1273,6 +1282,10 @@ impl Render for StarDetailsPanel {
                 (model.selected_object().cloned(), model.show_trajectory())
             })
             .unwrap_or((None, true));
+        let trajectories_layer_visible = cx
+            .try_global::<GlobalSettings>()
+            .is_none_or(|g| QuickLayer::Trajectories.is_visible(g.0.read(cx)));
+        let trajectory_visible = show_trajectory && trajectories_layer_visible;
 
         let Some(selected_obj) = selected else {
             return v_flex()
@@ -1895,15 +1908,41 @@ impl Render for StarDetailsPanel {
                                     .justify_center()
                                     .rounded_sm()
                                     .cursor_pointer()
-                                    .when(show_trajectory, |s| s.bg(colors.ghost_element_selected))
+                                    .when(trajectory_visible, |s| {
+                                        s.bg(colors.ghost_element_selected)
+                                    })
                                     .hover(|s| s.bg(colors.ghost_element_hover))
-                                    .tooltip(Tooltip::text(if show_trajectory {
+                                    .tooltip(Tooltip::text(if trajectory_visible {
                                         "Hide trajectory"
+                                    } else if !trajectories_layer_visible {
+                                        "Show trajectory (enables Trajectories layer)"
                                     } else {
                                         "Show trajectory"
                                     }))
                                     .on_click(cx.listener(|_this, _event, _window, cx| {
-                                        if let Some(selection) = cx
+                                        let layer_visible = cx
+                                            .try_global::<GlobalSettings>()
+                                            .is_none_or(|g| {
+                                                QuickLayer::Trajectories.is_visible(g.0.read(cx))
+                                            });
+                                        if !layer_visible {
+                                            if let Some(settings) = cx
+                                                .try_global::<GlobalSettings>()
+                                                .map(|g| g.0.clone())
+                                            {
+                                                settings.update(cx, |model, cx| {
+                                                    QuickLayer::Trajectories.toggle(model, cx);
+                                                });
+                                            }
+                                            if let Some(selection) = cx
+                                                .try_global::<GlobalStarSelection>()
+                                                .map(|g| g.0.clone())
+                                            {
+                                                selection.update(cx, |model, cx| {
+                                                    model.set_show_trajectory(true, cx);
+                                                });
+                                            }
+                                        } else if let Some(selection) = cx
                                             .try_global::<GlobalStarSelection>()
                                             .map(|g| g.0.clone())
                                         {
@@ -1914,10 +1953,10 @@ impl Render for StarDetailsPanel {
                                     }))
                                     .child(
                                         svg()
-                                            .data(ICON_TRAJECTORY)
+                                            .data(ICON_LAYER_TRAJECTORIES)
                                             .size(px(14.0))
                                             .flex_none()
-                                            .text_color(if show_trajectory {
+                                            .text_color(if trajectory_visible {
                                                 colors.text
                                             } else {
                                                 colors.text_muted.opacity(0.6)

@@ -478,6 +478,15 @@ impl BevyBridge {
         self.send_command(ViewportCommand::SetTrajectory(data));
     }
 
+    pub fn set_trajectory_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetTrajectoryOpacity(clamped));
+    }
+
     pub fn track_target(&self, target: Option<TrackingTarget>) {
         self.send_command(ViewportCommand::TrackTarget(target));
     }
@@ -688,6 +697,33 @@ impl Default for CameraSyncState {
             is_mount_mode: false,
             idle_update_interval: Duration::from_secs(5),
         }
+    }
+}
+
+/// Base alpha of the GPU trajectory polyline at 100% opacity.
+const TRAJECTORY_BASE_ALPHA: f32 = 0.92;
+
+/// Renderer-side trajectory visibility and opacity state updated via [`ViewportCommand`].
+#[derive(Resource, Clone, Copy, Debug)]
+struct TrajectoryRenderSettings {
+    opacity: f32,
+    active: bool,
+}
+
+impl Default for TrajectoryRenderSettings {
+    fn default() -> Self {
+        Self {
+            opacity: 1.0,
+            active: false,
+        }
+    }
+}
+
+fn trajectory_line_alpha(settings: TrajectoryRenderSettings) -> f32 {
+    if settings.active {
+        TRAJECTORY_BASE_ALPHA * settings.opacity
+    } else {
+        0.0
     }
 }
 
@@ -1215,6 +1251,17 @@ fn process_viewport_commands(
             ViewportCommand::SetTrajectory(maybe_traj) => {
                 let handles = app.world().get_resource::<CelestialHandles>().cloned();
                 if let Some(handles) = handles {
+                    let active = maybe_traj.is_some();
+                    let alpha = if let Some(mut settings) =
+                        app.world_mut().get_resource_mut::<TrajectoryRenderSettings>()
+                    {
+                        settings.active = active;
+                        trajectory_line_alpha(*settings)
+                    } else if active {
+                        TRAJECTORY_BASE_ALPHA
+                    } else {
+                        0.0
+                    };
                     match maybe_traj {
                         Some(data) => {
                             let minor_alpha = if data.occlude_ground { 0.08 } else { 0.24 };
@@ -1233,7 +1280,7 @@ fn process_viewport_commands(
                                 let r = data.srgb[0] + (1.0 - data.srgb[0]) * 0.22;
                                 let g = data.srgb[1] + (1.0 - data.srgb[1]) * 0.22;
                                 let b = data.srgb[2] + (1.0 - data.srgb[2]) * 0.22;
-                                mat.uniforms.color = Vec4::new(r, g, b, 0.92);
+                                mat.uniforms.color = Vec4::new(r, g, b, alpha);
                                 mat.uniforms.minor_alpha =
                                     if data.occlude_ground { 0.22 } else { 0.42 };
                             }
@@ -1246,6 +1293,30 @@ fn process_viewport_commands(
                                 mat.uniforms.color.w = 0.0;
                             }
                         }
+                    }
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetTrajectoryOpacity(opacity) => {
+                let clamped = if opacity.is_finite() {
+                    opacity.clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let alpha = if let Some(mut settings) =
+                    app.world_mut().get_resource_mut::<TrajectoryRenderSettings>()
+                {
+                    settings.opacity = clamped;
+                    trajectory_line_alpha(*settings)
+                } else {
+                    0.0
+                };
+                if let Some(handles) = app.world().get_resource::<CelestialHandles>().cloned() {
+                    if let Some(mut mat) = app
+                        .world_mut()
+                        .get_mut::<CelestialLineMaterial>(handles.trajectory_entity)
+                    {
+                        mat.uniforms.color.w = alpha;
                     }
                     *frames_remaining = 3;
                 }
@@ -1686,6 +1757,7 @@ impl PlanetariumRenderer {
                 app.init_resource::<stars::StarSettings>();
                 app.init_resource::<dso::DsoSettings>();
                 app.init_resource::<solar_system::SolarSystemRenderSettings>();
+                app.init_resource::<TrajectoryRenderSettings>();
                 let moon_textures = {
                     let _span = tracing::info_span!("init_fallback_moon_textures").entered();
                     let mut images = app.world_mut().resource_mut::<Assets<Image>>();
@@ -2194,5 +2266,31 @@ impl PlanetariumRenderer {
                 guard.latest_texture = None;
                 guard.texture_size = None;
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trajectory_line_alpha_respects_active_and_opacity() {
+        let mut settings = TrajectoryRenderSettings::default();
+        assert!(!settings.active);
+        assert_eq!(settings.opacity, 1.0);
+        assert_eq!(trajectory_line_alpha(settings), 0.0);
+
+        settings.active = true;
+        assert!((trajectory_line_alpha(settings) - TRAJECTORY_BASE_ALPHA).abs() < 1e-6);
+
+        settings.opacity = 0.5;
+        assert!((trajectory_line_alpha(settings) - TRAJECTORY_BASE_ALPHA * 0.5).abs() < 1e-6);
+
+        settings.opacity = 0.0;
+        assert_eq!(trajectory_line_alpha(settings), 0.0);
+
+        settings.active = false;
+        settings.opacity = 0.8;
+        assert_eq!(trajectory_line_alpha(settings), 0.0);
     }
 }

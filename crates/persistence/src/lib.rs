@@ -28,10 +28,10 @@ pub use plan::{PLAN_SCHEMA_VERSION, PlannerCatalog};
 pub use settings::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_DSO_OPACITY,
     DEFAULT_GRID_OPACITY, DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY,
-    DEFAULT_HORIZON_OPACITY, DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings,
-    DsoSettings, GridLayerSettings, GroundSettings, HorizonLayerSettings, KeymapSettings,
-    PlanetariumSettings, SETTINGS_SCHEMA_VERSION, SolarSystemSettings, StarsSettings,
-    SurveySettings,
+    DEFAULT_HORIZON_OPACITY, DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY,
+    DEFAULT_TRAJECTORIES_OPACITY, DebugSettings, DsoSettings, GridLayerSettings, GroundSettings,
+    HorizonLayerSettings, KeymapSettings, PlanetariumSettings, SETTINGS_SCHEMA_VERSION,
+    SolarSystemSettings, StarsSettings, SurveySettings, TrajectoriesSettings,
 };
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
@@ -417,6 +417,10 @@ mod tests {
                     enabled: true,
                     opacity: 0.85,
                 },
+                trajectories: TrajectoriesSettings {
+                    enabled: false,
+                    opacity: 0.70,
+                },
             },
             debug: DebugSettings {
                 show_hips_grid: true,
@@ -472,12 +476,17 @@ mod tests {
             legacy.planetarium.equatorial_grid.opacity,
             DEFAULT_GRID_OPACITY
         );
+        assert!(legacy.planetarium.trajectories.enabled);
+        assert_eq!(
+            legacy.planetarium.trajectories.opacity,
+            DEFAULT_TRAJECTORIES_OPACITY
+        );
 
         // Out-of-bounds strengths and opacities are clamped on load.
         backend
             .write_raw(
                 AppSettings::DOCUMENT_KEY,
-                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":2.5},"ground":{"enabled":true,"opacity":1.8},"hips_survey":{"enabled":true,"opacity":3.0},"stars":{"enabled":true,"opacity":1.4},"altaz_grid":{"enabled":true,"opacity":4.0},"equatorial_grid":{"enabled":true,"opacity":2.1}}}"#,
+                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":2.5},"ground":{"enabled":true,"opacity":1.8},"hips_survey":{"enabled":true,"opacity":3.0},"stars":{"enabled":true,"opacity":1.4},"altaz_grid":{"enabled":true,"opacity":4.0},"equatorial_grid":{"enabled":true,"opacity":2.1},"trajectories":{"enabled":true,"opacity":2.7}}}"#,
             )
             .expect("raw write succeeds");
         let clamped_hi: AppSettings = store.load().expect("high values load");
@@ -487,11 +496,12 @@ mod tests {
         assert_eq!(clamped_hi.planetarium.stars.opacity, 1.0);
         assert_eq!(clamped_hi.planetarium.altaz_grid.opacity, 1.0);
         assert_eq!(clamped_hi.planetarium.equatorial_grid.opacity, 1.0);
+        assert_eq!(clamped_hi.planetarium.trajectories.opacity, 1.0);
 
         backend
             .write_raw(
                 AppSettings::DOCUMENT_KEY,
-                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":-0.4},"ground":{"enabled":true,"opacity":-0.2},"hips_survey":{"enabled":true,"opacity":-0.5},"stars":{"enabled":true,"opacity":-1.0},"altaz_grid":{"enabled":true,"opacity":-0.3},"equatorial_grid":{"enabled":true,"opacity":-2.0}}}"#,
+                br#"{"schema_version":1,"planetarium":{"atmosphere":{"enabled":true,"strength":-0.4},"ground":{"enabled":true,"opacity":-0.2},"hips_survey":{"enabled":true,"opacity":-0.5},"stars":{"enabled":true,"opacity":-1.0},"altaz_grid":{"enabled":true,"opacity":-0.3},"equatorial_grid":{"enabled":true,"opacity":-2.0},"trajectories":{"enabled":true,"opacity":-0.6}}}"#,
             )
             .expect("raw write succeeds");
         let clamped_lo: AppSettings = store.load().expect("negative values load");
@@ -501,6 +511,7 @@ mod tests {
         assert_eq!(clamped_lo.planetarium.stars.opacity, 0.0);
         assert_eq!(clamped_lo.planetarium.altaz_grid.opacity, 0.0);
         assert_eq!(clamped_lo.planetarium.equatorial_grid.opacity, 0.0);
+        assert_eq!(clamped_lo.planetarium.trajectories.opacity, 0.0);
 
         let mut non_finite = AtmosphereSettings {
             enabled: true,
@@ -583,6 +594,19 @@ mod tests {
             opacity: 0.7,
         };
         assert_eq!(disabled_grid.effective_opacity(), 0.0);
+
+        let mut non_finite_traj = TrajectoriesSettings {
+            enabled: true,
+            opacity: f32::NAN,
+        };
+        non_finite_traj.sanitize();
+        assert_eq!(non_finite_traj.opacity, DEFAULT_TRAJECTORIES_OPACITY);
+
+        let disabled_traj = TrajectoriesSettings {
+            enabled: false,
+            opacity: 0.7,
+        };
+        assert_eq!(disabled_traj.effective_opacity(), 0.0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

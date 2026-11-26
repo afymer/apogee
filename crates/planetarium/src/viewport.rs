@@ -67,6 +67,7 @@ pub enum ViewportCommand {
     SetHorizonOpacity(f32),
     SetHorizonLineVisible(bool),
     SetTrajectory(Option<TrajectoryRenderData>),
+    SetTrajectoryOpacity(f32),
     TrackTarget(Option<TrackingTarget>),
     SetMountCamera(Option<MountCameraOverride>),
 }

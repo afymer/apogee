@@ -2,9 +2,10 @@ use gpui::{App, AppContext, Context, Entity, Global};
 use persistence::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_DSO_OPACITY,
     DEFAULT_GRID_OPACITY, DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY,
-    DEFAULT_HORIZON_OPACITY, DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings,
-    DocumentStore, DsoSettings, GridLayerSettings, GroundSettings, HorizonLayerSettings,
-    KeymapSettings, PlanetariumSettings, SolarSystemSettings, StarsSettings, SurveySettings,
+    DEFAULT_HORIZON_OPACITY, DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY,
+    DEFAULT_TRAJECTORIES_OPACITY, DebugSettings, DocumentStore, DsoSettings, GridLayerSettings,
+    GroundSettings, HorizonLayerSettings, KeymapSettings, PlanetariumSettings, SolarSystemSettings,
+    StarsSettings, SurveySettings, TrajectoriesSettings,
 };
 
 /// Global GPUI entity wrapper for [`SettingsModel`].
@@ -483,6 +484,51 @@ impl SettingsModel {
     pub fn commit_equatorial_grid_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
         let clamped = sanitize_unit(opacity, DEFAULT_GRID_OPACITY);
         self.settings.planetarium.equatorial_grid.opacity = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns the selected-object trajectory overlay settings.
+    pub fn trajectories(&self) -> TrajectoriesSettings {
+        self.settings.planetarium.trajectories
+    }
+
+    /// Returns whether selected-object trajectories are enabled.
+    pub fn trajectories_enabled(&self) -> bool {
+        self.settings.planetarium.trajectories.enabled
+    }
+
+    /// Returns the configured trajectories opacity in `[0.0, 1.0]`.
+    pub fn trajectories_opacity(&self) -> f32 {
+        self.settings.planetarium.trajectories.opacity
+    }
+
+    /// Returns the effective trajectories opacity (`0.0` when disabled).
+    pub fn effective_trajectories_opacity(&self) -> f32 {
+        self.settings.planetarium.trajectories.effective_opacity()
+    }
+
+    /// Sets whether selected-object trajectories are enabled and persists the change.
+    pub fn set_trajectories_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.trajectories.enabled = enabled,
+            cx,
+        );
+    }
+
+    /// Updates trajectories opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_trajectories_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_TRAJECTORIES_OPACITY);
+        if (self.settings.planetarium.trajectories.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.trajectories.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets trajectories opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_trajectories_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_TRAJECTORIES_OPACITY);
+        self.settings.planetarium.trajectories.opacity = clamped;
         self.persist();
         cx.notify();
     }
@@ -1067,5 +1113,54 @@ mod tests {
         let persisted_disabled: AppSettings = store.load().expect("disabled dso load");
         assert!(!persisted_disabled.planetarium.deep_sky.enabled);
         assert!(!persisted_disabled.planetarium.deep_sky.show_ngc);
+    }
+
+    #[gpui::test]
+    fn settings_model_trajectories_preview_commit_and_toggle(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let store_for_init = store.clone();
+
+        cx.update(|cx| {
+            init_with_store(store_for_init, cx);
+        });
+
+        let model = cx.read(|cx| cx.global::<GlobalSettings>().0.clone());
+        model.read_with(cx, |m, _| {
+            assert!(m.trajectories_enabled());
+            assert_eq!(m.trajectories_opacity(), 1.0);
+            assert_eq!(m.effective_trajectories_opacity(), 1.0);
+        });
+
+        model.update(cx, |m, cx| {
+            m.preview_trajectories_opacity(0.45, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!((m.trajectories_opacity() - 0.45).abs() < 1e-6);
+            assert!((m.effective_trajectories_opacity() - 0.45).abs() < 1e-6);
+        });
+        assert!(
+            store
+                .load_optional::<AppSettings>()
+                .expect("load_optional succeeds")
+                .is_none()
+        );
+
+        model.update(cx, |m, cx| {
+            m.commit_trajectories_opacity(0.45, cx);
+        });
+        let persisted: AppSettings = store.load().expect("committed trajectories load");
+        assert!((persisted.planetarium.trajectories.opacity - 0.45).abs() < 1e-6);
+
+        model.update(cx, |m, cx| {
+            m.set_trajectories_enabled(false, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(!m.trajectories_enabled());
+            assert!((m.trajectories_opacity() - 0.45).abs() < 1e-6);
+            assert_eq!(m.effective_trajectories_opacity(), 0.0);
+        });
+        let persisted_disabled: AppSettings = store.load().expect("disabled trajectories load");
+        assert!(!persisted_disabled.planetarium.trajectories.enabled);
+        assert!((persisted_disabled.planetarium.trajectories.opacity - 0.45).abs() < 1e-6);
     }
 }

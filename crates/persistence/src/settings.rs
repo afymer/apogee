@@ -31,6 +31,9 @@ pub const DEFAULT_SOLAR_SYSTEM_OPACITY: f32 = 1.0;
 /// Default normalized opacity for coordinate grid overlays (Alt/Az and Equatorial).
 pub const DEFAULT_GRID_OPACITY: f32 = 1.0;
 
+/// Default normalized opacity for selected-object trajectory curves and event markers.
+pub const DEFAULT_TRAJECTORIES_OPACITY: f32 = 1.0;
+
 fn default_schema_version() -> u32 {
     SETTINGS_SCHEMA_VERSION
 }
@@ -69,6 +72,10 @@ fn default_solar_system_opacity() -> f32 {
 
 fn default_grid_opacity() -> f32 {
     DEFAULT_GRID_OPACITY
+}
+
+fn default_trajectories_opacity() -> f32 {
+    DEFAULT_TRAJECTORIES_OPACITY
 }
 
 fn sanitize_unit_interval(value: &mut f32, default: f32) {
@@ -357,6 +364,38 @@ impl GridLayerSettings {
     }
 }
 
+/// Selected-object trajectory overlay settings in the planetarium.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrajectoriesSettings {
+    /// Whether selected-object trajectory curves, ticks, and event markers are displayed.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Normalized trajectory overlay opacity multiplier in `[0.0, 1.0]`.
+    #[serde(default = "default_trajectories_opacity")]
+    pub opacity: f32,
+}
+
+impl Default for TrajectoriesSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            opacity: DEFAULT_TRAJECTORIES_OPACITY,
+        }
+    }
+}
+
+impl TrajectoriesSettings {
+    /// Clamps finite opacity into `[0.0, 1.0]` and resets non-finite values to the default.
+    pub fn sanitize(&mut self) {
+        sanitize_unit_interval(&mut self.opacity, DEFAULT_TRAJECTORIES_OPACITY);
+    }
+
+    /// Returns the effective opacity in `[0.0, 1.0]`, or `0.0` when disabled.
+    pub fn effective_opacity(&self) -> f32 {
+        effective_unit_interval(self.enabled, self.opacity, DEFAULT_TRAJECTORIES_OPACITY)
+    }
+}
+
 /// Planetarium viewport visual and rendering settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanetariumSettings {
@@ -387,6 +426,9 @@ pub struct PlanetariumSettings {
     /// Equatorial (Right Ascension / Declination) coordinate grid settings.
     #[serde(default)]
     pub equatorial_grid: GridLayerSettings,
+    /// Selected-object trajectory overlay settings.
+    #[serde(default)]
+    pub trajectories: TrajectoriesSettings,
 }
 
 /// Debugging and viewport diagnostic settings.
@@ -454,5 +496,6 @@ impl Persistable for AppSettings {
         self.planetarium.solar_system.sanitize();
         self.planetarium.altaz_grid.sanitize();
         self.planetarium.equatorial_grid.sanitize();
+        self.planetarium.trajectories.sanitize();
     }
 }
