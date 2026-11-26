@@ -199,7 +199,7 @@ pub fn snap_group_delta_without_overlap(
     let mut merged: Vec<(i64, i64)> = Vec::with_capacity(forbidden.len());
     for (lo, hi) in forbidden {
         if let Some(last) = merged.last_mut()
-            && lo <= last.1
+            && lo < last.1
         {
             last.1 = last.1.max(hi);
         } else {
@@ -480,6 +480,48 @@ mod tests {
         assert_eq!(
             snap_group_delta_without_overlap(&group, &[(400, 500)], 280, -500, 500),
             400
+        );
+    }
+
+    #[test]
+    fn snap_group_delta_allows_exact_fit_between_surrounding_blocks() {
+        let stationary = [(100, 200), (300, 400)];
+
+        // Surrounded in [200, 300] with zero gap on both sides.
+        let middle = [(200, 300)];
+        assert_eq!(
+            snap_group_delta_without_overlap(&middle, &stationary, 0, -500, 500),
+            0
+        );
+        assert_eq!(
+            snap_group_delta_without_overlap(&middle, &stationary, 40, -500, 500),
+            0
+        );
+        assert_eq!(
+            snap_group_delta_without_overlap(&middle, &stationary, -40, -500, 500),
+            0
+        );
+        assert_eq!(
+            snap_group_delta_without_overlap(&middle, &stationary, 160, -500, 500),
+            200
+        );
+
+        // Moving block outside at [400, 500] dragging back into the exact-fit [200, 300] gap (delta -200).
+        let outside = [(400, 500)];
+        assert_eq!(
+            snap_group_delta_without_overlap(&outside, &stationary, -200, -500, 500),
+            -200
+        );
+        assert_eq!(
+            snap_group_delta_without_overlap(&outside, &stationary, -170, -500, 500),
+            -200
+        );
+
+        // A gap strictly narrower than the moving block (80s < 100s) still merges and rejects fitting inside.
+        let narrower = [(100, 200), (280, 380)];
+        assert_eq!(
+            snap_group_delta_without_overlap(&outside, &narrower, -170, -500, 500),
+            -20
         );
     }
 
