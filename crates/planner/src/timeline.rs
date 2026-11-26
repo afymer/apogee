@@ -27,6 +27,9 @@ use crate::state::{
 const GRAPH_SAMPLES: usize = 97;
 const GRAPH_HEIGHT_PX: f32 = 190.0;
 const BLOCK_TRACK_HEIGHT_PX: f32 = 34.0;
+const BLOCK_TIME_ROW_HEIGHT_PX: f32 = 14.0;
+const MIN_BLOCK_END_LABEL_WIDTH_PX: f32 = 76.0;
+const SINGLE_TIME_LABEL_WIDTH_PX: f32 = 34.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TimelineWindowMode {
@@ -137,6 +140,30 @@ enum TimelineDrag {
         start_x: f32,
         current_x: f32,
     },
+}
+
+struct TimelineBlockLayout {
+    idx: usize,
+    target_id: String,
+    name: String,
+    start_text: String,
+    end_text: String,
+    dur_text: String,
+    left_px: f32,
+    width_px: f32,
+    hue: f32,
+    is_sel: bool,
+    enabled: bool,
+}
+
+fn block_label_layout(left_px: f32, width_px: f32, track_width_px: f32) -> (f32, bool) {
+    let show_end = width_px >= MIN_BLOCK_END_LABEL_WIDTH_PX;
+    if show_end {
+        (left_px, true)
+    } else {
+        let max_left = (track_width_px - SINGLE_TIME_LABEL_WIDTH_PX).max(0.0);
+        (left_px.clamp(0.0, max_left), false)
+    }
 }
 
 pub struct NightTimelineView {
@@ -714,7 +741,7 @@ impl NightTimelineView {
             .map_or(600.0, |b| f32::from(b.size.width))
             .max(100.0);
 
-        let blocks: Vec<_> = plan
+        let blocks: Vec<TimelineBlockLayout> = plan
             .targets
             .iter()
             .enumerate()
@@ -731,21 +758,76 @@ impl NightTimelineView {
                 let is_sel = selected_ids.contains(&target.id);
                 let dur_text = format_duration_compact(target.estimated_duration());
                 let start_text = format_unix_hm(target.start_unix_secs, utc_offset);
+                let end_text = format_unix_hm(target.end_unix_secs(), utc_offset);
 
-                (
+                TimelineBlockLayout {
                     idx,
-                    target.id.clone(),
-                    target.name.clone(),
+                    target_id: target.id.clone(),
+                    name: target.name.clone(),
                     start_text,
+                    end_text,
                     dur_text,
                     left_px,
                     width_px,
                     hue,
                     is_sel,
-                    target.enabled,
-                )
+                    enabled: target.enabled,
+                }
             })
             .collect();
+
+        let time_labels: Vec<gpui::AnyElement> = blocks
+            .iter()
+            .map(|b| {
+                let label_col = hsla(
+                    b.hue,
+                    0.78,
+                    0.68,
+                    if !b.enabled {
+                        0.40
+                    } else if b.is_sel {
+                        0.96
+                    } else {
+                        0.78
+                    },
+                );
+                let (label_left, show_end) =
+                    block_label_layout(b.left_px, b.width_px, track_width_px);
+                if show_end {
+                    h_flex()
+                        .absolute()
+                        .top_0()
+                        .left(px(label_left))
+                        .w(px(b.width_px))
+                        .h_full()
+                        .px(px(1.0))
+                        .items_center()
+                        .justify_between()
+                        .overflow_hidden()
+                        .font_buffer(cx)
+                        .text_size(px(10.0))
+                        .text_color(label_col)
+                        .child(div().whitespace_nowrap().child(b.start_text.clone()))
+                        .child(div().whitespace_nowrap().child(b.end_text.clone()))
+                        .into_any_element()
+                } else {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(px(label_left))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .whitespace_nowrap()
+                        .font_buffer(cx)
+                        .text_size(px(10.0))
+                        .text_color(label_col)
+                        .child(b.start_text.clone())
+                        .into_any_element()
+                }
+            })
+            .collect();
+        let has_labels = !time_labels.is_empty();
 
         let marquee_rect = if let Some(TimelineDrag::MarqueeSelect { start_x, current_x }) = &self.drag
         {
@@ -761,7 +843,7 @@ impl NightTimelineView {
         let sampled_bg_down = sampled.clone();
         let bounds_bg_down = self.track_bounds.clone();
 
-        div()
+        let track = div()
             .id("timeline_blocks_track")
             .relative()
             .w_full()
@@ -836,126 +918,107 @@ impl NightTimelineView {
                     cx.notify();
                 }),
             )
-            .children(blocks.into_iter().map(
-                |(
-                    idx,
-                    target_id,
-                    name,
-                    start_text,
-                    dur_text,
-                    left_px,
-                    width_px,
-                    hue,
-                    is_sel,
-                    enabled,
-                )| {
-                    let bg_alpha = if enabled { 0.78 } else { 0.28 };
-                    let border_col = if is_sel {
-                        hsla(hue, 0.92, 0.78, 1.0)
-                    } else {
-                        hsla(hue, 0.65, 0.50, 0.70)
-                    };
-                    let sampled_for_down = sampled.clone();
-                    let bounds_for_down = self.track_bounds.clone();
-                    let show_time = width_px >= 120.0;
-                    let tip = format!("{name}  {start_text} ({dur_text})");
-                    div()
-                        .id(("timeline_block", idx))
-                        .absolute()
-                        .left(px(left_px))
-                        .top(px(4.0))
-                        .w(px(width_px))
-                        .h(px(BLOCK_TRACK_HEIGHT_PX - 8.0))
-                        .px_1p5()
-                        .rounded_sm()
-                        .bg(hsla(hue, 0.68, if is_sel { 0.42 } else { 0.34 }, bg_alpha))
-                        .border_1()
-                        .border_color(border_col)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_1()
-                        .overflow_hidden()
-                        .cursor_pointer()
-                        .tooltip(Tooltip::text(tip))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                let mods = ev.modifiers;
-                                let is_mod = mods.control || mods.platform || mods.shift;
-                                let Some(plan) =
-                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                                else {
-                                    return;
-                                };
+            .children(blocks.into_iter().map(|b| {
+                let bg_alpha = if b.enabled { 0.78 } else { 0.28 };
+                let border_col = if b.is_sel {
+                    hsla(b.hue, 0.92, 0.78, 1.0)
+                } else {
+                    hsla(b.hue, 0.65, 0.50, 0.70)
+                };
+                let sampled_for_down = sampled.clone();
+                let bounds_for_down = self.track_bounds.clone();
+                let tip = format!(
+                    "{}  {}-{} ({})",
+                    b.name, b.start_text, b.end_text, b.dur_text
+                );
+                let target_id = b.target_id;
+                div()
+                    .id(("timeline_block", b.idx))
+                    .absolute()
+                    .left(px(b.left_px))
+                    .top(px(4.0))
+                    .w(px(b.width_px))
+                    .h(px(BLOCK_TRACK_HEIGHT_PX - 8.0))
+                    .px_1p5()
+                    .rounded_sm()
+                    .bg(hsla(
+                        b.hue,
+                        0.68,
+                        if b.is_sel { 0.42 } else { 0.34 },
+                        bg_alpha,
+                    ))
+                    .border_1()
+                    .border_color(border_col)
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .tooltip(Tooltip::text(tip))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            let mods = ev.modifiers;
+                            let is_mod = mods.control || mods.platform || mods.shift;
+                            let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                            else {
+                                return;
+                            };
 
-                                if is_mod {
-                                    let tid = target_id.clone();
-                                    plan.update(cx, |m, cx| m.toggle_target_selection(&tid, cx));
-                                    cx.notify();
-                                    return;
-                                }
-
-                                let already_sel = plan.read(cx).is_target_selected(&target_id);
-                                if !already_sel {
-                                    let tid = target_id.clone();
-                                    plan.update(cx, |m, cx| m.select_target(Some(tid), cx));
-                                }
-
-                                if !locked
-                                    && let Some(bounds) =
-                                        bounds_for_down.lock().ok().and_then(|g| *g)
-                                {
-                                    let width = f32::from(bounds.size.width).max(1.0);
-                                    let frac = ((f32::from(ev.position.x)
-                                        - f32::from(bounds.origin.x))
-                                        / width)
-                                        .clamp(0.0, 1.0)
-                                        as f64;
-                                    let span = sampled_for_down.window_end_secs
-                                        - sampled_for_down.window_start_secs;
-                                    let anchor_cursor_unix =
-                                        (sampled_for_down.window_start_secs + frac * span).round()
-                                            as i64;
-                                    let base_starts: Vec<(String, i64)> = {
-                                        let m = plan.read(cx);
-                                        m.plan()
-                                            .targets
-                                            .iter()
-                                            .filter(|t| m.is_target_selected(&t.id))
-                                            .map(|t| (t.id.clone(), t.start_unix_secs))
-                                            .collect()
-                                    };
-                                    this.drag = Some(TimelineDrag::MoveBlocks {
-                                        base_starts,
-                                        anchor_cursor_unix,
-                                    });
-                                }
+                            if is_mod {
+                                let tid = target_id.clone();
+                                plan.update(cx, |m, cx| m.toggle_target_selection(&tid, cx));
                                 cx.notify();
-                            }),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_size(px(12.0))
-                                .text_color(cx.theme().colors().text)
-                                .child(name),
-                        )
-                        .when(show_time, |el| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .font_buffer(cx)
-                                    .text_size(px(11.0))
-                                    .text_color(cx.theme().colors().text_muted)
-                                    .child(start_text),
-                            )
-                        })
-                },
-            ))
+                                return;
+                            }
+
+                            let already_sel = plan.read(cx).is_target_selected(&target_id);
+                            if !already_sel {
+                                let tid = target_id.clone();
+                                plan.update(cx, |m, cx| m.select_target(Some(tid), cx));
+                            }
+
+                            if !locked
+                                && let Some(bounds) = bounds_for_down.lock().ok().and_then(|g| *g)
+                            {
+                                let width = f32::from(bounds.size.width).max(1.0);
+                                let frac = ((f32::from(ev.position.x)
+                                    - f32::from(bounds.origin.x))
+                                    / width)
+                                    .clamp(0.0, 1.0)
+                                    as f64;
+                                let span = sampled_for_down.window_end_secs
+                                    - sampled_for_down.window_start_secs;
+                                let anchor_cursor_unix =
+                                    (sampled_for_down.window_start_secs + frac * span).round()
+                                        as i64;
+                                let base_starts: Vec<(String, i64)> = {
+                                    let m = plan.read(cx);
+                                    m.plan()
+                                        .targets
+                                        .iter()
+                                        .filter(|t| m.is_target_selected(&t.id))
+                                        .map(|t| (t.id.clone(), t.start_unix_secs))
+                                        .collect()
+                                };
+                                this.drag = Some(TimelineDrag::MoveBlocks {
+                                    base_starts,
+                                    anchor_cursor_unix,
+                                });
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(12.0))
+                            .text_color(cx.theme().colors().text)
+                            .child(b.name),
+                    )
+            }))
             .when_some(marquee_rect, |el, (x0, w)| {
                 el.child(
                     div()
@@ -968,6 +1031,20 @@ impl NightTimelineView {
                         .bg(hsla(0.58, 0.75, 0.65, 0.18))
                         .border_1()
                         .border_color(hsla(0.58, 0.85, 0.72, 0.80)),
+                )
+            });
+
+        v_flex()
+            .w_full()
+            .gap(px(2.0))
+            .child(track)
+            .when(has_labels, |el| {
+                el.child(
+                    div()
+                        .w_full()
+                        .h(px(BLOCK_TIME_ROW_HEIGHT_PX))
+                        .px(px(1.0))
+                        .child(div().relative().w_full().h_full().children(time_labels)),
                 )
             })
             .into_any_element()
@@ -1101,5 +1178,20 @@ mod tests {
         let b = DVec3::Y;
         assert!((angular_separation_deg(a, b) - 90.0).abs() < 1e-9);
         assert!(angular_separation_deg(a, a).abs() < 1e-9);
+    }
+
+    #[test]
+    fn block_label_layout_switches_to_start_only_for_narrow_blocks() {
+        assert_eq!(block_label_layout(120.0, 90.0, 600.0), (120.0, true));
+        assert_eq!(
+            block_label_layout(120.0, MIN_BLOCK_END_LABEL_WIDTH_PX, 600.0),
+            (120.0, true)
+        );
+        assert_eq!(block_label_layout(120.0, 48.0, 600.0), (120.0, false));
+        // Narrow block near the right edge clamps left position so HH:MM stays inside track width.
+        assert_eq!(
+            block_label_layout(585.0, 22.0, 600.0),
+            (600.0 - SINGLE_TIME_LABEL_WIDTH_PX, false)
+        );
     }
 }
