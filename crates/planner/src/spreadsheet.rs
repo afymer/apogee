@@ -6,7 +6,7 @@ use gpui::{
     AnyElement, App, Context, Entity, Render, Subscription, Window, div, hsla, prelude::*, px,
 };
 use observer::GlobalObserver;
-use protocol::{CaptureParams, FrameType, PlannedTarget, SequenceStatus, SequenceStep};
+use protocol::{CaptureParams, FrameType, PlannedTarget, SequencePhase, SequenceStatus, SequenceStep};
 use ui::{ActiveTheme, Button, ButtonStyle, Color, Label, LabelSize, prelude::*};
 
 use crate::state::{
@@ -20,6 +20,18 @@ struct StepRowFields {
     count: Entity<TextField>,
     delay: Entity<TextField>,
     _subs: Vec<Subscription>,
+}
+
+struct TargetRowGroup {
+    target_id: String,
+    rows: Vec<StepRowFields>,
+}
+
+struct SpreadsheetRenderCtx {
+    total_targets: usize,
+    utc_offset_secs: i32,
+    seq_status: Option<SequenceStatus>,
+    locked: bool,
 }
 
 fn next_frame_type(ft: FrameType) -> FrameType {
@@ -41,8 +53,8 @@ fn format_secs(d: Duration) -> String {
 }
 
 pub struct SequenceSpreadsheetView {
-    synced_key: Option<(String, u64)>,
-    rows: Vec<StepRowFields>,
+    synced_revision: Option<u64>,
+    groups: Vec<TargetRowGroup>,
     input_error: Option<String>,
 }
 
@@ -69,8 +81,8 @@ impl SequenceSpreadsheetView {
             }
 
             Self {
-                synced_key: None,
-                rows: Vec::new(),
+                synced_revision: None,
+                groups: Vec::new(),
                 input_error: None,
             }
         })
@@ -231,145 +243,62 @@ impl SequenceSpreadsheetView {
         }
     }
 
-    fn ensure_rows_synced(
+    fn ensure_groups_synced(
         &mut self,
-        target: Option<&PlannedTarget>,
+        targets: &[PlannedTarget],
         revision: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = target else {
-            if !self.rows.is_empty() || self.synced_key.is_some() {
-                self.rows.clear();
-                self.synced_key = None;
-            }
-            return;
-        };
+        let structure_matches = self.groups.len() == targets.len()
+            && self
+                .groups
+                .iter()
+                .zip(targets)
+                .all(|(g, t)| g.target_id == t.id && g.rows.len() == t.steps.len());
 
-        let next_key = (target.id.clone(), revision);
-        if self.synced_key.as_ref() == Some(&next_key) && self.rows.len() == target.steps.len() {
+        if self.synced_revision == Some(revision) && structure_matches {
             return;
         }
 
-        let same_target_and_len = self
-            .synced_key
-            .as_ref()
-            .is_some_and(|(id, _)| id == &target.id)
-            && self.rows.len() == target.steps.len();
-
-        if same_target_and_len {
-            for (row, step) in self.rows.iter().zip(&target.steps) {
-                let exp_txt = format_secs(step.params.exposure);
-                if !row.exposure.read(cx).is_focused(window) {
-                    row.exposure.update(cx, |f, cx| f.set_text(exp_txt, cx));
-                }
-                let iso_txt = step.params.iso.map_or_else(String::new, |v| v.to_string());
-                if !row.iso.read(cx).is_focused(window) {
-                    row.iso.update(cx, |f, cx| f.set_text(iso_txt, cx));
-                }
-                let cnt_txt = step.count.to_string();
-                if !row.count.read(cx).is_focused(window) {
-                    row.count.update(cx, |f, cx| f.set_text(cnt_txt, cx));
-                }
-                let del_txt = format_secs(step.delay_between_frames);
-                if !row.delay.read(cx).is_focused(window) {
-                    row.delay.update(cx, |f, cx| f.set_text(del_txt, cx));
+        if structure_matches {
+            for (group, target) in self.groups.iter().zip(targets) {
+                for (row, step) in group.rows.iter().zip(&target.steps) {
+                    let exp_txt = format_secs(step.params.exposure);
+                    if !row.exposure.read(cx).is_focused(window) {
+                        row.exposure.update(cx, |f, cx| f.set_text(exp_txt, cx));
+                    }
+                    let iso_txt = step.params.iso.map_or_else(String::new, |v| v.to_string());
+                    if !row.iso.read(cx).is_focused(window) {
+                        row.iso.update(cx, |f, cx| f.set_text(iso_txt, cx));
+                    }
+                    let cnt_txt = step.count.to_string();
+                    if !row.count.read(cx).is_focused(window) {
+                        row.count.update(cx, |f, cx| f.set_text(cnt_txt, cx));
+                    }
+                    let del_txt = format_secs(step.delay_between_frames);
+                    if !row.delay.read(cx).is_focused(window) {
+                        row.delay.update(cx, |f, cx| f.set_text(del_txt, cx));
+                    }
                 }
             }
         } else {
-            self.rows = target
-                .steps
+            self.groups = targets
                 .iter()
-                .enumerate()
-                .map(|(idx, step)| Self::build_row_fields(&target.id, idx, step, window, cx))
+                .map(|target| TargetRowGroup {
+                    target_id: target.id.clone(),
+                    rows: target
+                        .steps
+                        .iter()
+                        .enumerate()
+                        .map(|(step_idx, step)| {
+                            Self::build_row_fields(&target.id, step_idx, step, window, cx)
+                        })
+                        .collect(),
+                })
                 .collect();
         }
-        self.synced_key = Some(next_key);
-    }
-
-    fn render_target_header(
-        &self,
-        target: &PlannedTarget,
-        utc_offset_secs: i32,
-        locked: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
-        let tid_prev = target.id.clone();
-        let tid_next = target.id.clone();
-        let start_s = target.start_unix_secs;
-        let start_hm = format_unix_hm(start_s, utc_offset_secs);
-        let dur_txt = format_duration_compact(target.estimated_duration());
-
-        h_flex()
-            .w_full()
-            .justify_between()
-            .items_center()
-            .gap_2()
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().size(px(10.0)).rounded_full().bg(hsla(hue, 0.80, 0.60, 1.0)))
-                    .child(
-                        Label::new(target.name.clone())
-                            .size(LabelSize::Default)
-                            .color(Color::Default),
-                    )
-                    .child(
-                        Label::new(format_radec_compact(target.ra_deg, target.dec_deg))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_1p5()
-                    .child(
-                        Button::new("sp_start_minus_btn", "-15m")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .disabled(locked)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Some(plan) =
-                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                                {
-                                    let tid = tid_prev.clone();
-                                    plan.update(cx, |m, cx| {
-                                        m.set_target_start_unix_secs(&tid, start_s - 900, cx);
-                                    });
-                                }
-                            })),
-                    )
-                    .child(
-                        Label::new(format!("Start {start_hm}"))
-                            .size(LabelSize::Small)
-                            .color(Color::Default),
-                    )
-                    .child(
-                        Button::new("sp_start_plus_btn", "+15m")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .disabled(locked)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Some(plan) =
-                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                                {
-                                    let tid = tid_next.clone();
-                                    plan.update(cx, |m, cx| {
-                                        m.set_target_start_unix_secs(&tid, start_s + 900, cx);
-                                    });
-                                }
-                            })),
-                    )
-                    .child(
-                        Label::new(format!("· {dur_txt} ({} frames)", target.total_frames()))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
-            )
-            .into_any_element()
+        self.synced_revision = Some(revision);
     }
 
     fn render_table_header(&self) -> AnyElement {
@@ -378,15 +307,49 @@ impl SequenceSpreadsheetView {
             .gap_1p5()
             .px_2()
             .py_1()
-            .child(div().w(px(24.0)).child(Label::new("#").size(LabelSize::XSmall).color(Color::Muted)))
-            .child(div().w(px(36.0)).child(Label::new("On").size(LabelSize::XSmall).color(Color::Muted)))
-            .child(div().w(px(58.0)).child(Label::new("Type").size(LabelSize::XSmall).color(Color::Muted)))
-            .child(div().w(px(76.0)).child(Label::new("Exp").size(LabelSize::XSmall).color(Color::Muted)))
-            .child(div().w(px(64.0)).child(Label::new("ISO").size(LabelSize::XSmall).color(Color::Muted)))
-            .child(div().w(px(56.0)).child(Label::new("Count").size(LabelSize::XSmall).color(Color::Muted)))
-            .child(div().w(px(64.0)).child(Label::new("Delay").size(LabelSize::XSmall).color(Color::Muted)))
-            .child(div().w(px(58.0)).child(Label::new("Progress").size(LabelSize::XSmall).color(Color::Muted)))
-            .child(div().flex_1().child(Label::new("Actions").size(LabelSize::XSmall).color(Color::Muted)))
+            .child(
+                div()
+                    .w(px(24.0))
+                    .child(Label::new("#").size(LabelSize::XSmall).color(Color::Muted)),
+            )
+            .child(
+                div()
+                    .w(px(40.0))
+                    .child(Label::new("On").size(LabelSize::XSmall).color(Color::Muted)),
+            )
+            .child(
+                div()
+                    .w(px(62.0))
+                    .child(Label::new("Stage").size(LabelSize::XSmall).color(Color::Muted)),
+            )
+            .child(
+                div().flex_1().child(
+                    Label::new("Parameters (Exp / ISO / Count / Delay)")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div().w(px(64.0)).child(
+                    Label::new("Duration")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div().w(px(62.0)).child(
+                    Label::new("Progress")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div().w(px(108.0)).child(
+                    Label::new("Actions")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
             .into_any_element()
     }
 
@@ -421,18 +384,357 @@ impl SequenceSpreadsheetView {
         }
     }
 
-    fn render_step_row(
+    fn slew_progress_label(target: &PlannedTarget, seq_status: Option<&SequenceStatus>) -> &'static str {
+        if !target.slew_to_target {
+            return "—";
+        }
+        let Some(seq) = seq_status else {
+            return "—";
+        };
+        if seq.current_target_id.as_deref() != Some(target.id.as_str()) {
+            return "—";
+        }
+        match seq.phase {
+            SequencePhase::SlewingToTarget => "Slewing",
+            SequencePhase::Running
+            | SequencePhase::WaitingForMeridianFlip
+            | SequencePhase::Parking
+            | SequencePhase::Completed => "Done",
+            _ => "—",
+        }
+    }
+
+    fn render_target_group_header(
         &self,
+        target_idx: usize,
         target: &PlannedTarget,
-        step_idx: usize,
-        row: &StepRowFields,
+        is_selected: bool,
+        rctx: &SpreadsheetRenderCtx,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let total_targets = rctx.total_targets;
+        let utc_offset_secs = rctx.utc_offset_secs;
+        let locked = rctx.locked;
+        let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
+        let tid_sel = target.id.clone();
+        let tid_en = target.id.clone();
+        let tid_prev = target.id.clone();
+        let tid_next = target.id.clone();
+        let tid_exp = target.id.clone();
+        let tid_add = target.id.clone();
+        let tid_del = target.id.clone();
+
+        let start_hm = format_unix_hm(target.start_unix_secs, utc_offset_secs);
+        let dur_txt = format_duration_compact(target.estimated_duration());
+        let enabled = target.enabled;
+        let header_bg = hsla(hue, 0.55, 0.25, if is_selected { 0.34 } else { 0.16 });
+
+        h_flex()
+            .id(("sp_grp_hdr", target_idx))
+            .w_full()
+            .justify_between()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .bg(header_bg)
+            .cursor_pointer()
+            .on_click(cx.listener(move |_, ev: &gpui::ClickEvent, _, cx| {
+                if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                    let tid = tid_sel.clone();
+                    let mods = ev.modifiers();
+                    let is_mod = mods.control || mods.platform || mods.shift;
+                    plan.update(cx, |m, cx| {
+                        if is_mod {
+                            m.toggle_target_selection(&tid, cx);
+                        } else {
+                            m.select_target(Some(tid), cx);
+                        }
+                    });
+                }
+            }))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(div().size(px(9.0)).rounded_full().bg(hsla(hue, 0.85, 0.62, 1.0)))
+                    .child(
+                        Button::new(("sp_grp_en", target_idx), if enabled { "On" } else { "Off" })
+                            .style(if enabled {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Subtle
+                            })
+                            .label_size(LabelSize::XSmall)
+                            .disabled(locked)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(plan) =
+                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                                {
+                                    let tid = tid_en.clone();
+                                    plan.update(cx, |m, cx| {
+                                        m.set_target_enabled(&tid, !enabled, cx);
+                                    });
+                                }
+                            })),
+                    )
+                    .child(
+                        Label::new(target.name.clone())
+                            .size(LabelSize::Small)
+                            .color(if enabled { Color::Default } else { Color::Muted }),
+                    )
+                    .child(
+                        Label::new(format_radec_compact(target.ra_deg, target.dec_deg))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new(("sp_grp_m15", target_idx), "-15m")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .disabled(locked)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(plan) =
+                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                                {
+                                    let tid = tid_prev.clone();
+                                    plan.update(cx, |m, cx| m.nudge_target_start(&tid, -900, cx));
+                                }
+                            })),
+                    )
+                    .child(
+                        Label::new(start_hm)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Default),
+                    )
+                    .child(
+                        Button::new(("sp_grp_p15", target_idx), "+15m")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .disabled(locked)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(plan) =
+                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                                {
+                                    let tid = tid_next.clone();
+                                    plan.update(cx, |m, cx| m.nudge_target_start(&tid, 900, cx));
+                                }
+                            })),
+                    )
+                    .child(
+                        Label::new(format!("· {dur_txt} ({}f)", target.total_frames()))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Button::new(("sp_grp_up", target_idx), "^")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .disabled(locked || target_idx == 0)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(plan) =
+                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                                {
+                                    plan.update(cx, |m, cx| {
+                                        m.move_target(target_idx, target_idx.saturating_sub(1), cx);
+                                    });
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(("sp_grp_dn", target_idx), "v")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .disabled(locked || target_idx + 1 >= total_targets)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(plan) =
+                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                                {
+                                    plan.update(cx, |m, cx| {
+                                        m.move_target(target_idx, target_idx + 1, cx);
+                                    });
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(("sp_grp_exp", target_idx), "Explore")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(plan) =
+                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                                {
+                                    let tid = tid_exp.clone();
+                                    plan.update(cx, |m, cx| {
+                                        m.request_show_in_explore(&tid, cx);
+                                    });
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(("sp_grp_add", target_idx), "+ Stage")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .disabled(locked)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(plan) =
+                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                                {
+                                    let tid = tid_add.clone();
+                                    plan.update(cx, |m, cx| {
+                                        m.add_step(
+                                            &tid,
+                                            SequenceStep {
+                                                enabled: true,
+                                                frame_type: FrameType::Light,
+                                                count: 10,
+                                                params: CaptureParams {
+                                                    exposure: Duration::from_secs(60),
+                                                    iso: Some(800),
+                                                },
+                                                delay_between_frames: Duration::ZERO,
+                                            },
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(("sp_grp_del", target_idx), "x")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .disabled(locked)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(plan) =
+                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                                {
+                                    let tid = tid_del.clone();
+                                    plan.update(cx, |m, cx| {
+                                        m.remove_target(&tid, cx);
+                                    });
+                                }
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_slew_row(
+        &self,
+        target_idx: usize,
+        target: &PlannedTarget,
         seq_status: Option<&SequenceStatus>,
         locked: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let tid = target.id.clone();
+        let slew = target.slew_to_target;
+        let flip = target.auto_meridian_flip;
+        let param_txt = if flip {
+            format!("GoTo {} · Auto Flip", format_radec_compact(target.ra_deg, target.dec_deg))
+        } else {
+            format!("GoTo {}", format_radec_compact(target.ra_deg, target.dec_deg))
+        };
+        let progress = Self::slew_progress_label(target, seq_status);
+
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .bg(cx.theme().colors().surface_background)
+            .child(
+                div().w(px(24.0)).child(
+                    Label::new("S")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div().w(px(40.0)).child(
+                    Button::new(("sp_slew_on", target_idx), if slew { "On" } else { "Off" })
+                        .style(if slew {
+                            ButtonStyle::Filled
+                        } else {
+                            ButtonStyle::Subtle
+                        })
+                        .label_size(LabelSize::XSmall)
+                        .disabled(locked)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            if let Some(plan) =
+                                cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                            {
+                                let t = tid.clone();
+                                plan.update(cx, |m, cx| {
+                                    m.set_target_policy(&t, !slew, flip, cx);
+                                });
+                            }
+                        })),
+                ),
+            )
+            .child(
+                div().w(px(62.0)).child(
+                    Label::new("Slew")
+                        .size(LabelSize::Small)
+                        .color(if slew { Color::Default } else { Color::Muted }),
+                ),
+            )
+            .child(
+                div().flex_1().child(
+                    Label::new(param_txt)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div().w(px(64.0)).child(
+                    Label::new(if slew { "Auto" } else { "0s" })
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div().w(px(62.0)).child(
+                    Label::new(progress)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(div().w(px(108.0)))
+            .into_any_element()
+    }
+
+    fn render_step_row(
+        &self,
+        target_idx: usize,
+        target: &PlannedTarget,
+        step_idx: usize,
+        row: &StepRowFields,
+        rctx: &SpreadsheetRenderCtx,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let locked = rctx.locked;
+        let seq_status = rctx.seq_status.as_ref();
         let step = &target.steps[step_idx];
         let target_id = target.id.clone();
         let total_rows = target.steps.len();
+        let row_key = target_idx * 1024 + step_idx;
+        let dur_txt = format_duration_compact(step.estimated_duration());
         let progress_txt = Self::step_progress_label(target, step_idx, step, seq_status);
         let row_bg = if step_idx % 2 == 0 {
             cx.theme().colors().elevated_surface_background
@@ -455,18 +757,17 @@ impl SequenceSpreadsheetView {
             .gap_1p5()
             .px_2()
             .py_1()
-            .rounded_sm()
             .bg(row_bg)
             .child(
                 div().w(px(24.0)).child(
                     Label::new(format!("{}", step_idx + 1))
-                        .size(LabelSize::Small)
+                        .size(LabelSize::XSmall)
                         .color(Color::Muted),
                 ),
             )
             .child(
-                div().w(px(36.0)).child(
-                    Button::new(("sp_on", step_idx), if cur_enabled { "On" } else { "Off" })
+                div().w(px(40.0)).child(
+                    Button::new(("sp_on", row_key), if cur_enabled { "On" } else { "Off" })
                         .style(if cur_enabled {
                             ButtonStyle::Filled
                         } else {
@@ -487,8 +788,8 @@ impl SequenceSpreadsheetView {
                 ),
             )
             .child(
-                div().w(px(58.0)).child(
-                    Button::new(("sp_type", step_idx), cur_ft.label())
+                div().w(px(62.0)).child(
+                    Button::new(("sp_type", row_key), cur_ft.label())
                         .style(ButtonStyle::Subtle)
                         .label_size(LabelSize::XSmall)
                         .disabled(locked)
@@ -509,12 +810,24 @@ impl SequenceSpreadsheetView {
                         })),
                 ),
             )
-            .child(div().w(px(76.0)).child(row.exposure.clone()))
-            .child(div().w(px(64.0)).child(row.iso.clone()))
-            .child(div().w(px(56.0)).child(row.count.clone()))
-            .child(div().w(px(64.0)).child(row.delay.clone()))
             .child(
-                div().w(px(58.0)).child(
+                h_flex()
+                    .flex_1()
+                    .gap_1()
+                    .child(div().flex_1().child(row.exposure.clone()))
+                    .child(div().flex_1().child(row.iso.clone()))
+                    .child(div().flex_1().child(row.count.clone()))
+                    .child(div().flex_1().child(row.delay.clone())),
+            )
+            .child(
+                div().w(px(64.0)).child(
+                    Label::new(dur_txt)
+                        .size(LabelSize::XSmall)
+                        .color(if cur_enabled { Color::Default } else { Color::Muted }),
+                ),
+            )
+            .child(
+                div().w(px(62.0)).child(
                     Label::new(progress_txt)
                         .size(LabelSize::XSmall)
                         .color(Color::Muted),
@@ -522,10 +835,10 @@ impl SequenceSpreadsheetView {
             )
             .child(
                 h_flex()
-                    .flex_1()
+                    .w(px(108.0))
                     .gap_1()
                     .child(
-                        Button::new(("sp_up", step_idx), "^")
+                        Button::new(("sp_up", row_key), "^")
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::XSmall)
                             .disabled(locked || step_idx == 0)
@@ -541,7 +854,7 @@ impl SequenceSpreadsheetView {
                             })),
                     )
                     .child(
-                        Button::new(("sp_dn", step_idx), "v")
+                        Button::new(("sp_dn", row_key), "v")
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::XSmall)
                             .disabled(locked || step_idx + 1 >= total_rows)
@@ -557,7 +870,7 @@ impl SequenceSpreadsheetView {
                             })),
                     )
                     .child(
-                        Button::new(("sp_dup", step_idx), "Dup")
+                        Button::new(("sp_dup", row_key), "Dup")
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::XSmall)
                             .disabled(locked)
@@ -573,7 +886,7 @@ impl SequenceSpreadsheetView {
                             })),
                     )
                     .child(
-                        Button::new(("sp_del", step_idx), "x")
+                        Button::new(("sp_del", row_key), "x")
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::XSmall)
                             .disabled(locked)
@@ -591,21 +904,80 @@ impl SequenceSpreadsheetView {
             )
             .into_any_element()
     }
+
+    fn render_target_group(
+        &self,
+        target_idx: usize,
+        target: &PlannedTarget,
+        group_rows: &TargetRowGroup,
+        is_selected: bool,
+        rctx: &SpreadsheetRenderCtx,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
+        let border_col = if is_selected {
+            hsla(hue, 0.85, 0.65, 0.95)
+        } else {
+            cx.theme().colors().border
+        };
+
+        h_flex()
+            .w_full()
+            .rounded_sm()
+            .border_1()
+            .border_color(border_col)
+            .overflow_hidden()
+            .child(div().w(px(4.0)).h_full().bg(hsla(hue, 0.80, 0.58, 1.0)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.render_target_group_header(
+                        target_idx,
+                        target,
+                        is_selected,
+                        rctx,
+                        cx,
+                    ))
+                    .child(self.render_slew_row(
+                        target_idx,
+                        target,
+                        rctx.seq_status.as_ref(),
+                        rctx.locked,
+                        cx,
+                    ))
+                    .children(group_rows.rows.iter().enumerate().map(|(step_idx, row)| {
+                        self.render_step_row(
+                            target_idx,
+                            target,
+                            step_idx,
+                            row,
+                            rctx,
+                            cx,
+                        )
+                    })),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for SequenceSpreadsheetView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (target_opt, revision) = cx
+        let (targets, selected_ids, revision) = cx
             .try_global::<GlobalNightPlan>()
             .map(|g| {
                 let m = g.0.read(cx);
-                (m.selected_target().cloned(), m.revision())
+                (
+                    m.plan().targets.clone(),
+                    m.selected_target_ids().clone(),
+                    m.revision(),
+                )
             })
-            .unwrap_or((None, 0));
+            .unwrap_or_default();
 
-        self.ensure_rows_synced(target_opt.as_ref(), revision, window, cx);
+        self.ensure_groups_synced(&targets, revision, window, cx);
 
-        let Some(target) = target_opt else {
+        if targets.is_empty() {
             return v_flex()
                 .flex_1()
                 .size_full()
@@ -613,12 +985,12 @@ impl Render for SequenceSpreadsheetView {
                 .justify_center()
                 .p_4()
                 .child(
-                    Label::new("Select a target or click Add to Plan in Explore")
+                    Label::new("No objects planned yet. Add targets from Explore or the left Plan panel.")
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
                 .into_any_element();
-        };
+        }
 
         let locked = is_session_locked(cx);
         let utc_offset_secs = cx
@@ -627,7 +999,12 @@ impl Render for SequenceSpreadsheetView {
         let seq_status = cx
             .try_global::<GlobalDaemonState>()
             .and_then(|g| g.0.read(cx).state.sequence.clone());
-        let target_id_add = target.id.clone();
+        let rctx = SpreadsheetRenderCtx {
+            total_targets: targets.len(),
+            utc_offset_secs,
+            seq_status,
+            locked,
+        };
 
         v_flex()
             .id("sequence_spreadsheet_root")
@@ -637,7 +1014,6 @@ impl Render for SequenceSpreadsheetView {
             .p_3()
             .gap_2()
             .overflow_y_scroll()
-            .child(self.render_target_header(&target, utc_offset_secs, locked, cx))
             .when(locked, |el| {
                 el.child(
                     Label::new("Session running — Pause in Policy panel to edit plan")
@@ -652,48 +1028,22 @@ impl Render for SequenceSpreadsheetView {
             }))
             .child(self.render_table_header())
             .child(
-                v_flex().w_full().gap_1().children(
-                    self.rows.iter().enumerate().map(|(idx, row)| {
-                        self.render_step_row(
-                            &target,
-                            idx,
-                            row,
-                            seq_status.as_ref(),
-                            locked,
-                            cx,
-                        )
-                    }),
-                ),
-            )
-            .child(
-                h_flex().pt_1().child(
-                    Button::new("sp_add_stage_btn", "+ Add Stage")
-                        .style(ButtonStyle::Subtle)
-                        .label_size(LabelSize::Small)
-                        .disabled(locked)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            if let Some(plan) =
-                                cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                            {
-                                let tid = target_id_add.clone();
-                                plan.update(cx, |m, cx| {
-                                    m.add_step(
-                                        &tid,
-                                        SequenceStep {
-                                            enabled: true,
-                                            frame_type: FrameType::Light,
-                                            count: 10,
-                                            params: CaptureParams {
-                                                exposure: Duration::from_secs(60),
-                                                iso: Some(800),
-                                            },
-                                            delay_between_frames: Duration::ZERO,
-                                        },
-                                        cx,
-                                    );
-                                });
-                            }
-                        })),
+                v_flex().w_full().gap_2().children(
+                    targets
+                        .iter()
+                        .zip(&self.groups)
+                        .enumerate()
+                        .map(|(target_idx, (target, group_rows))| {
+                            let is_sel = selected_ids.contains(&target.id);
+                            self.render_target_group(
+                                target_idx,
+                                target,
+                                group_rows,
+                                is_sel,
+                                &rctx,
+                                cx,
+                            )
+                        }),
                 ),
             )
             .into_any_element()

@@ -1,13 +1,13 @@
 pub mod center_panel;
+pub mod library_panel;
 pub mod policy_panel;
-pub mod queue_panel;
 pub mod spreadsheet;
 pub mod state;
 pub mod timeline;
 
 pub use center_panel::PlanCenterPanel;
+pub use library_panel::PlanLibraryPanel;
 pub use policy_panel::PlanPolicyPanel;
-pub use queue_panel::PlanQueuePanel;
 pub use spreadsheet::SequenceSpreadsheetView;
 pub use state::{
     ExploreTargetRequest, GlobalNightPlan, PlanModel, format_duration_compact,
@@ -30,18 +30,18 @@ pub fn init_with_store(store: DocumentStore, cx: &mut App) {
 
     cx.observe_new(|workbench: &mut Workbench, window, cx| {
         if let Some(window) = window {
-            let queue_panel = PlanQueuePanel::build(window, cx);
+            let library_panel = PlanLibraryPanel::build(window, cx);
             let center_panel = PlanCenterPanel::build(cx);
             let policy_panel = PlanPolicyPanel::build(cx);
 
-            cx.observe(&queue_panel, |_this, _p, cx| cx.notify())
+            cx.observe(&library_panel, |_this, _p, cx| cx.notify())
                 .detach();
             cx.observe(&center_panel, |_this, _p, cx| cx.notify())
                 .detach();
             cx.observe(&policy_panel, |_this, _p, cx| cx.notify())
                 .detach();
 
-            workbench.add_panel(queue_panel, window, cx);
+            workbench.add_panel(library_panel, window, cx);
             workbench.add_panel(center_panel, window, cx);
             workbench.add_panel(policy_panel, window, cx);
         }

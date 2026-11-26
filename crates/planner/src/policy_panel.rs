@@ -69,21 +69,6 @@ impl PlanPolicyPanel {
         self.send_viewer_message(ViewerMessage::StartNightPlan(req), cx);
     }
 
-    fn run_selected_target(&self, cx: &mut Context<Self>) {
-        let Some(target) = cx
-            .try_global::<GlobalNightPlan>()
-            .and_then(|g| g.0.read(cx).selected_target().cloned())
-        else {
-            return;
-        };
-        let save_config = cx
-            .try_global::<GlobalNightPlan>()
-            .map(|g| g.0.read(cx).plan().save_config.clone())
-            .unwrap_or_default();
-        let seq = target.to_imaging_sequence(client::next_frame_id(), save_config);
-        self.send_viewer_message(ViewerMessage::StartSequence(seq), cx);
-    }
-
     fn render_sequence_status_card(&self, seq: &SequenceStatus, cx: &mut Context<Self>) -> AnyElement {
         let phase_color = match seq.phase {
             SequencePhase::Running => Color::Accent,
@@ -241,24 +226,20 @@ impl PlanPolicyPanel {
             })
             .unwrap_or((false, false, None));
 
-        let (plan_frames, selected_frames) = cx
+        let plan_frames: u32 = cx
             .try_global::<GlobalNightPlan>()
             .map(|g| {
-                let m = g.0.read(cx);
-                let total: u32 = m
+                g.0.read(cx)
                     .plan()
                     .targets
                     .iter()
                     .filter(|t| t.enabled)
                     .map(|t| t.total_frames())
-                    .sum();
-                let sel = m.selected_target().map_or(0, |t| t.total_frames());
-                (total, sel)
+                    .sum()
             })
-            .unwrap_or((0, 0));
+            .unwrap_or(0);
 
         let can_run_plan = hw_ready && !is_capturing && plan_frames > 0;
-        let can_run_sel = hw_ready && !is_capturing && selected_frames > 0;
 
         v_flex()
             .gap_2()
@@ -268,27 +249,18 @@ impl PlanPolicyPanel {
                     .color(Color::Default),
             )
             .child(
-                Button::new("pp_run_tonight_btn", format!("Run Tonight ({plan_frames}f)"))
-                    .style(if can_run_plan {
-                        ButtonStyle::Filled
-                    } else {
-                        ButtonStyle::Subtle
-                    })
-                    .disabled(!can_run_plan)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.run_night_plan(cx);
-                    })),
-            )
-            .child(
                 h_flex()
                     .gap_1()
                     .child(
-                        Button::new("pp_run_selected_btn", "Run Selected")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::Small)
-                            .disabled(!can_run_sel)
+                        Button::new("pp_run_tonight_btn", format!("Run Tonight ({plan_frames}f)"))
+                            .style(if can_run_plan {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Subtle
+                            })
+                            .disabled(!can_run_plan)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.run_selected_target(cx);
+                                this.run_night_plan(cx);
                             })),
                     )
                     .child(

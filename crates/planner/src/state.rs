@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -9,8 +10,8 @@ use jiff::{Span, Timestamp};
 use observer::ObserverModel;
 use persistence::{DocumentStore, PlannerCatalog};
 use protocol::{
-    NightPlan, NightPlanPolicy, PlannedTarget, SequencePhase, SequenceStep, SequenceTemplate,
-    builtin_sequence_templates,
+    MIN_BLOCK_FOOTPRINT_SECS, NightPlan, NightPlanPolicy, PlannedTarget, SequencePhase,
+    SequenceStep, SequenceTemplate, builtin_sequence_templates, snap_group_delta_without_overlap,
 };
 use tracing::warn;
 
@@ -97,18 +98,25 @@ pub struct PlanModel {
     store: DocumentStore,
     catalog: PlannerCatalog,
     selected_target_id: Option<String>,
+    selected_target_ids: HashSet<String>,
     explore_request: Option<ExploreTargetRequest>,
     explore_nonce: u64,
     plan_revision: u64,
 }
 
 impl PlanModel {
-    pub fn new(store: DocumentStore, catalog: PlannerCatalog) -> Self {
+    pub fn new(store: DocumentStore, mut catalog: PlannerCatalog) -> Self {
+        Self::resolve_overlaps_in_plan(&mut catalog.plan);
         let selected_target_id = catalog.plan.targets.first().map(|t| t.id.clone());
+        let mut selected_target_ids = HashSet::new();
+        if let Some(id) = &selected_target_id {
+            selected_target_ids.insert(id.clone());
+        }
         Self {
             store,
             catalog,
             selected_target_id,
+            selected_target_ids,
             explore_request: None,
             explore_nonce: 0,
             plan_revision: 0,
@@ -131,14 +139,83 @@ impl PlanModel {
         self.selected_target_id.as_deref()
     }
 
+    pub fn selected_target_ids(&self) -> &HashSet<String> {
+        &self.selected_target_ids
+    }
+
+    pub fn is_target_selected(&self, id: &str) -> bool {
+        self.selected_target_ids.contains(id)
+    }
+
     pub fn selected_target(&self) -> Option<&PlannedTarget> {
         let id = self.selected_target_id.as_deref()?;
         self.catalog.plan.targets.iter().find(|t| t.id == id)
     }
 
     pub fn select_target(&mut self, id: Option<String>, cx: &mut Context<Self>) {
-        if self.selected_target_id != id {
+        let mut next_set = HashSet::new();
+        if let Some(ref tid) = id {
+            next_set.insert(tid.clone());
+        }
+        if self.selected_target_id != id || self.selected_target_ids != next_set {
             self.selected_target_id = id;
+            self.selected_target_ids = next_set;
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_target_selection(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.catalog.plan.targets.iter().any(|t| t.id == id) {
+            return;
+        }
+        if self.selected_target_ids.contains(id) {
+            self.selected_target_ids.remove(id);
+            if self.selected_target_id.as_deref() == Some(id) {
+                self.selected_target_id = self
+                    .catalog
+                    .plan
+                    .targets
+                    .iter()
+                    .find(|t| self.selected_target_ids.contains(&t.id))
+                    .map(|t| t.id.clone());
+            }
+        } else {
+            self.selected_target_ids.insert(id.to_string());
+            self.selected_target_id = Some(id.to_string());
+        }
+        cx.notify();
+    }
+
+    pub fn set_selected_targets(
+        &mut self,
+        ids: Vec<String>,
+        primary: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let valid_ids: HashSet<String> = self
+            .catalog
+            .plan
+            .targets
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        let next_set: HashSet<String> = ids
+            .into_iter()
+            .filter(|id| valid_ids.contains(id))
+            .collect();
+        let next_primary = primary
+            .filter(|id| next_set.contains(id))
+            .or_else(|| {
+                self.catalog
+                    .plan
+                    .targets
+                    .iter()
+                    .find(|t| next_set.contains(&t.id))
+                    .map(|t| t.id.clone())
+            });
+        if self.selected_target_ids != next_set || self.selected_target_id != next_primary {
+            self.selected_target_ids = next_set;
+            self.selected_target_id = next_primary;
             cx.notify();
         }
     }
@@ -147,6 +224,21 @@ impl PlanModel {
         if self.catalog.plan.night_date != night_date {
             self.catalog.plan.night_date = night_date;
             self.save_and_notify(cx);
+        }
+    }
+
+    fn resolve_overlaps_in_plan(plan: &mut NightPlan) {
+        let mut order: Vec<usize> = (0..plan.targets.len()).collect();
+        order.sort_by_key(|&i| (plan.targets[i].start_unix_secs, i));
+        let mut cursor_end: Option<i64> = None;
+        for idx in order {
+            let target = &mut plan.targets[idx];
+            if let Some(prev_end) = cursor_end
+                && target.start_unix_secs < prev_end
+            {
+                target.start_unix_secs = prev_end;
+            }
+            cursor_end = Some(target.footprint_end_unix_secs());
         }
     }
 
@@ -180,7 +272,7 @@ impl PlanModel {
             .plan
             .targets
             .iter()
-            .map(PlannedTarget::end_unix_secs)
+            .map(PlannedTarget::footprint_end_unix_secs)
             .max()
             .unwrap_or(default_start_unix_secs);
 
@@ -189,13 +281,6 @@ impl PlanModel {
         let steps = templates
             .iter()
             .find(|t| t.id == selected_tpl_id)
-            .or_else(|| {
-                builtin_sequence_templates()
-                    .into_iter()
-                    .find(|t| t.id == "quick-test")
-                    .as_ref()
-                    .map(|_| unreachable!())
-            })
             .map(|t| t.steps.clone())
             .unwrap_or_else(|| {
                 builtin_sequence_templates()
@@ -232,7 +317,10 @@ impl PlanModel {
         };
 
         self.catalog.plan.targets.push(target);
+        Self::resolve_overlaps_in_plan(&mut self.catalog.plan);
         self.selected_target_id = Some(id.clone());
+        self.selected_target_ids.clear();
+        self.selected_target_ids.insert(id.clone());
         self.save_and_notify(cx);
         id
     }
@@ -248,9 +336,23 @@ impl PlanModel {
             return false;
         };
         self.catalog.plan.targets.remove(pos);
+        self.selected_target_ids.remove(target_id);
         if self.selected_target_id.as_deref() == Some(target_id) {
-            let next_idx = pos.min(self.catalog.plan.targets.len().saturating_sub(1));
-            self.selected_target_id = self.catalog.plan.targets.get(next_idx).map(|t| t.id.clone());
+            self.selected_target_id = self
+                .catalog
+                .plan
+                .targets
+                .iter()
+                .find(|t| self.selected_target_ids.contains(&t.id))
+                .map(|t| t.id.clone())
+                .or_else(|| {
+                    let next_idx = pos.min(self.catalog.plan.targets.len().saturating_sub(1));
+                    let next = self.catalog.plan.targets.get(next_idx).map(|t| t.id.clone());
+                    if let Some(ref nid) = next {
+                        self.selected_target_ids.insert(nid.clone());
+                    }
+                    next
+                });
         }
         self.save_and_notify(cx);
         true
@@ -267,26 +369,129 @@ impl PlanModel {
         true
     }
 
+    pub fn move_targets_from_baseline(
+        &mut self,
+        base_starts: &[(String, i64)],
+        requested_delta: i64,
+        window_start: i64,
+        window_end: i64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if base_starts.is_empty() {
+            return false;
+        }
+
+        let moving_ids: HashSet<&str> = base_starts.iter().map(|(id, _)| id.as_str()).collect();
+        let mut moving_intervals: Vec<(i64, i64)> = Vec::with_capacity(base_starts.len());
+        let mut min_base_start = i64::MAX;
+        let mut max_base_start = i64::MIN;
+        let mut max_base_end = i64::MIN;
+
+        for (id, base_start) in base_starts {
+            let Some(target) = self.catalog.plan.targets.iter().find(|t| t.id == *id) else {
+                continue;
+            };
+            let dur = (target.estimated_duration().as_secs() as i64).max(MIN_BLOCK_FOOTPRINT_SECS);
+            let base_end = base_start.saturating_add(dur);
+            moving_intervals.push((*base_start, base_end));
+            min_base_start = min_base_start.min(*base_start);
+            max_base_start = max_base_start.max(*base_start);
+            max_base_end = max_base_end.max(base_end);
+        }
+
+        if moving_intervals.is_empty() {
+            return false;
+        }
+
+        let stationary: Vec<(i64, i64)> = self
+            .catalog
+            .plan
+            .targets
+            .iter()
+            .filter(|t| !moving_ids.contains(t.id.as_str()))
+            .map(|t| (t.start_unix_secs, t.footprint_end_unix_secs()))
+            .collect();
+
+        let min_delta = window_start.saturating_sub(min_base_start);
+        let max_start_cap = window_end
+            .saturating_sub(MIN_BLOCK_FOOTPRINT_SECS)
+            .saturating_sub(max_base_start);
+        let max_end_cap = window_end.saturating_sub(max_base_end);
+        let max_delta = if max_end_cap >= min_delta {
+            max_end_cap
+        } else {
+            max_start_cap.max(min_delta)
+        };
+
+        let resolved_delta = snap_group_delta_without_overlap(
+            &moving_intervals,
+            &stationary,
+            requested_delta,
+            min_delta,
+            max_delta,
+        );
+
+        let mut changed = false;
+        for (id, base_start) in base_starts {
+            if let Some(target) = self.catalog.plan.targets.iter_mut().find(|t| t.id == *id) {
+                let next_start = base_start.saturating_add(resolved_delta);
+                if target.start_unix_secs != next_start {
+                    target.start_unix_secs = next_start;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save_and_notify(cx);
+        }
+        changed
+    }
+
+    pub fn nudge_target_start(
+        &mut self,
+        target_id: &str,
+        delta_secs: i64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(base_start) = self
+            .catalog
+            .plan
+            .targets
+            .iter()
+            .find(|t| t.id == target_id)
+            .map(|t| t.start_unix_secs)
+        else {
+            return false;
+        };
+        let wide_min = i64::MIN / 4;
+        let wide_max = i64::MAX / 4;
+        self.move_targets_from_baseline(
+            &[(target_id.to_string(), base_start)],
+            delta_secs,
+            wide_min,
+            wide_max,
+            cx,
+        )
+    }
+
     pub fn set_target_start_unix_secs(
         &mut self,
         target_id: &str,
         start_unix_secs: i64,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(target) = self
+        let Some(cur_start) = self
             .catalog
             .plan
             .targets
-            .iter_mut()
+            .iter()
             .find(|t| t.id == target_id)
+            .map(|t| t.start_unix_secs)
         else {
             return false;
         };
-        if target.start_unix_secs != start_unix_secs {
-            target.start_unix_secs = start_unix_secs;
-            self.save_and_notify(cx);
-        }
-        true
+        let delta = start_unix_secs.saturating_sub(cur_start);
+        self.nudge_target_start(target_id, delta, cx)
     }
 
     pub fn set_target_enabled(
@@ -361,8 +566,38 @@ impl PlanModel {
             return false;
         };
         target.steps = steps;
+        Self::resolve_overlaps_in_plan(&mut self.catalog.plan);
         self.save_and_notify(cx);
         true
+    }
+
+    pub fn apply_template_to_selected(
+        &mut self,
+        template_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(steps) = self
+            .all_templates()
+            .into_iter()
+            .find(|tpl| tpl.id == template_id)
+            .map(|tpl| tpl.steps)
+        else {
+            return false;
+        };
+        let mut applied = false;
+        for target in &mut self.catalog.plan.targets {
+            if self.selected_target_ids.contains(&target.id)
+                || self.selected_target_id.as_deref() == Some(target.id.as_str())
+            {
+                target.steps.clone_from(&steps);
+                applied = true;
+            }
+        }
+        if applied {
+            Self::resolve_overlaps_in_plan(&mut self.catalog.plan);
+            self.save_and_notify(cx);
+        }
+        applied
     }
 
     pub fn add_step(
@@ -381,6 +616,7 @@ impl PlanModel {
             return false;
         };
         target.steps.push(step);
+        Self::resolve_overlaps_in_plan(&mut self.catalog.plan);
         self.save_and_notify(cx);
         true
     }
@@ -405,6 +641,7 @@ impl PlanModel {
             return false;
         };
         f(step);
+        Self::resolve_overlaps_in_plan(&mut self.catalog.plan);
         self.save_and_notify(cx);
         true
     }
@@ -477,6 +714,7 @@ impl PlanModel {
             return false;
         };
         target.steps.insert(step_idx + 1, step);
+        Self::resolve_overlaps_in_plan(&mut self.catalog.plan);
         self.save_and_notify(cx);
         true
     }
@@ -652,8 +890,6 @@ pub fn format_radec_compact(ra_deg: f64, dec_deg: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use gpui::TestAppContext;
     use protocol::{CaptureParams, FrameType, TARGET_HUE_PALETTE};
 
@@ -687,13 +923,13 @@ mod tests {
             assert_eq!(m.plan().targets.len(), 2);
             assert_eq!(m.plan().targets[0].color_hue_deg, TARGET_HUE_PALETTE[0]);
             assert_eq!(m.plan().targets[1].color_hue_deg, TARGET_HUE_PALETTE[1]);
-            // Second target starts immediately at first target's derived end_unix_secs
+            // Second target starts at first target's footprint_end_unix_secs
             assert_eq!(
                 m.plan().targets[1].start_unix_secs,
-                m.plan().targets[0].end_unix_secs()
+                m.plan().targets[0].footprint_end_unix_secs()
             );
 
-            // Step CRUD updates derived duration
+            // Step CRUD updates derived duration and pushes overlapping subsequent targets forward
             let before_dur = m.plan().targets[0].estimated_duration();
             assert!(m.add_step(
                 &id1,
@@ -713,6 +949,10 @@ mod tests {
                 m.plan().targets[0].estimated_duration(),
                 before_dur + Duration::from_secs(50)
             );
+            assert!(
+                m.plan().targets[1].start_unix_secs >= m.plan().targets[0].footprint_end_unix_secs()
+            );
+
             assert!(m.duplicate_step(&id1, 1, cx));
             assert_eq!(m.plan().targets[0].steps.len(), 3);
             assert!(m.remove_step(&id1, 2, cx));
@@ -739,6 +979,45 @@ mod tests {
 
         let persisted: PlannerCatalog = store.load().expect("catalog saved");
         assert_eq!(persisted.plan.targets.len(), 1);
+    }
+
+    #[gpui::test]
+    fn multi_selection_and_non_overlapping_group_move(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let model = cx.new(|_cx| PlanModel::new(store, PlannerCatalog::default()));
+
+        model.update(cx, |m, cx| {
+            let id1 = m.add_target("T1", 10.0, 20.0, None, 10_000, None, cx);
+            let id2 = m.add_target("T2", 20.0, 20.0, None, 10_000, None, cx);
+            let _id3 = m.add_target("T3", 30.0, 20.0, None, 10_000, None, cx);
+
+            m.select_target(Some(id1.clone()), cx);
+            assert_eq!(m.selected_target_ids().len(), 1);
+            m.toggle_target_selection(&id2, cx);
+            assert_eq!(m.selected_target_ids().len(), 2);
+            assert!(m.is_target_selected(&id1));
+            assert!(m.is_target_selected(&id2));
+
+            let s1 = m.plan().targets[0].start_unix_secs;
+            let s2 = m.plan().targets[1].start_unix_secs;
+            let s3_start = m.plan().targets[2].start_unix_secs;
+            let s3_end = m.plan().targets[2].footprint_end_unix_secs();
+
+            // Drag T1+T2 across stationary T3 -> snaps cleanly past s3_end while preserving spacing
+            let spacing = s2 - s1;
+            m.move_targets_from_baseline(
+                &[(id1.clone(), s1), (id2.clone(), s2)],
+                (s3_start - s1) + 120,
+                9_000,
+                20_000,
+                cx,
+            );
+            let new_s1 = m.plan().targets[0].start_unix_secs;
+            let new_s2 = m.plan().targets[1].start_unix_secs;
+            assert_eq!(new_s2 - new_s1, spacing);
+            assert!(new_s1 >= s3_end || new_s2 <= s3_start);
+            assert_eq!(m.plan().overlapping_target_indices(), [] as [(usize, usize); 0]);
+        });
     }
 
     #[gpui::test]

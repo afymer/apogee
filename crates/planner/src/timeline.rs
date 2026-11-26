@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use celestial::coords::{Angle, canonical_spherical_to_cartesian};
-use celestial::solar::{lunar_ephemeris, solar_altitude_deg};
 use celestial::equatorial_az_alt_deg;
+use celestial::solar::{lunar_ephemeris, solar_altitude_deg};
 use client::GlobalDaemonState;
 use glam::DVec3;
 use gpui::{
@@ -127,9 +127,15 @@ struct SampledNightData {
     targets: Vec<TargetCurve>,
 }
 
-struct DraggedTargetBlock {
-    target_id: String,
-    grab_offset_secs: i64,
+enum TimelineDrag {
+    MoveBlocks {
+        base_starts: Vec<(String, i64)>,
+        anchor_cursor_unix: i64,
+    },
+    MarqueeSelect {
+        start_x: f32,
+        current_x: f32,
+    },
 }
 
 pub struct NightTimelineView {
@@ -138,7 +144,7 @@ pub struct NightTimelineView {
     cache_key: Option<SampleCacheKey>,
     sampled: Option<Arc<SampledNightData>>,
     track_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
-    dragging_target: Option<DraggedTargetBlock>,
+    drag: Option<TimelineDrag>,
 }
 
 impl NightTimelineView {
@@ -178,7 +184,7 @@ impl NightTimelineView {
                 cache_key: None,
                 sampled: None,
                 track_bounds: Arc::new(Mutex::new(None)),
-                dragging_target: None,
+                drag: None,
             };
             view.ensure_samples_fresh(cx);
             view
@@ -313,7 +319,8 @@ impl NightTimelineView {
 
     fn paint_graph(
         sampled: &SampledNightData,
-        selected_id: Option<&str>,
+        primary_selected_id: Option<&str>,
+        selected_ids: &HashSet<String>,
         show_moon_sep: bool,
         now_unix_secs: Option<f64>,
         bounds: Bounds<Pixels>,
@@ -390,7 +397,8 @@ impl NightTimelineView {
             if curve.alts.len() < 2 {
                 continue;
             }
-            let is_selected = selected_id == Some(curve.target_id.as_str());
+            let is_selected = selected_ids.contains(&curve.target_id);
+            let is_primary = primary_selected_id == Some(curve.target_id.as_str());
             let hue_norm = curve.hue_deg.rem_euclid(360.0) / 360.0;
             let vis_alpha = if is_selected { 0.95 } else { 0.72 };
             let dim_alpha = if is_selected { 0.24 } else { 0.14 };
@@ -423,7 +431,6 @@ impl NightTimelineView {
                 window.paint_path(path, hsla(hue_norm, 0.80, 0.62, vis_alpha));
             }
 
-            // Meridian transit diamond/dot marker
             if let Some(idx) = curve.meridian_transit_idx {
                 let tx = x_of(idx);
                 let ty = Self::alt_to_y(curve.alts[idx], bounds);
@@ -434,8 +441,8 @@ impl NightTimelineView {
                 ));
             }
 
-            // Selected target's Moon separation curve (dashed, mapped sep/2 onto [0..90] deg)
-            if is_selected && show_moon_sep && curve.moon_sep_deg.len() >= 2 {
+            // Primary selected target's Moon separation curve (dashed, mapped sep/2 onto [0..90] deg)
+            if is_primary && show_moon_sep && curve.moon_sep_deg.len() >= 2 {
                 let mut sep_path = PathBuilder::stroke(px(1.3));
                 let mut has_sep = false;
                 for i in (1..curve.moon_sep_deg.len()).step_by(2) {
@@ -468,12 +475,16 @@ impl NightTimelineView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let plan_read = cx
+        let (selected_id, selected_count) = cx
             .try_global::<GlobalNightPlan>()
-            .map(|g| g.0.read(cx));
-        let has_overlaps =
-            plan_read.is_some_and(|m| !m.plan().overlapping_target_indices().is_empty());
-        let selected_id = plan_read.and_then(|m| m.selected_target_id().map(str::to_string));
+            .map(|g| {
+                let m = g.0.read(cx);
+                (
+                    m.selected_target_id().map(str::to_string),
+                    m.selected_target_ids().len(),
+                )
+            })
+            .unwrap_or((None, 0));
 
         let moon_illum = self
             .sampled
@@ -501,11 +512,11 @@ impl NightTimelineView {
                             .size(LabelSize::Small)
                             .color(Color::Default),
                     )
-                    .when(has_overlaps, |el| {
+                    .when(selected_count > 1, |el| {
                         el.child(
-                            Label::new("Overlap detected")
+                            Label::new(format!("{selected_count} selected · drag to move together"))
                                 .size(LabelSize::XSmall)
-                                .color(Color::Error),
+                                .color(Color::Accent),
                         )
                     }),
             )
@@ -590,13 +601,7 @@ impl NightTimelineView {
             .try_global::<GlobalObserver>()
             .map_or(0, |g| g.0.read(cx).effective_utc_offset_secs());
         let plan = plan_model.plan();
-        let selected_id = plan_model.selected_target_id().map(str::to_string);
-        let overlaps = plan.overlapping_target_indices();
-        let mut overlapping_set = HashSet::new();
-        for (a, b) in overlaps {
-            overlapping_set.insert(a);
-            overlapping_set.insert(b);
-        }
+        let selected_ids = plan_model.selected_target_ids().clone();
 
         let span = (sampled.window_end_secs - sampled.window_start_secs).max(60.0);
         let locked = is_session_locked(cx);
@@ -617,34 +622,40 @@ impl NightTimelineView {
                     .clamp(0.0, 1.0) as f32;
                 let left_px = start_f * track_width_px;
                 let raw_w_px = (end_f - start_f) * track_width_px;
-                let width_px = raw_w_px.max(22.0).min(track_width_px - left_px.min(track_width_px - 22.0));
+                let width_px =
+                    raw_w_px.max(22.0).min(track_width_px - left_px.min(track_width_px - 22.0));
                 let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
-                let is_sel = selected_id.as_deref() == Some(target.id.as_str());
-                let is_overlap = overlapping_set.contains(&idx);
+                let is_sel = selected_ids.contains(&target.id);
                 let dur_text = format_duration_compact(target.estimated_duration());
                 let start_text = format_unix_hm(target.start_unix_secs, utc_offset);
-                let target_id = target.id.clone();
-                let start_unix = target.start_unix_secs;
-                let enabled = target.enabled;
 
                 (
                     idx,
-                    target_id,
+                    target.id.clone(),
                     target.name.clone(),
                     start_text,
                     dur_text,
-                    start_unix,
                     left_px,
                     width_px,
                     hue,
                     is_sel,
-                    is_overlap,
-                    enabled,
+                    target.enabled,
                 )
             })
             .collect();
 
+        let marquee_rect = if let Some(TimelineDrag::MarqueeSelect { start_x, current_x }) = &self.drag
+        {
+            let x0 = start_x.min(*current_x);
+            let w = (start_x - current_x).abs().max(2.0);
+            Some((x0, w))
+        } else {
+            None
+        };
+
         let colors = cx.theme().colors();
+        let sampled_bg_down = sampled.clone();
+        let bounds_bg_down = self.track_bounds.clone();
 
         div()
             .id("timeline_blocks_track")
@@ -668,14 +679,40 @@ impl NightTimelineView {
                 .absolute()
                 .size_full(),
             )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                    let Some(bounds) = bounds_bg_down.lock().ok().and_then(|g| *g) else {
+                        return;
+                    };
+                    let width = f32::from(bounds.size.width).max(1.0);
+                    let local_x = (f32::from(ev.position.x) - f32::from(bounds.origin.x))
+                        .clamp(0.0, width);
+                    this.drag = Some(TimelineDrag::MarqueeSelect {
+                        start_x: local_x,
+                        current_x: local_x,
+                    });
+                    let frac = f64::from(local_x / width);
+                    let span = sampled_bg_down.window_end_secs - sampled_bg_down.window_start_secs;
+                    let t = (sampled_bg_down.window_start_secs + frac * span).round() as i64;
+                    if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                        plan.update(cx, |m, cx| {
+                            let ids: Vec<String> = m
+                                .plan()
+                                .targets
+                                .iter()
+                                .filter(|tgt| {
+                                    tgt.start_unix_secs <= t && t <= tgt.footprint_end_unix_secs()
+                                })
+                                .map(|tgt| tgt.id.clone())
+                                .collect();
+                            m.set_selected_targets(ids, None, cx);
+                        });
+                    }
+                    cx.notify();
+                }),
+            )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
-                let Some(drag) = &this.dragging_target else {
-                    return;
-                };
-                if is_session_locked(cx) {
-                    this.dragging_target = None;
-                    return;
-                }
                 let Some(sampled) = &this.sampled else {
                     return;
                 };
@@ -683,32 +720,76 @@ impl NightTimelineView {
                     return;
                 };
                 let width = f32::from(bounds.size.width).max(1.0);
-                let frac = ((f32::from(ev.position.x) - f32::from(bounds.origin.x)) / width)
-                    .clamp(0.0, 1.0) as f64;
+                let local_x =
+                    (f32::from(ev.position.x) - f32::from(bounds.origin.x)).clamp(0.0, width);
+                let frac = f64::from(local_x / width);
                 let span = sampled.window_end_secs - sampled.window_start_secs;
-                let cursor_unix = sampled.window_start_secs + frac * span;
-                let raw_start = cursor_unix - drag.grab_offset_secs as f64;
-                let step = if ev.modifiers.shift { 60 } else { 300 };
-                let snapped = snap_unix_secs(
-                    raw_start,
-                    step,
-                    sampled.window_start_secs,
-                    sampled.window_end_secs,
-                );
-                let target_id = drag.target_id.clone();
-                if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
-                    plan.update(cx, |m, cx| {
-                        m.set_target_start_unix_secs(&target_id, snapped, cx);
-                    });
+
+                match &mut this.drag {
+                    Some(TimelineDrag::MoveBlocks {
+                        base_starts,
+                        anchor_cursor_unix,
+                    }) => {
+                        if is_session_locked(cx) {
+                            this.drag = None;
+                            return;
+                        }
+                        let cursor_unix = (sampled.window_start_secs + frac * span).round() as i64;
+                        let raw_delta = cursor_unix.saturating_sub(*anchor_cursor_unix);
+                        let step = if ev.modifiers.shift { 60 } else { 300 };
+                        let snapped_delta = ((raw_delta as f64 / step as f64).round() as i64) * step;
+                        let base_snapshot = base_starts.clone();
+                        let win_start = sampled.window_start_secs.round() as i64;
+                        let win_end = sampled.window_end_secs.round() as i64;
+                        if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                        {
+                            plan.update(cx, |m, cx| {
+                                m.move_targets_from_baseline(
+                                    &base_snapshot,
+                                    snapped_delta,
+                                    win_start,
+                                    win_end,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                    Some(TimelineDrag::MarqueeSelect { start_x, current_x }) => {
+                        *current_x = local_x;
+                        let x_lo = start_x.min(*current_x);
+                        let x_hi = start_x.max(*current_x);
+                        let t_lo = (sampled.window_start_secs + f64::from(x_lo / width) * span)
+                            .round() as i64;
+                        let t_hi = (sampled.window_start_secs + f64::from(x_hi / width) * span)
+                            .round() as i64;
+                        if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                        {
+                            plan.update(cx, |m, cx| {
+                                let ids: Vec<String> = m
+                                    .plan()
+                                    .targets
+                                    .iter()
+                                    .filter(|tgt| {
+                                        tgt.start_unix_secs <= t_hi
+                                            && tgt.footprint_end_unix_secs() >= t_lo
+                                    })
+                                    .map(|tgt| tgt.id.clone())
+                                    .collect();
+                                m.set_selected_targets(ids, None, cx);
+                            });
+                        }
+                        cx.notify();
+                    }
+                    None => {}
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                if this.dragging_target.take().is_some() {
+                if this.drag.take().is_some() {
                     cx.notify();
                 }
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                if this.dragging_target.take().is_some() {
+                if this.drag.take().is_some() {
                     cx.notify();
                 }
             }))
@@ -719,19 +800,15 @@ impl NightTimelineView {
                     name,
                     start_text,
                     dur_text,
-                    start_unix,
                     left_px,
                     width_px,
                     hue,
                     is_sel,
-                    is_overlap,
                     enabled,
                 )| {
                     let bg_alpha = if enabled { 0.78 } else { 0.28 };
-                    let border_col = if is_overlap {
-                        hsla(0.0, 0.85, 0.62, 1.0)
-                    } else if is_sel {
-                        hsla(hue, 0.90, 0.75, 1.0)
+                    let border_col = if is_sel {
+                        hsla(hue, 0.92, 0.78, 1.0)
                     } else {
                         hsla(hue, 0.65, 0.50, 0.70)
                     };
@@ -746,7 +823,7 @@ impl NightTimelineView {
                         .h(px(BLOCK_TRACK_HEIGHT_PX - 8.0))
                         .px_1p5()
                         .rounded_sm()
-                        .bg(hsla(hue, 0.68, 0.36, bg_alpha))
+                        .bg(hsla(hue, 0.68, if is_sel { 0.42 } else { 0.34 }, bg_alpha))
                         .border_1()
                         .border_color(border_col)
                         .flex()
@@ -757,12 +834,28 @@ impl NightTimelineView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                                if let Some(plan) =
+                                cx.stop_propagation();
+                                let mods = ev.modifiers;
+                                let is_mod = mods.control || mods.platform || mods.shift;
+                                let Some(plan) =
                                     cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                                {
+                                else {
+                                    return;
+                                };
+
+                                if is_mod {
+                                    let tid = target_id.clone();
+                                    plan.update(cx, |m, cx| m.toggle_target_selection(&tid, cx));
+                                    cx.notify();
+                                    return;
+                                }
+
+                                let already_sel = plan.read(cx).is_target_selected(&target_id);
+                                if !already_sel {
                                     let tid = target_id.clone();
                                     plan.update(cx, |m, cx| m.select_target(Some(tid), cx));
                                 }
+
                                 if !locked
                                     && let Some(bounds) =
                                         bounds_for_down.lock().ok().and_then(|g| *g)
@@ -775,12 +868,21 @@ impl NightTimelineView {
                                         as f64;
                                     let span = sampled_for_down.window_end_secs
                                         - sampled_for_down.window_start_secs;
-                                    let cursor_unix =
+                                    let anchor_cursor_unix =
                                         (sampled_for_down.window_start_secs + frac * span).round()
                                             as i64;
-                                    this.dragging_target = Some(DraggedTargetBlock {
-                                        target_id: target_id.clone(),
-                                        grab_offset_secs: cursor_unix.saturating_sub(start_unix),
+                                    let base_starts: Vec<(String, i64)> = {
+                                        let m = plan.read(cx);
+                                        m.plan()
+                                            .targets
+                                            .iter()
+                                            .filter(|t| m.is_target_selected(&t.id))
+                                            .map(|t| (t.id.clone(), t.start_unix_secs))
+                                            .collect()
+                                    };
+                                    this.drag = Some(TimelineDrag::MoveBlocks {
+                                        base_starts,
+                                        anchor_cursor_unix,
                                     });
                                 }
                                 cx.notify();
@@ -798,6 +900,20 @@ impl NightTimelineView {
                         )
                 },
             ))
+            .when_some(marquee_rect, |el, (x0, w)| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(x0))
+                        .top(px(2.0))
+                        .w(px(w))
+                        .h(px(BLOCK_TRACK_HEIGHT_PX - 4.0))
+                        .rounded_sm()
+                        .bg(hsla(0.58, 0.75, 0.65, 0.18))
+                        .border_1()
+                        .border_color(hsla(0.58, 0.85, 0.72, 0.80)),
+                )
+            })
             .into_any_element()
     }
 }
@@ -806,9 +922,16 @@ impl Render for NightTimelineView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_samples_fresh(cx);
         let sampled = self.sampled.clone();
-        let selected_id = cx
+        let (primary_id, selected_ids) = cx
             .try_global::<GlobalNightPlan>()
-            .and_then(|g| g.0.read(cx).selected_target_id().map(str::to_string));
+            .map(|g| {
+                let m = g.0.read(cx);
+                (
+                    m.selected_target_id().map(str::to_string),
+                    m.selected_target_ids().clone(),
+                )
+            })
+            .unwrap_or_default();
         let now_unix = cx
             .try_global::<GlobalObserver>()
             .map(|g| g.0.read(cx).effective_unix_seconds());
@@ -835,7 +958,8 @@ impl Render for NightTimelineView {
                                 move |bounds, (), window, _| {
                                     Self::paint_graph(
                                         &s,
-                                        selected_id.as_deref(),
+                                        primary_id.as_deref(),
+                                        &selected_ids,
                                         show_moon_sep,
                                         now_unix,
                                         bounds,

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::capture::{CaptureParams, FrameType, ImagingSequence, SaveLocationConfig, SequenceStep};
 
 pub const TARGET_HUE_PALETTE: [f32; 8] = [205.0, 32.0, 145.0, 285.0, 345.0, 52.0, 175.0, 240.0];
+pub const MIN_BLOCK_FOOTPRINT_SECS: i64 = 60;
 
 fn default_true() -> bool {
     true
@@ -48,6 +49,11 @@ impl PlannedTarget {
     pub fn end_unix_secs(&self) -> i64 {
         self.start_unix_secs
             .saturating_add(self.estimated_duration().as_secs() as i64)
+    }
+
+    pub fn footprint_end_unix_secs(&self) -> i64 {
+        self.start_unix_secs
+            .saturating_add((self.estimated_duration().as_secs() as i64).max(MIN_BLOCK_FOOTPRINT_SECS))
     }
 
     pub fn total_frames(&self) -> u32 {
@@ -156,6 +162,87 @@ impl NightPlan {
         }
         overlaps
     }
+}
+
+/// Resolves `requested_delta` for a rigid group of `moving` intervals `[(start, end)]`
+/// against `stationary` intervals `[(start, end)]` within `[min_delta, max_delta]`.
+/// Overlaps are strictly forbidden: if `requested_delta` would cause any overlap, snaps
+/// flush before or after the merged forbidden region (picking the nearest valid snap).
+pub fn snap_group_delta_without_overlap(
+    moving: &[(i64, i64)],
+    stationary: &[(i64, i64)],
+    requested_delta: i64,
+    min_delta: i64,
+    max_delta: i64,
+) -> i64 {
+    if moving.is_empty() || min_delta > max_delta {
+        return 0;
+    }
+
+    let req = requested_delta.clamp(min_delta, max_delta);
+
+    let mut forbidden: Vec<(i64, i64)> = Vec::new();
+    for &(m_start, m_end) in moving {
+        for &(s_start, s_end) in stationary {
+            let lo = s_start.saturating_sub(m_end);
+            let hi = s_end.saturating_sub(m_start);
+            if lo < hi {
+                forbidden.push((lo, hi));
+            }
+        }
+    }
+
+    if forbidden.is_empty() {
+        return req;
+    }
+
+    forbidden.sort_unstable_by_key(|&(lo, hi)| (lo, hi));
+    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(forbidden.len());
+    for (lo, hi) in forbidden {
+        if let Some(last) = merged.last_mut()
+            && lo <= last.1
+        {
+            last.1 = last.1.max(hi);
+        } else {
+            merged.push((lo, hi));
+        }
+    }
+
+    let Some(&(l, r)) = merged.iter().find(|&&(l, r)| l < req && req < r) else {
+        return req;
+    };
+
+    let direct_candidates = [l, r];
+    let mut best_direct: Option<i64> = None;
+    for cand in direct_candidates {
+        if cand >= min_delta && cand <= max_delta {
+            best_direct = Some(match best_direct {
+                Some(prev) if (prev - req).abs() <= (cand - req).abs() => prev,
+                _ => cand,
+            });
+        }
+    }
+    if let Some(best) = best_direct {
+        return best;
+    }
+
+    let is_valid = |d: i64| -> bool {
+        d >= min_delta && d <= max_delta && !merged.iter().any(|&(fl, fr)| fl < d && d < fr)
+    };
+    let mut best: Option<i64> = None;
+    for cand in merged
+        .iter()
+        .flat_map(|&(fl, fr)| [fl, fr])
+        .chain([min_delta, max_delta])
+    {
+        if is_valid(cand) {
+            best = Some(match best {
+                Some(prev) if (prev - req).abs() <= (cand - req).abs() => prev,
+                _ => cand,
+            });
+        }
+    }
+    best.unwrap_or(0)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -361,5 +448,52 @@ mod tests {
         let req_json = serde_json::to_string(&req).unwrap();
         let req_decoded: NightPlanRunRequest = serde_json::from_str(&req_json).unwrap();
         assert_eq!(req_decoded, req);
+    }
+
+    #[test]
+    fn snap_group_delta_prevents_overlaps_and_preserves_spacing() {
+        // Moving [100, 200] against stationary [300, 400]: forbidden open interval is (100, 300).
+        let moving = [(100, 200)];
+        let stationary = [(300, 400)];
+
+        // Free space before obstacle
+        assert_eq!(
+            snap_group_delta_without_overlap(&moving, &stationary, 50, -500, 500),
+            50
+        );
+        // Slightly inside left side (delta=150 -> [250, 350]): snaps flush before (delta=100 -> [200, 300])
+        assert_eq!(
+            snap_group_delta_without_overlap(&moving, &stationary, 150, -500, 500),
+            100
+        );
+        // Past midpoint (delta=240 -> [340, 440]): snaps flush after (delta=300 -> [400, 500])
+        assert_eq!(
+            snap_group_delta_without_overlap(&moving, &stationary, 240, -500, 500),
+            300
+        );
+        // When right snap exceeds max_delta=250, falls back to left snap (delta=100)
+        assert_eq!(
+            snap_group_delta_without_overlap(&moving, &stationary, 240, -500, 250),
+            100
+        );
+
+        // Contiguous chain [300, 400] + [400, 500] merges into (100, 400): never snaps into seam
+        let chain = [(300, 400), (400, 500)];
+        assert_eq!(
+            snap_group_delta_without_overlap(&moving, &chain, 260, -500, 500),
+            400
+        );
+
+        // Multi-block group [100, 200] & [250, 350] against [400, 500]:
+        // forbidden for block1 is (200, 400), for block2 is (50, 250) -> merged (50, 400)
+        let group = [(100, 200), (250, 350)];
+        assert_eq!(
+            snap_group_delta_without_overlap(&group, &[(400, 500)], 150, -500, 500),
+            50
+        );
+        assert_eq!(
+            snap_group_delta_without_overlap(&group, &[(400, 500)], 280, -500, 500),
+            400
+        );
     }
 }
