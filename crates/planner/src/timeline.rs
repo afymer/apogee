@@ -7,9 +7,9 @@ use celestial::solar::{lunar_ephemeris, solar_altitude_deg};
 use client::GlobalDaemonState;
 use glam::DVec3;
 use gpui::{
-    App, Bounds, Context, DispatchPhase, Entity, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathBuilder, Pixels, Render, Window, canvas, div, fill, hsla, point,
-    prelude::*, px, rgb, size,
+    App, Bounds, Context, DispatchPhase, Entity, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Render, Window, canvas, div, fill, hsla, linear_color_stop,
+    linear_gradient, point, prelude::*, px, rgb, size,
 };
 use hifitime::Epoch;
 use horizon::GlobalHorizons;
@@ -335,17 +335,29 @@ impl NightTimelineView {
         let origin_x = f32::from(bounds.origin.x);
         let origin_y = f32::from(bounds.origin.y);
 
-        // 1. Twilight background slices
-        let n_slices = sampled.solar_alts.len().saturating_sub(1).max(1);
-        let slice_w = w / n_slices as f32;
-        for i in 0..n_slices {
-            let mid_alt = f64::midpoint(sampled.solar_alts[i], sampled.solar_alts[i + 1]);
-            let col = solar_altitude_to_sky_color(mid_alt);
-            let x = origin_x + i as f32 * slice_w;
-            window.paint_quad(fill(
-                Bounds::new(point(px(x), px(origin_y)), size(px(slice_w + 0.6), px(h))),
-                col,
-            ));
+        // 1. Smooth twilight atmospheric background gradient
+        window.paint_quad(fill(bounds, rgb(0x070b16)));
+        let n_slices = sampled.solar_alts.len().saturating_sub(1);
+        if n_slices > 0 {
+            for i in 0..n_slices {
+                let x0 = origin_x + (i as f32 / n_slices as f32) * w;
+                let x1 = origin_x + ((i + 1) as f32 / n_slices as f32) * w;
+                let overlap = if i + 1 < n_slices { 0.5 } else { 0.0 };
+                let strip_w = (x1 - x0 + overlap).min(origin_x + w - x0);
+                if strip_w <= 0.0 {
+                    continue;
+                }
+                let c0 = solar_altitude_to_sky_color(sampled.solar_alts[i]);
+                let c1 = solar_altitude_to_sky_color(sampled.solar_alts[i + 1]);
+                window.paint_quad(fill(
+                    Bounds::new(point(px(x0), px(origin_y)), size(px(strip_w), px(h))),
+                    linear_gradient(
+                        90.0,
+                        linear_color_stop(Hsla::from(c0), 0.0),
+                        linear_color_stop(Hsla::from(c1), 1.0),
+                    ),
+                ));
+            }
         }
 
         // 2. Reference altitude lines (0, 30, 60 deg)
