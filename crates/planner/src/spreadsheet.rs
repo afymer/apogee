@@ -88,18 +88,6 @@ impl StageChoice {
         }
     }
 
-    fn subtitle(self) -> &'static str {
-        match self {
-            Self::Light => "Science frames",
-            Self::Dark => "Dark calibration",
-            Self::Flat => "Flat field",
-            Self::Bias => "Bias offset",
-            Self::Autofocus => "Focus V-curve (HFR)",
-            Self::PlateSolve => "Solve & recenter",
-            Self::Wait => "Timed delay",
-        }
-    }
-
     fn default_step(self) -> SequenceStep {
         match self {
             Self::Light => SequenceStep::capture(
@@ -550,20 +538,11 @@ impl SequenceSpreadsheetView {
                     cx.notify();
                 }))
                 .child(
-                    v_flex()
+                    div()
                         .min_w_0()
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(colors.text)
-                                .child(choice.label()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(colors.text_muted)
-                                .child(choice.subtitle()),
-                        ),
+                        .text_size(px(12.0))
+                        .text_color(colors.text)
+                        .child(choice.label()),
                 )
                 .when(is_selected, |el| {
                     el.child(
@@ -576,7 +555,7 @@ impl SequenceSpreadsheetView {
 
         let panel = v_flex()
             .id(("sp_stage_menu", id_base))
-            .w(px(196.0))
+            .w(px(148.0))
             .occlude()
             .shadow_lg()
             .p_1()
