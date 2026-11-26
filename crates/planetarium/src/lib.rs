@@ -8,6 +8,7 @@ pub mod ground;
 pub mod hips;
 pub mod landscape;
 pub mod material;
+pub mod metrics;
 pub mod sky;
 pub mod solar_system;
 pub mod stars;
@@ -21,6 +22,7 @@ pub use grids::CoordinateGridSettings;
 pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
 pub use landscape::{HorizonImageData, HorizonLayerData, HorizonRenderSettings};
+pub use metrics::BevyFrameSample;
 pub use solar_system::{
     PickedSolarSystemBody, SolarSystemRenderSettings, pick_solar_system_body,
     rendered_solar_system_disc_radius_px,
@@ -116,6 +118,8 @@ struct BridgeInner {
     next_listener_id: std::sync::atomic::AtomicU64,
     notify_listeners: Mutex<Vec<(FrameListenerId, Box<dyn Fn() + Send + Sync>)>>,
     overlay_pass: Mutex<Option<OverlayRenderCallback>>,
+    latest_metrics_seq: std::sync::atomic::AtomicU64,
+    metrics: Mutex<metrics::BevyMetricsRing>,
 }
 
 #[derive(Clone, Resource)]
@@ -145,8 +149,42 @@ impl BevyBridge {
                 next_listener_id: std::sync::atomic::AtomicU64::new(1),
                 notify_listeners: Mutex::new(vec![(FrameListenerId(0), Box::new(notify_ui))]),
                 overlay_pass: Mutex::new(None),
+                latest_metrics_seq: std::sync::atomic::AtomicU64::new(0),
+                metrics: Mutex::new(metrics::BevyMetricsRing::default()),
             }),
         }
+    }
+
+    pub fn latest_frame_seq(&self) -> u64 {
+        self.inner
+            .latest_metrics_seq
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn collect_frame_samples(&self, cursor: &mut u64, out: &mut Vec<BevyFrameSample>) {
+        if self.latest_frame_seq() <= *cursor {
+            return;
+        }
+        let guard = self
+            .inner
+            .metrics
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.collect_since(cursor, out);
+    }
+
+    pub(crate) fn record_frame_sample(&self, sample: BevyFrameSample) {
+        let seq = {
+            let mut guard = self
+                .inner
+                .metrics
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.push(sample)
+        };
+        self.inner
+            .latest_metrics_seq
+            .store(seq, std::sync::atomic::Ordering::Release);
     }
 
     pub fn add_frame_listener(
@@ -593,6 +631,46 @@ impl Default for ObserverClockResource {
 
 #[derive(Resource, Default)]
 struct PendingCommands(Vec<ViewportCommand>);
+
+#[derive(Resource, Default, Clone, Copy)]
+struct BevyStageTimer {
+    cursor: Option<std::time::Instant>,
+    camera_grid_us: u32,
+    celestial_us: u32,
+    hips_us: u32,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn mark_update_start(mut timer: ResMut<BevyStageTimer>) {
+    timer.cursor = Some(std::time::Instant::now());
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn mark_after_camera(mut timer: ResMut<BevyStageTimer>) {
+    let now = std::time::Instant::now();
+    timer.camera_grid_us = timer
+        .cursor
+        .map_or(0, |prev| metrics::duration_to_us(now.saturating_duration_since(prev)));
+    timer.cursor = Some(now);
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn mark_after_celestial(mut timer: ResMut<BevyStageTimer>) {
+    let now = std::time::Instant::now();
+    timer.celestial_us = timer
+        .cursor
+        .map_or(0, |prev| metrics::duration_to_us(now.saturating_duration_since(prev)));
+    timer.cursor = Some(now);
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn mark_after_hips(mut timer: ResMut<BevyStageTimer>) {
+    let now = std::time::Instant::now();
+    timer.hips_us = timer
+        .cursor
+        .map_or(0, |prev| metrics::duration_to_us(now.saturating_duration_since(prev)));
+    timer.cursor = Some(now);
+}
 
 #[derive(Resource)]
 struct CameraSyncState {
@@ -1602,6 +1680,7 @@ impl PlanetariumRenderer {
                 app.init_resource::<PendingCommands>();
                 app.init_resource::<ObserverClockResource>();
                 app.init_resource::<CameraSyncState>();
+                app.init_resource::<BevyStageTimer>();
                 app.init_resource::<atmosphere::AtmosphereSettings>();
                 app.init_resource::<ground::GroundSettings>();
                 app.init_resource::<stars::StarSettings>();
@@ -1757,14 +1836,18 @@ impl PlanetariumRenderer {
                 app.add_systems(
                     Update,
                     (
+                        mark_update_start,
                         camera_movement_and_interpolation_system,
+                        mark_after_camera,
                         dso::dso_system,
                         sky::sky_system,
                         solar_system::poll_solar_system_textures_system,
                         solar_system::solar_system_system,
                         landscape::landscape_system,
+                        mark_after_celestial,
                         hips::hips_survey_system,
                         hips::hips_grid_system,
+                        mark_after_hips,
                     )
                         .chain(),
                 );
@@ -1798,6 +1881,7 @@ impl PlanetariumRenderer {
                 let mut current_height = height;
                 let mut is_first_frame = true;
                 let mut last_frame_start: Option<std::time::Instant> = None;
+                let mut last_frame_finished_at: Option<std::time::Instant> = None;
                 let mut last_submission: Option<wgpu::SubmissionIndex> = None;
                 let mut idle_update_interval = Duration::from_secs(5);
                 const MIN_FRAME_INTERVAL: Duration = Duration::from_micros(15_500);
@@ -1846,19 +1930,27 @@ impl PlanetariumRenderer {
                     let commands = std::mem::take(&mut guard.pending_commands);
                     drop(guard);
 
-                    if let Some(sub_idx) = last_submission.take() {
+                    let command_count = commands.len().min(u16::MAX as usize) as u16;
+                    let frame_metrics_start = std::time::Instant::now();
+
+                    let gpu_sync_us = if let Some(sub_idx) = last_submission.take() {
                         let _span = tracing::info_span!("gpu_frame_sync").entered();
+                        let sync_start = std::time::Instant::now();
                         let _ = sync_device.poll(wgpu::PollType::Wait {
                             submission_index: Some(sub_idx),
                             timeout: Some(Duration::from_millis(100)),
                         });
-                    }
+                        metrics::duration_to_us(sync_start.elapsed())
+                    } else {
+                        0
+                    };
 
                     last_frame_start = Some(std::time::Instant::now());
                     let first_frame = is_first_frame;
                     #[cfg(all(debug_assertions, feature = "tracy"))]
                     let _frame_span = tracy_client::non_continuous_frame!("Frame");
 
+                    let commands_start = std::time::Instant::now();
                     let resized_size = {
                         let _span = tracing::info_span!("process_viewport_commands").entered();
                         process_viewport_commands(
@@ -1870,11 +1962,30 @@ impl PlanetariumRenderer {
                             &mut frames_remaining,
                         )
                     };
+                    let commands_us = metrics::duration_to_us(commands_start.elapsed());
 
+                    if let Some(mut stage_timer) =
+                        app.world_mut().get_resource_mut::<BevyStageTimer>()
+                    {
+                        *stage_timer = BevyStageTimer::default();
+                    }
+                    let app_update_start = std::time::Instant::now();
                     {
                         let _span = tracing::info_span!("bevy_app_update").entered();
                         app.update();
                     }
+                    let app_update_us = metrics::duration_to_us(app_update_start.elapsed());
+                    let stage_timer = app
+                        .world()
+                        .get_resource::<BevyStageTimer>()
+                        .copied()
+                        .unwrap_or_default();
+                    let render_us = app_update_us.saturating_sub(
+                        stage_timer
+                            .camera_grid_us
+                            .saturating_add(stage_timer.celestial_us)
+                            .saturating_add(stage_timer.hips_us),
+                    );
 
                     // Copy the rendered frame into an immutable triple-buffered present slot so
                     // Bevy's next frame cannot overwrite the texture while GPUI is still drawing
@@ -1882,6 +1993,8 @@ impl PlanetariumRenderer {
                     let mut new_texture_view = None;
                     let mut rendered_with_overlay = false;
                     let mut submitted_copy = false;
+                    let mut overlay_us = 0_u32;
+                    let extract_start = std::time::Instant::now();
                     {
                         let _span = tracing::info_span!("extract_texture_view").entered();
                         if let Some(render_sub_app) = app.get_sub_app(bevy::render::RenderApp) {
@@ -1957,11 +2070,15 @@ impl PlanetariumRenderer {
                                                 bridge.inner.overlay_pass.lock()
                                             {
                                                 if let Some(pass) = pass_guard.as_mut() {
+                                                    let overlay_start = std::time::Instant::now();
                                                     overlay_needs_frame = pass(
                                                         &mut encoder,
                                                         &slot.view,
                                                         current_size.0,
                                                         current_size.1,
+                                                    );
+                                                    overlay_us = metrics::duration_to_us(
+                                                        overlay_start.elapsed(),
                                                     );
                                                 }
                                             }
@@ -1983,6 +2100,8 @@ impl PlanetariumRenderer {
                     if !submitted_copy {
                         last_submission = Some(sync_queue.submit(std::iter::empty()));
                     }
+                    let present_copy_us =
+                        metrics::duration_to_us(extract_start.elapsed()).saturating_sub(overlay_us);
 
                     let mut needs_frame_dirty = false;
                     if frames_remaining > 0 {
@@ -1990,18 +2109,20 @@ impl PlanetariumRenderer {
                         needs_frame_dirty = true;
                     }
 
-                    let (view_info, is_interpolating, next_idle_interval) =
+                    let (view_info, is_interpolating, next_idle_interval, frame_is_mount_mode) =
                         if let Some(sync) = app.world().get_resource::<CameraSyncState>() {
                             (
                                 sync.view_info,
                                 sync.is_interpolating,
                                 sync.idle_update_interval,
+                                sync.is_mount_mode,
                             )
                         } else {
                             (
                                 PlanetariumViewInfo::default(),
                                 false,
                                 Duration::from_secs(5),
+                                false,
                             )
                         };
                     idle_update_interval = next_idle_interval;
@@ -2033,6 +2154,34 @@ impl PlanetariumRenderer {
                             thread_start.elapsed().as_secs_f64() * 1000.0
                         );
                     }
+
+                    let finished_at = std::time::Instant::now();
+                    let interval_us = last_frame_finished_at.map_or(0, |prev| {
+                        metrics::duration_to_us(finished_at.saturating_duration_since(prev))
+                    });
+                    last_frame_finished_at = Some(finished_at);
+                    let total_us = metrics::duration_to_us(
+                        finished_at.saturating_duration_since(frame_metrics_start),
+                    );
+                    bridge.record_frame_sample(BevyFrameSample {
+                        seq: 0,
+                        finished_at,
+                        interval_us,
+                        total_us,
+                        gpu_sync_us,
+                        commands_us,
+                        camera_grid_us: stage_timer.camera_grid_us,
+                        celestial_us: stage_timer.celestial_us,
+                        hips_us: stage_timer.hips_us,
+                        render_us,
+                        present_copy_us,
+                        overlay_us,
+                        width: current_width,
+                        height: current_height,
+                        command_count,
+                        is_mount_mode: frame_is_mount_mode,
+                        resized: resized_size.is_some(),
+                    });
 
                     bridge.notify_frame_ready();
                 }

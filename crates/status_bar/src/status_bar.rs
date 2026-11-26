@@ -2,7 +2,7 @@ use client::GlobalDaemonState;
 use components::{LogicState, StatusIndicator};
 use gpui::{App, Context, Entity, Global, SharedString, div, px};
 use protocol::{ConnectionState, MountStatus};
-use settings::ToggleLogs;
+use settings::{GlobalSettings, ToggleFrameProfiler, ToggleLogs};
 use ui::{
     ButtonSize, Divider, FixedWidth, IconButton, IconName, IconSize, StyledTypography, Tooltip,
     prelude::*,
@@ -214,6 +214,13 @@ impl StatusBar {
             })
             .detach();
         }
+        let settings_entity = cx.try_global::<GlobalSettings>().map(|g| g.0.clone());
+        if let Some(entity) = settings_entity {
+            cx.observe(&entity, |_this, _model, cx| {
+                cx.notify();
+            })
+            .detach();
+        }
         Self {
             show_planetarium_telemetry: true,
         }
@@ -337,6 +344,13 @@ impl Render for StatusBar {
                 .child(Divider::vertical());
         }
 
+        let (show_frame_profiler_button, frame_profiler_open) = cx
+            .try_global::<GlobalSettings>()
+            .map_or((false, false), |g| {
+                let model = g.0.read(cx);
+                (model.show_frame_profiler(), model.is_frame_profiler_open())
+            });
+
         h_flex()
             .w_full()
             .h_7()
@@ -358,6 +372,20 @@ impl Render for StatusBar {
             )
             .child(
                 right_items
+                    .when(show_frame_profiler_button, |el| {
+                        el.child(
+                            IconButton::new("status_profiler_button", IconName::Flame)
+                                .size(ButtonSize::Default)
+                                .width(ButtonSize::Default.rems())
+                                .icon_size(IconSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .toggle_state(frame_profiler_open)
+                                .tooltip(Tooltip::text("Toggle Frame Time Monitor (F3)"))
+                                .on_click(|_event, window, cx| {
+                                    window.dispatch_action(Box::new(ToggleFrameProfiler), cx);
+                                }),
+                        )
+                    })
                     .child(
                         IconButton::new("status_logs_button", IconName::FileDoc)
                             // `IconButtonShape::Square` derives its size from the icon, so

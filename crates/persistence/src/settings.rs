@@ -395,6 +395,9 @@ pub struct DebugSettings {
     /// Whether to display the green HEALPix HiPS grid debug lines in the planetarium viewport.
     #[serde(default)]
     pub show_hips_grid: bool,
+    /// Whether to show the frame time debug toggle icon in the status bar.
+    #[serde(default)]
+    pub show_frame_profiler: bool,
 }
 
 /// User keyboard shortcut overrides keyed by canonical action ID (e.g. `"apogee::OpenSettings"`).

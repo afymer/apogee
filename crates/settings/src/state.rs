@@ -17,6 +17,7 @@ impl Global for GlobalSettings {}
 pub struct SettingsModel {
     store: DocumentStore,
     settings: AppSettings,
+    frame_profiler_open: bool,
 }
 
 /// Initializes [`GlobalSettings`] using the default configuration directory.
@@ -29,7 +30,11 @@ pub fn init_with_store(store: DocumentStore, cx: &mut App) {
     let settings = store.load_or_default::<AppSettings>();
     crate::shortcuts::init(cx);
     crate::shortcuts::sync_keybindings(&settings, cx);
-    let model = cx.new(|_cx| SettingsModel { store, settings });
+    let model = cx.new(|_cx| SettingsModel {
+        store,
+        settings,
+        frame_profiler_open: false,
+    });
     cx.set_global(GlobalSettings(model));
 }
 
@@ -503,6 +508,50 @@ impl SettingsModel {
         self.set_show_hips_grid(next, cx);
     }
 
+    /// Returns whether the frame time debug toggle button is visible in the status bar.
+    pub fn show_frame_profiler(&self) -> bool {
+        self.settings.debug.show_frame_profiler
+    }
+
+    /// Sets whether the frame time debug toggle button is visible in the status bar and persists the change.
+    pub fn set_show_frame_profiler(&mut self, show: bool, cx: &mut Context<Self>) {
+        let closed_overlay = if !show && self.frame_profiler_open {
+            self.frame_profiler_open = false;
+            true
+        } else {
+            false
+        };
+        let was_persisted = self.settings.debug.show_frame_profiler;
+        self.update(|settings| settings.debug.show_frame_profiler = show, cx);
+        if closed_overlay && was_persisted == show {
+            cx.notify();
+        }
+    }
+
+    /// Toggles the status bar frame time debug button visibility and persists the change.
+    pub fn toggle_show_frame_profiler(&mut self, cx: &mut Context<Self>) {
+        let next = !self.settings.debug.show_frame_profiler;
+        self.set_show_frame_profiler(next, cx);
+    }
+
+    /// Returns whether the runtime frame time diagnostic overlay is currently open.
+    pub fn is_frame_profiler_open(&self) -> bool {
+        self.frame_profiler_open
+    }
+
+    /// Opens or closes the runtime frame time diagnostic overlay without persisting to disk.
+    pub fn set_frame_profiler_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.frame_profiler_open != open {
+            self.frame_profiler_open = open;
+            cx.notify();
+        }
+    }
+
+    /// Toggles the runtime frame time diagnostic overlay without persisting to disk.
+    pub fn toggle_frame_profiler_open(&mut self, cx: &mut Context<Self>) {
+        self.set_frame_profiler_open(!self.frame_profiler_open, cx);
+    }
+
     /// Returns the persisted keymap override settings.
     pub fn keymap(&self) -> &KeymapSettings {
         &self.settings.keymap
@@ -625,6 +674,59 @@ mod tests {
 
         let persisted_after_toggle: AppSettings = store.load().expect("persisted settings load");
         assert!(!persisted_after_toggle.debug.show_hips_grid);
+    }
+
+    #[gpui::test]
+    fn settings_model_frame_profiler_persists_and_toggles(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let store_for_init = store.clone();
+
+        cx.update(|cx| {
+            init_with_store(store_for_init, cx);
+        });
+
+        let model = cx.read(|cx| cx.global::<GlobalSettings>().0.clone());
+        model.read_with(cx, |m, _| {
+            assert!(!m.show_frame_profiler());
+            assert!(!m.is_frame_profiler_open());
+        });
+
+        // Runtime open/close does not persist to disk.
+        model.update(cx, |m, cx| {
+            m.toggle_frame_profiler_open(cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(m.is_frame_profiler_open());
+            assert!(!m.show_frame_profiler());
+        });
+        assert!(
+            store
+                .load_optional::<AppSettings>()
+                .expect("load_optional succeeds")
+                .is_none()
+        );
+
+        model.update(cx, |m, cx| {
+            m.set_show_frame_profiler(true, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(m.show_frame_profiler());
+            assert!(m.is_frame_profiler_open());
+        });
+        let persisted: AppSettings = store.load().expect("persisted profiler settings load");
+        assert!(persisted.debug.show_frame_profiler);
+
+        // Disabling the status bar button also closes an open overlay.
+        model.update(cx, |m, cx| {
+            m.set_show_frame_profiler(false, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(!m.show_frame_profiler());
+            assert!(!m.is_frame_profiler_open());
+        });
+        let persisted_after_toggle: AppSettings =
+            store.load().expect("persisted profiler toggle load");
+        assert!(!persisted_after_toggle.debug.show_frame_profiler);
     }
 
     #[gpui::test]

@@ -1,5 +1,6 @@
 mod bevy_viewport;
 mod connect_panel;
+mod frame_profiler;
 mod logs_panel;
 mod sky_search;
 mod star_details;
@@ -117,6 +118,10 @@ fn main() {
         {
             let _span = ::tracing::info_span!("mount_viewer_init").entered();
             mount_viewer::init(cx);
+        }
+        {
+            let _span = ::tracing::info_span!("frame_profiler_init").entered();
+            frame_profiler::init(cx);
         }
 
         drop(startup_span);

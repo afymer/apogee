@@ -420,6 +420,7 @@ mod tests {
             },
             debug: DebugSettings {
                 show_hips_grid: true,
+                show_frame_profiler: true,
             },
             keymap: KeymapSettings::default(),
         };
@@ -445,6 +446,7 @@ mod tests {
             .expect("raw write succeeds");
         let legacy: AppSettings = store.load().expect("legacy settings load");
         assert!(legacy.debug.show_hips_grid);
+        assert!(!legacy.debug.show_frame_profiler);
         assert!(legacy.planetarium.atmosphere.enabled);
         assert_eq!(
             legacy.planetarium.atmosphere.strength,

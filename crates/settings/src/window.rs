@@ -409,19 +409,34 @@ fn default_categories() -> Vec<SettingsCategory> {
         },
         SettingsCategory {
             title: "Debug",
-            sections: vec![SettingsSection {
-                title: "Planetarium",
-                items: vec![SettingItem {
-                    id: "debug_show_hips_grid",
-                    title: "Show HiPS Grid",
-                    description: "Display the green HEALPix hierarchical progressive survey tile boundary lines in the planetarium viewport.",
-                    control: SettingControl::Switch {
-                        get: |settings| settings.debug.show_hips_grid,
-                        set: |model, value, cx| model.set_show_hips_grid(value, cx),
-                        default: false,
-                    },
-                }],
-            }],
+            sections: vec![
+                SettingsSection {
+                    title: "Planetarium",
+                    items: vec![SettingItem {
+                        id: "debug_show_hips_grid",
+                        title: "Show HiPS Grid",
+                        description: "Display the green HEALPix hierarchical progressive survey tile boundary lines in the planetarium viewport.",
+                        control: SettingControl::Switch {
+                            get: |settings| settings.debug.show_hips_grid,
+                            set: |model, value, cx| model.set_show_hips_grid(value, cx),
+                            default: false,
+                        },
+                    }],
+                },
+                SettingsSection {
+                    title: "Performance",
+                    items: vec![SettingItem {
+                        id: "debug_show_frame_profiler",
+                        title: "Frame Time Button",
+                        description: "Show the GPUI and Bevy frame time toggle icon in the status bar (shortcut: F3).",
+                        control: SettingControl::Switch {
+                            get: |settings| settings.debug.show_frame_profiler,
+                            set: |model, value, cx| model.set_show_frame_profiler(value, cx),
+                            default: false,
+                        },
+                    }],
+                },
+            ],
         },
     ]
 }
