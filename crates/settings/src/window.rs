@@ -6,9 +6,9 @@ use gpui::{
     WindowOptions, div, prelude::*, px,
 };
 use persistence::{
-    AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY, DEFAULT_GROUND_OPACITY,
-    DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY, DEFAULT_SOLAR_SYSTEM_OPACITY,
-    DEFAULT_STARS_OPACITY,
+    AppSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_DSO_OPACITY, DEFAULT_GRID_OPACITY,
+    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
+    DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY,
 };
 use ui::{
     ActiveTheme, Button, ButtonStyle, Color, Divider, DividerColor, Icon, IconButton, IconName,
@@ -241,6 +241,55 @@ fn default_categories() -> Vec<SettingsCategory> {
                                 max: 1.0,
                                 default: DEFAULT_STARS_OPACITY,
                                 format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                    ],
+                },
+                SettingsSection {
+                    title: "Deep Sky Objects",
+                    items: vec![
+                        SettingItem {
+                            id: "planetarium_dso_enabled",
+                            title: "Show Deep Sky Objects",
+                            description: "Display Messier and NGC galaxies, nebulae, and clusters in the planetarium viewport.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.deep_sky.enabled,
+                                set: |model, value, cx| model.set_dso_enabled(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_dso_opacity",
+                            title: "Deep Sky Opacity",
+                            description: "Adjust the opacity of rendered deep-sky object markers and labels.",
+                            control: SettingControl::Slider {
+                                get: |settings| settings.planetarium.deep_sky.opacity,
+                                preview: |model, value, cx| model.preview_dso_opacity(value, cx),
+                                commit: |model, value, cx| model.commit_dso_opacity(value, cx),
+                                min: 0.0,
+                                max: 1.0,
+                                default: DEFAULT_DSO_OPACITY,
+                                format: |v| format!("{:.0}%", v * 100.0),
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_dso_messier",
+                            title: "Show Messier Catalog",
+                            description: "Include Messier catalog objects (M1–M110) in the deep-sky overlay.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.deep_sky.show_messier,
+                                set: |model, value, cx| model.set_dso_show_messier(value, cx),
+                                default: true,
+                            },
+                        },
+                        SettingItem {
+                            id: "planetarium_dso_ngc",
+                            title: "Show NGC Catalog",
+                            description: "Include New General Catalogue (NGC) objects in the deep-sky overlay.",
+                            control: SettingControl::Switch {
+                                get: |settings| settings.planetarium.deep_sky.show_ngc,
+                                set: |model, value, cx| model.set_dso_show_ngc(value, cx),
+                                default: true,
                             },
                         },
                     ],

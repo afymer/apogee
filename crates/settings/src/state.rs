@@ -1,10 +1,10 @@
 use gpui::{App, AppContext, Context, Entity, Global};
 use persistence::{
-    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
-    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
-    DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings, DocumentStore,
-    GridLayerSettings, GroundSettings, HorizonLayerSettings, KeymapSettings, PlanetariumSettings,
-    SolarSystemSettings, StarsSettings, SurveySettings,
+    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_DSO_OPACITY,
+    DEFAULT_GRID_OPACITY, DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY,
+    DEFAULT_HORIZON_OPACITY, DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings,
+    DocumentStore, DsoSettings, GridLayerSettings, GroundSettings, HorizonLayerSettings,
+    KeymapSettings, PlanetariumSettings, SolarSystemSettings, StarsSettings, SurveySettings,
 };
 
 /// Global GPUI entity wrapper for [`SettingsModel`].
@@ -271,6 +271,77 @@ impl SettingsModel {
         self.settings.planetarium.stars.opacity = clamped;
         self.persist();
         cx.notify();
+    }
+
+    /// Returns the deep-sky (Messier / NGC) catalog layer settings.
+    pub fn dso(&self) -> DsoSettings {
+        self.settings.planetarium.deep_sky
+    }
+
+    /// Returns whether deep-sky catalog markers and labels are enabled.
+    pub fn dso_enabled(&self) -> bool {
+        self.settings.planetarium.deep_sky.enabled
+    }
+
+    /// Returns the configured deep-sky layer opacity in `[0.0, 1.0]`.
+    pub fn dso_opacity(&self) -> f32 {
+        self.settings.planetarium.deep_sky.opacity
+    }
+
+    /// Returns the effective deep-sky layer opacity (`0.0` when disabled).
+    pub fn effective_dso_opacity(&self) -> f32 {
+        self.settings.planetarium.deep_sky.effective_opacity()
+    }
+
+    /// Sets whether deep-sky catalog markers are enabled and persists the change.
+    pub fn set_dso_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.deep_sky.enabled = enabled,
+            cx,
+        );
+    }
+
+    /// Updates deep-sky layer opacity in memory during interactive slider dragging without persisting.
+    pub fn preview_dso_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_DSO_OPACITY);
+        if (self.settings.planetarium.deep_sky.opacity - clamped).abs() > 1e-6 {
+            self.settings.planetarium.deep_sky.opacity = clamped;
+            cx.notify();
+        }
+    }
+
+    /// Sets deep-sky layer opacity, persists immediately to disk, and notifies observers.
+    pub fn commit_dso_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
+        let clamped = sanitize_unit(opacity, DEFAULT_DSO_OPACITY);
+        self.settings.planetarium.deep_sky.opacity = clamped;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Returns whether Messier objects are included in the deep-sky layer.
+    pub fn dso_show_messier(&self) -> bool {
+        self.settings.planetarium.deep_sky.show_messier
+    }
+
+    /// Sets whether Messier objects are shown in the deep-sky layer and persists the change.
+    pub fn set_dso_show_messier(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.deep_sky.show_messier = show,
+            cx,
+        );
+    }
+
+    /// Returns whether NGC objects are included in the deep-sky layer.
+    pub fn dso_show_ngc(&self) -> bool {
+        self.settings.planetarium.deep_sky.show_ngc
+    }
+
+    /// Sets whether NGC objects are shown in the deep-sky layer and persists the change.
+    pub fn set_dso_show_ngc(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.update(
+            |settings| settings.planetarium.deep_sky.show_ngc = show,
+            cx,
+        );
     }
 
     /// Returns the solar-system bodies (Sun and Moon) layer settings.
@@ -840,5 +911,59 @@ mod tests {
         });
         let persisted_line: AppSettings = store.load().expect("show_line horizon load");
         assert!(persisted_line.planetarium.horizon.show_line);
+    }
+
+    #[gpui::test]
+    fn settings_model_dso_preview_commit_and_toggle(cx: &mut TestAppContext) {
+        let store = DocumentStore::in_memory();
+        let store_for_init = store.clone();
+
+        cx.update(|cx| {
+            init_with_store(store_for_init, cx);
+        });
+
+        let model = cx.read(|cx| cx.global::<GlobalSettings>().0.clone());
+        model.read_with(cx, |m, _| {
+            assert!(m.dso_enabled());
+            assert_eq!(m.dso_opacity(), 1.0);
+            assert_eq!(m.effective_dso_opacity(), 1.0);
+            assert!(m.dso_show_messier());
+            assert!(m.dso_show_ngc());
+        });
+
+        model.update(cx, |m, cx| {
+            m.preview_dso_opacity(0.60, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!((m.dso_opacity() - 0.60).abs() < 1e-6);
+            assert!((m.effective_dso_opacity() - 0.60).abs() < 1e-6);
+        });
+        assert!(
+            store
+                .load_optional::<AppSettings>()
+                .expect("load_optional succeeds")
+                .is_none()
+        );
+
+        model.update(cx, |m, cx| {
+            m.commit_dso_opacity(0.60, cx);
+        });
+        let persisted: AppSettings = store.load().expect("committed dso load");
+        assert!((persisted.planetarium.deep_sky.opacity - 0.60).abs() < 1e-6);
+
+        model.update(cx, |m, cx| {
+            m.set_dso_enabled(false, cx);
+            m.set_dso_show_ngc(false, cx);
+        });
+        model.read_with(cx, |m, _| {
+            assert!(!m.dso_enabled());
+            assert!((m.dso_opacity() - 0.60).abs() < 1e-6);
+            assert_eq!(m.effective_dso_opacity(), 0.0);
+            assert!(m.dso_show_messier());
+            assert!(!m.dso_show_ngc());
+        });
+        let persisted_disabled: AppSettings = store.load().expect("disabled dso load");
+        assert!(!persisted_disabled.planetarium.deep_sky.enabled);
+        assert!(!persisted_disabled.planetarium.deep_sky.show_ngc);
     }
 }

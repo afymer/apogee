@@ -41,6 +41,13 @@ pub const ICON_LAYER_STARS: &[u8] = br##"<svg width="24" height="24" viewBox="0 
   <circle cx="6" cy="17.5" r="0.95" fill="black"/>
 </svg>"##;
 
+pub const ICON_LAYER_DSO: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <ellipse cx="12" cy="12" rx="8.5" ry="3.8" transform="rotate(-32 12 12)" stroke="black" stroke-width="1.5"/>
+  <circle cx="12" cy="12" r="1.6" fill="black"/>
+  <circle cx="6.2" cy="6.4" r="0.95" fill="black"/>
+  <circle cx="17.8" cy="17.6" r="0.95" fill="black"/>
+</svg>"##;
+
 pub const ICON_LAYER_SOLAR_SYSTEM: &[u8] = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
   <circle cx="12" cy="12" r="4.2" stroke="black" stroke-width="1.5"/>
   <path d="M12 3.2V5.3M12 18.7V20.8M3.2 12H5.3M18.7 12H20.8M5.8 5.8L7.3 7.3M16.7 16.7L18.2 18.2M18.2 5.8L16.7 7.3M7.3 16.7L5.8 18.2" stroke="black" stroke-width="1.4" stroke-linecap="round"/>
@@ -97,6 +104,7 @@ pub enum QuickLayer {
     Horizon,
     HipsSurvey,
     Stars,
+    DeepSky,
     SolarSystem,
     AltAzGrid,
     EquatorialGrid,
@@ -104,12 +112,13 @@ pub enum QuickLayer {
 }
 
 impl QuickLayer {
-    pub const SKY_LAYERS: [Self; 6] = [
+    pub const SKY_LAYERS: [Self; 7] = [
         Self::Atmosphere,
         Self::Ground,
         Self::Horizon,
         Self::HipsSurvey,
         Self::Stars,
+        Self::DeepSky,
         Self::SolarSystem,
     ];
     pub const GRID_LAYERS: [Self; 2] = [Self::AltAzGrid, Self::EquatorialGrid];
@@ -122,6 +131,7 @@ impl QuickLayer {
             Self::Horizon => "horizon",
             Self::HipsSurvey => "hips",
             Self::Stars => "stars",
+            Self::DeepSky => "deep_sky",
             Self::SolarSystem => "solar_system",
             Self::AltAzGrid => "altaz_grid",
             Self::EquatorialGrid => "eq_grid",
@@ -136,6 +146,7 @@ impl QuickLayer {
             Self::Horizon => "Custom Horizon",
             Self::HipsSurvey => "HiPS Survey",
             Self::Stars => "Stars",
+            Self::DeepSky => "Deep Sky (M / NGC)",
             Self::SolarSystem => "Solar System",
             Self::AltAzGrid => "Alt/Az Grid",
             Self::EquatorialGrid => "Equatorial Grid",
@@ -150,6 +161,7 @@ impl QuickLayer {
             Self::Horizon => ICON_LAYER_HORIZON,
             Self::HipsSurvey => ICON_LAYER_HIPS,
             Self::Stars => ICON_LAYER_STARS,
+            Self::DeepSky => ICON_LAYER_DSO,
             Self::SolarSystem => ICON_LAYER_SOLAR_SYSTEM,
             Self::AltAzGrid => ICON_GRID_ALTAZ,
             Self::EquatorialGrid => ICON_GRID_EQUATORIAL,
@@ -159,6 +171,7 @@ impl QuickLayer {
 
     pub fn active_icon_color(self, default: Hsla) -> Hsla {
         match self {
+            Self::DeepSky => rgb(0xeb8278).into(),
             Self::AltAzGrid => rgb(0x66b5f5).into(),
             Self::EquatorialGrid => rgb(0xeb9b56).into(),
             Self::SolarSystem => rgb(0xf7c957).into(),
@@ -176,6 +189,7 @@ impl QuickLayer {
             Self::Horizon => model.horizon_enabled(),
             Self::HipsSurvey => model.hips_survey_enabled(),
             Self::Stars => model.stars_enabled(),
+            Self::DeepSky => model.dso_enabled(),
             Self::SolarSystem => model.solar_system_enabled(),
             Self::AltAzGrid => model.altaz_grid_enabled(),
             Self::EquatorialGrid => model.equatorial_grid_enabled(),
@@ -190,6 +204,7 @@ impl QuickLayer {
             Self::Horizon => model.horizon_opacity(),
             Self::HipsSurvey => model.hips_survey_opacity(),
             Self::Stars => model.stars_opacity(),
+            Self::DeepSky => model.dso_opacity(),
             Self::SolarSystem => model.solar_system_opacity(),
             Self::AltAzGrid => model.altaz_grid_opacity(),
             Self::EquatorialGrid => model.equatorial_grid_opacity(),
@@ -213,6 +228,7 @@ impl QuickLayer {
             Self::Horizon => model.set_horizon_enabled(enabled, cx),
             Self::HipsSurvey => model.set_hips_survey_enabled(enabled, cx),
             Self::Stars => model.set_stars_enabled(enabled, cx),
+            Self::DeepSky => model.set_dso_enabled(enabled, cx),
             Self::SolarSystem => model.set_solar_system_enabled(enabled, cx),
             Self::AltAzGrid => model.set_altaz_grid_enabled(enabled, cx),
             Self::EquatorialGrid => model.set_equatorial_grid_enabled(enabled, cx),
@@ -246,6 +262,7 @@ impl QuickLayer {
             Self::Horizon => model.preview_horizon_opacity(value, cx),
             Self::HipsSurvey => model.preview_hips_survey_opacity(value, cx),
             Self::Stars => model.preview_stars_opacity(value, cx),
+            Self::DeepSky => model.preview_dso_opacity(value, cx),
             Self::SolarSystem => model.preview_solar_system_opacity(value, cx),
             Self::AltAzGrid => model.preview_altaz_grid_opacity(value, cx),
             Self::EquatorialGrid => model.preview_equatorial_grid_opacity(value, cx),
@@ -277,6 +294,7 @@ impl QuickLayer {
             Self::Horizon => model.commit_horizon_opacity(value, cx),
             Self::HipsSurvey => model.commit_hips_survey_opacity(value, cx),
             Self::Stars => model.commit_stars_opacity(value, cx),
+            Self::DeepSky => model.commit_dso_opacity(value, cx),
             Self::SolarSystem => model.commit_solar_system_opacity(value, cx),
             Self::AltAzGrid => model.commit_altaz_grid_opacity(value, cx),
             Self::EquatorialGrid => model.commit_equatorial_grid_opacity(value, cx),

@@ -93,7 +93,7 @@ pub fn shortcut_specs() -> Vec<ShortcutSpec> {
             id: "apogee::OpenSkySearch",
             title: "Search Sky Objects",
             category: "Planetarium",
-            description: "Search for stars and solar-system objects in the sky.",
+            description: "Search for stars, deep-sky (Messier/NGC), and solar-system objects in the sky.",
             default_binding: Some("secondary-f"),
             make_binding: |binding| KeyBinding::new(binding, OpenSkySearch, None),
         },

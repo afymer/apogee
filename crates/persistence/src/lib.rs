@@ -26,11 +26,12 @@ pub use observer::{
 };
 pub use plan::{PLAN_SCHEMA_VERSION, PlannerCatalog};
 pub use settings::{
-    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
-    DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,
-    DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings, GridLayerSettings,
-    GroundSettings, HorizonLayerSettings, KeymapSettings, PlanetariumSettings,
-    SETTINGS_SCHEMA_VERSION, SolarSystemSettings, StarsSettings, SurveySettings,
+    AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_DSO_OPACITY,
+    DEFAULT_GRID_OPACITY, DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY,
+    DEFAULT_HORIZON_OPACITY, DEFAULT_SOLAR_SYSTEM_OPACITY, DEFAULT_STARS_OPACITY, DebugSettings,
+    DsoSettings, GridLayerSettings, GroundSettings, HorizonLayerSettings, KeymapSettings,
+    PlanetariumSettings, SETTINGS_SCHEMA_VERSION, SolarSystemSettings, StarsSettings,
+    SurveySettings,
 };
 pub use store::{DocumentStore, Persistable};
 pub use tz_offset::lookup_standard_utc_offset_minutes;
@@ -398,6 +399,12 @@ mod tests {
                     enabled: false,
                     opacity: 0.75,
                 },
+                deep_sky: DsoSettings {
+                    enabled: false,
+                    opacity: 0.60,
+                    show_messier: true,
+                    show_ngc: false,
+                },
                 solar_system: SolarSystemSettings {
                     enabled: false,
                     opacity: 0.90,
@@ -452,6 +459,10 @@ mod tests {
         );
         assert!(legacy.planetarium.stars.enabled);
         assert_eq!(legacy.planetarium.stars.opacity, DEFAULT_STARS_OPACITY);
+        assert!(legacy.planetarium.deep_sky.enabled);
+        assert_eq!(legacy.planetarium.deep_sky.opacity, DEFAULT_DSO_OPACITY);
+        assert!(legacy.planetarium.deep_sky.show_messier);
+        assert!(legacy.planetarium.deep_sky.show_ngc);
         assert!(legacy.planetarium.altaz_grid.enabled);
         assert_eq!(legacy.planetarium.altaz_grid.opacity, DEFAULT_GRID_OPACITY);
         assert!(legacy.planetarium.equatorial_grid.enabled);
@@ -540,6 +551,23 @@ mod tests {
             opacity: 0.4,
         };
         assert_eq!(disabled_stars.effective_opacity(), 0.0);
+
+        let mut non_finite_dso = DsoSettings {
+            enabled: true,
+            opacity: f32::NAN,
+            show_messier: true,
+            show_ngc: false,
+        };
+        non_finite_dso.sanitize();
+        assert_eq!(non_finite_dso.opacity, DEFAULT_DSO_OPACITY);
+
+        let disabled_dso = DsoSettings {
+            enabled: false,
+            opacity: 0.5,
+            show_messier: true,
+            show_ngc: true,
+        };
+        assert_eq!(disabled_dso.effective_opacity(), 0.0);
 
         let mut non_finite_grid = GridLayerSettings {
             enabled: true,

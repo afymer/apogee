@@ -22,6 +22,9 @@ pub const DEFAULT_HIPS_SURVEY_OPACITY: f32 = 1.0;
 /// Default normalized opacity for the catalog stars layer.
 pub const DEFAULT_STARS_OPACITY: f32 = 1.0;
 
+/// Default normalized opacity for the deep-sky (Messier / NGC) catalog layer.
+pub const DEFAULT_DSO_OPACITY: f32 = 1.0;
+
 /// Default normalized opacity for the solar-system bodies layer (Sun and Moon).
 pub const DEFAULT_SOLAR_SYSTEM_OPACITY: f32 = 1.0;
 
@@ -54,6 +57,10 @@ fn default_hips_survey_opacity() -> f32 {
 
 fn default_stars_opacity() -> f32 {
     DEFAULT_STARS_OPACITY
+}
+
+fn default_dso_opacity() -> f32 {
+    DEFAULT_DSO_OPACITY
 }
 
 fn default_solar_system_opacity() -> f32 {
@@ -246,6 +253,46 @@ impl StarsSettings {
     }
 }
 
+/// Deep-sky (Messier and NGC) catalog rendering settings in the planetarium.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DsoSettings {
+    /// Whether deep-sky catalog markers and labels are displayed.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Normalized deep-sky layer opacity in `[0.0, 1.0]`.
+    #[serde(default = "default_dso_opacity")]
+    pub opacity: f32,
+    /// Whether Messier objects (M1–M110) are included in the deep-sky overlay.
+    #[serde(default = "default_true")]
+    pub show_messier: bool,
+    /// Whether NGC objects are included in the deep-sky overlay.
+    #[serde(default = "default_true")]
+    pub show_ngc: bool,
+}
+
+impl Default for DsoSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            opacity: DEFAULT_DSO_OPACITY,
+            show_messier: true,
+            show_ngc: true,
+        }
+    }
+}
+
+impl DsoSettings {
+    /// Clamps finite opacity into `[0.0, 1.0]` and resets non-finite values to the default.
+    pub fn sanitize(&mut self) {
+        sanitize_unit_interval(&mut self.opacity, DEFAULT_DSO_OPACITY);
+    }
+
+    /// Returns the effective opacity in `[0.0, 1.0]`, or `0.0` when disabled.
+    pub fn effective_opacity(&self) -> f32 {
+        effective_unit_interval(self.enabled, self.opacity, DEFAULT_DSO_OPACITY)
+    }
+}
+
 /// Solar-system bodies (Sun and Moon) rendering settings in the planetarium.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SolarSystemSettings {
@@ -328,6 +375,9 @@ pub struct PlanetariumSettings {
     /// Catalog point-star rendering settings.
     #[serde(default)]
     pub stars: StarsSettings,
+    /// Deep-sky (Messier / NGC) catalog rendering settings.
+    #[serde(default)]
+    pub deep_sky: DsoSettings,
     /// Solar-system bodies (Sun and Moon) rendering settings.
     #[serde(default)]
     pub solar_system: SolarSystemSettings,
@@ -397,6 +447,7 @@ impl Persistable for AppSettings {
         self.planetarium.horizon.sanitize();
         self.planetarium.hips_survey.sanitize();
         self.planetarium.stars.sanitize();
+        self.planetarium.deep_sky.sanitize();
         self.planetarium.solar_system.sanitize();
         self.planetarium.altaz_grid.sanitize();
         self.planetarium.equatorial_grid.sanitize();
