@@ -16,6 +16,7 @@ use horizon::GlobalHorizons;
 use jiff::Span;
 use jiff::civil::Date;
 use jiff::tz::Offset;
+use observer::icons::{ICON_MOON, render_svg_icon};
 use observer::{GlobalObserver, solar_altitude_to_sky_color};
 use ui::{ActiveTheme, Button, ButtonStyle, Color, Label, LabelSize, Tooltip, prelude::*};
 
@@ -500,14 +501,19 @@ impl NightTimelineView {
 
         let moon_tooltip = match selected_min_sep {
             Some(sep) => format!(
-                "Moon illumination {:.0}% - Min separation {:.0} deg (click to toggle curve)",
+                "Moon {:.0}% - Min sep {:.0} deg (toggle separation curve)",
                 moon_illum, sep
             ),
-            None => format!(
-                "Moon illumination {:.0}% (click to toggle Moon separation curve)",
-                moon_illum
-            ),
+            None => format!("Moon {:.0}% (toggle separation curve)", moon_illum),
         };
+        let colors = cx.theme().colors();
+        let moon_icon_color = if self.show_moon_sep {
+            colors.text_accent
+        } else {
+            colors.text_muted
+        };
+        let moon_active_bg = colors.text_accent.opacity(0.16);
+        let moon_hover_bg = colors.ghost_element_hover;
 
         h_flex()
             .w_full()
@@ -536,18 +542,21 @@ impl NightTimelineView {
                     .items_center()
                     .gap_1()
                     .child(
-                        Button::new("timeline_moon_sep_btn", format!("Moon {:.0}%", moon_illum))
-                            .style(if self.show_moon_sep {
-                                ButtonStyle::Tinted(ui::TintColor::Accent)
-                            } else {
-                                ButtonStyle::Subtle
-                            })
-                            .label_size(LabelSize::XSmall)
+                        h_flex()
+                            .id("timeline_moon_sep_btn")
+                            .size(px(22.0))
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .when(self.show_moon_sep, |el| el.bg(moon_active_bg))
+                            .hover(move |s| s.bg(moon_hover_bg))
                             .tooltip(Tooltip::text(moon_tooltip))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_moon_sep = !this.show_moon_sep;
                                 cx.notify();
-                            })),
+                            }))
+                            .child(render_svg_icon(ICON_MOON, px(14.0), moon_icon_color)),
                     )
                     .child(
                         Button::new("timeline_mode_btn", self.mode.label())
