@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod coords;
+pub mod dso;
 pub mod horizon;
 pub mod observer;
 pub mod planets;
@@ -11,6 +12,10 @@ pub use catalog::{
     STAR_CATALOG_MAGIC, STAR_CATALOG_VERSION, StarCatalog, StarCatalogHeader, StarMetadata,
     StarRecord, read_star_catalog_from_zst, read_stars_from_zst, write_star_catalog_to_zst,
     write_stars_to_zst,
+};
+pub use dso::{
+    DSO_CATALOG_MAGIC, DSO_CATALOG_VERSION, DsoCatalog, DsoCatalogHeader, DsoGroup, DsoKind,
+    DsoRecord, read_dso_catalog_from_zst, write_dso_catalog_to_zst,
 };
 pub use horizon::{
     DEFAULT_HORIZON_SAMPLES, HorizonProfile, MAX_HORIZON_ALT_DEG, MIN_HORIZON_ALT_DEG,

@@ -1,4 +1,5 @@
 mod csv;
+mod dso;
 mod enrich;
 mod fetch;
 
@@ -6,11 +7,12 @@ use std::{fs::File, io::BufWriter, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use celestial::catalog::{StarCatalogHeader, StarMetadata, StarRecord, write_star_catalog_to_zst};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use tracing::info;
 
 use crate::{
     csv::parse_from_csv,
+    dso::{DsoArgs, run_dso_builder},
     enrich::{enrich_catalog, fetch_bsc5_entries, fetch_iau_entries},
     fetch::{build_http_client, fetch_bright_hipparcos, fetch_from_gaia_tap},
 };
@@ -25,8 +27,22 @@ pub(crate) struct BuiltStar {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Apogee catalog builder for Gaia DR3")]
-struct Args {
+#[command(author, version, about = "Apogee astronomical catalog builder")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Build the Gaia DR3 / Hipparcos / BSC5 / IAU star catalog (`stars.bin.zst`)
+    Stars(StarsArgs),
+    /// Build the OpenNGC Messier + NGC deep-sky catalog (`dso.bin.zst`)
+    Dso(DsoArgs),
+}
+
+#[derive(Args, Debug)]
+struct StarsArgs {
     /// Input CSV file containing Gaia sources (columns: ra, dec, phot_g_mean_mag, bp_rp)
     #[arg(short, long)]
     input: Option<PathBuf>,
@@ -51,7 +67,14 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    let args = Args::parse();
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Stars(args) => run_stars_builder(args).await,
+        Command::Dso(args) => run_dso_builder(args).await,
+    }
+}
+
+async fn run_stars_builder(args: StarsArgs) -> Result<()> {
     let client = build_http_client()?;
 
     let mut stars = if let Some(ref path) = args.input {
