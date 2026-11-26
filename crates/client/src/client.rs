@@ -6,8 +6,8 @@ use anyhow::bail;
 use gpui::{App, AppContext, Entity, Global};
 use persistence::{DocumentStore, HardwareConfig};
 use protocol::{
-    CameraStatus, ConnectionState, DaemonMessage, DaemonState, DaemonStatus, MountCommand,
-    MountPointing, MountStatus, MountTelemetry, ViewerMessage,
+    CameraStatus, ConnectionState, DEFAULT_ISO_CHOICES, DaemonMessage, DaemonState, DaemonStatus,
+    MountCommand, MountPointing, MountStatus, MountTelemetry, ViewerMessage,
 };
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender, channel, unbounded_channel};
 use tracing::{error, info, warn};
@@ -74,6 +74,21 @@ impl DaemonStateModel {
             last_pointing_saved_ms: 0,
             latest_frame_seq: 0,
         }
+    }
+
+    /// Returns `(valid_iso_choices, supports_auto_iso, camera_model)` from the connected
+    /// camera if reported, otherwise falls back to [`protocol::DEFAULT_ISO_CHOICES`].
+    pub fn camera_iso_choices(&self) -> (&[u32], bool, Option<&str>) {
+        if let Some(caps) = &self.state.camera_capabilities {
+            if !caps.iso_choices.is_empty() {
+                return (
+                    caps.iso_choices.as_slice(),
+                    caps.supports_auto_iso,
+                    caps.model.as_deref(),
+                );
+            }
+        }
+        (DEFAULT_ISO_CHOICES, true, None)
     }
 
     /// Returns `(pointing, is_live)`: live telemetry when the mount is connected, otherwise
@@ -211,6 +226,7 @@ fn telemetry_meaningfully_equal(a: Option<&MountTelemetry>, b: Option<&MountTele
 fn daemon_state_meaningfully_equal(a: &DaemonState, b: &DaemonState) -> bool {
     a.connection == b.connection
         && a.camera == b.camera
+        && a.camera_capabilities == b.camera_capabilities
         && a.mount == b.mount
         && a.available_mount_ports == b.available_mount_ports
         && a.daemon == b.daemon
@@ -370,6 +386,7 @@ impl std::fmt::Display for DisconnectReason {
 
 fn reset_disconnected_state(state: &mut DaemonState) {
     state.camera = CameraStatus::Disconnected;
+    state.camera_capabilities = None;
     state.mount = MountStatus::Disconnected;
     state.mount_telemetry = None;
     state.available_mount_ports.clear();
@@ -640,6 +657,10 @@ async fn run_message_pump(
                                         current_state.camera = camera_status;
                                         send_state(update_tx, current_state, false);
                                     }
+                                    DaemonMessage::CameraCapabilities(caps) => {
+                                        current_state.camera_capabilities = caps;
+                                        send_state(update_tx, current_state, false);
+                                    }
                                     DaemonMessage::MountStatus(mount_status) => {
                                         if matches!(
                                             mount_status,
@@ -832,11 +853,17 @@ mod tests {
             available_mount_ports: vec!["/dev/ttyUSB0".into()],
             mount_telemetry: Some(MountTelemetry::default()),
             mount: MountStatus::Ready,
+            camera_capabilities: Some(protocol::CameraCapabilities {
+                model: Some("Test Cam".into()),
+                iso_choices: vec![100, 200, 400],
+                supports_auto_iso: true,
+            }),
             ..DaemonState::default()
         };
         reset_disconnected_state(&mut state);
         assert_eq!(state.available_mount_ports, Vec::<String>::new());
         assert!(state.mount_telemetry.is_none());
+        assert!(state.camera_capabilities.is_none());
         assert_eq!(state.mount, MountStatus::Disconnected);
     }
 }

@@ -1,4 +1,4 @@
-use protocol::camera::CameraStatus;
+use protocol::camera::{CameraCapabilities, CameraStatus};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::types::{CameraCommand, CameraFileRef, CaptureError, DeleteError, DownloadError};
@@ -7,6 +7,7 @@ use crate::types::{CameraCommand, CameraFileRef, CaptureError, DeleteError, Down
 pub struct CameraHandle {
     cmd_tx: mpsc::Sender<CameraCommand>,
     status_rx: watch::Receiver<CameraStatus>,
+    capabilities_rx: watch::Receiver<Option<CameraCapabilities>>,
 }
 
 impl CameraHandle {
@@ -14,7 +15,20 @@ impl CameraHandle {
         cmd_tx: mpsc::Sender<CameraCommand>,
         status_rx: watch::Receiver<CameraStatus>,
     ) -> Self {
-        Self { cmd_tx, status_rx }
+        let (_caps_tx, capabilities_rx) = watch::channel(None);
+        Self::with_capabilities(cmd_tx, status_rx, capabilities_rx)
+    }
+
+    pub fn with_capabilities(
+        cmd_tx: mpsc::Sender<CameraCommand>,
+        status_rx: watch::Receiver<CameraStatus>,
+        capabilities_rx: watch::Receiver<Option<CameraCapabilities>>,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            status_rx,
+            capabilities_rx,
+        }
     }
 
     pub async fn capture(
@@ -113,5 +127,9 @@ impl CameraHandle {
 
     pub fn status(&self) -> watch::Receiver<CameraStatus> {
         self.status_rx.clone()
+    }
+
+    pub fn capabilities(&self) -> watch::Receiver<Option<CameraCapabilities>> {
+        self.capabilities_rx.clone()
     }
 }

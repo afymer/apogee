@@ -1,6 +1,6 @@
 use protocol::{
-    CameraStatus, DaemonStatus, Frame, ImagingSequence, MountCommand, MountStatus, MountTelemetry,
-    NightPlan, NightPlanRunRequest, SequenceStatus,
+    CameraCapabilities, CameraStatus, DaemonStatus, Frame, ImagingSequence, MountCommand,
+    MountStatus, MountTelemetry, NightPlan, NightPlanRunRequest, SequenceStatus,
 };
 use synscan::{MountEvent, MountHandle};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -30,6 +30,7 @@ pub struct ControllerHandle {
     cmd_tx: mpsc::Sender<ControllerCommand>,
     daemon_status_rx: watch::Receiver<DaemonStatus>,
     camera_status_rx: watch::Receiver<CameraStatus>,
+    camera_capabilities_rx: watch::Receiver<Option<CameraCapabilities>>,
     sequence_status_rx: watch::Receiver<Option<SequenceStatus>>,
     mount: MountHandle,
     event_tx: broadcast::Sender<ControllerEvent>,
@@ -40,6 +41,7 @@ impl ControllerHandle {
         cmd_tx: mpsc::Sender<ControllerCommand>,
         daemon_status_rx: watch::Receiver<DaemonStatus>,
         camera_status_rx: watch::Receiver<CameraStatus>,
+        camera_capabilities_rx: watch::Receiver<Option<CameraCapabilities>>,
         sequence_status_rx: watch::Receiver<Option<SequenceStatus>>,
         mount: MountHandle,
         event_tx: broadcast::Sender<ControllerEvent>,
@@ -48,6 +50,7 @@ impl ControllerHandle {
             cmd_tx,
             daemon_status_rx,
             camera_status_rx,
+            camera_capabilities_rx,
             sequence_status_rx,
             mount,
             event_tx,
@@ -119,6 +122,10 @@ impl ControllerHandle {
 
     pub fn camera_status(&self) -> watch::Receiver<CameraStatus> {
         self.camera_status_rx.clone()
+    }
+
+    pub fn camera_capabilities(&self) -> watch::Receiver<Option<CameraCapabilities>> {
+        self.camera_capabilities_rx.clone()
     }
 
     pub fn sequence_status(&self) -> watch::Receiver<Option<SequenceStatus>> {

@@ -73,11 +73,13 @@ impl Controller {
         let (event_tx, _) = broadcast::channel(128);
 
         let camera_status_rx = camera.status();
+        let camera_capabilities_rx = camera.capabilities();
 
         let handle = ControllerHandle::new(
             cmd_tx,
             status_rx,
             camera_status_rx,
+            camera_capabilities_rx,
             sequence_status_rx,
             mount.clone(),
             event_tx.clone(),

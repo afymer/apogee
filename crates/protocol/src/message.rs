@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::camera::CameraStatus;
+use crate::camera::{CameraCapabilities, CameraStatus};
 use crate::capture::{Frame, ImagingSequence, SequenceStatus};
 use crate::mount::{MountCommand, MountStatus, MountTelemetry};
 use crate::plan::{NightPlan, NightPlanRunRequest};
@@ -31,6 +31,7 @@ pub enum ViewerMessage {
 pub enum DaemonMessage {
     Status(DaemonStatus),
     CameraStatus(CameraStatus),
+    CameraCapabilities(Option<CameraCapabilities>),
     MountStatus(MountStatus),
     MountTelemetry(MountTelemetry),
     MountPorts(Vec<String>),

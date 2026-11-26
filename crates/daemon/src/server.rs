@@ -22,8 +22,8 @@ use axum::{
 use controller::{CapturedFrame, ControllerEvent, ControllerHandle};
 use futures::{SinkExt, StreamExt};
 use protocol::{
-    CameraStatus, DaemonMessage, DaemonStatus, FrameType, MountStatus, MountTelemetry,
-    SequenceStatus, ViewerMessage,
+    CameraCapabilities, CameraStatus, DaemonMessage, DaemonStatus, FrameType, MountStatus,
+    MountTelemetry, SequenceStatus, ViewerMessage,
 };
 use serde::Serialize;
 use synscan::MountEvent;
@@ -305,6 +305,7 @@ async fn health_handler() -> impl IntoResponse {
 struct StatusResponse {
     daemon: DaemonStatus,
     camera: CameraStatus,
+    camera_capabilities: Option<CameraCapabilities>,
     mount: MountStatus,
     mount_telemetry: Option<MountTelemetry>,
     sequence: Option<SequenceStatus>,
@@ -314,6 +315,7 @@ struct StatusResponse {
 async fn status_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let daemon = state.controller.status().borrow().clone();
     let camera = state.controller.camera_status().borrow().clone();
+    let camera_capabilities = state.controller.camera_capabilities().borrow().clone();
     let mount = state.controller.mount_status().borrow().clone();
     let mount_telemetry = state.controller.mount_telemetry().borrow().clone();
     let sequence = state.controller.sequence_status().borrow().clone();
@@ -322,6 +324,7 @@ async fn status_handler(State(state): State<Arc<ServerState>>) -> impl IntoRespo
     axum::Json(StatusResponse {
         daemon,
         camera,
+        camera_capabilities,
         mount,
         mount_telemetry,
         sequence,
@@ -403,12 +406,15 @@ impl Drop for ViewerCountGuard {
 }
 
 fn collect_snapshot_messages(state: &ServerState) -> Vec<DaemonMessage> {
-    let mut msgs = Vec::with_capacity(5);
+    let mut msgs = Vec::with_capacity(6);
     msgs.push(DaemonMessage::Status(
         state.controller.status().borrow().clone(),
     ));
     msgs.push(DaemonMessage::CameraStatus(
         state.controller.camera_status().borrow().clone(),
+    ));
+    msgs.push(DaemonMessage::CameraCapabilities(
+        state.controller.camera_capabilities().borrow().clone(),
     ));
     msgs.push(DaemonMessage::MountStatus(
         state.controller.mount_status().borrow().clone(),
@@ -712,11 +718,20 @@ pub fn spawn_controller_event_forwarder(state: Arc<ServerState>) {
 
 pub fn spawn_camera_status_watcher(state: Arc<ServerState>) {
     let mut status_rx = state.controller.camera_status();
+    let status_state = state.clone();
     tokio::spawn(async move {
         while status_rx.changed().await.is_ok() {
             let new_status = status_rx.borrow().clone();
             info!("Camera status changed: {:?}", new_status);
-            state.broadcast(DaemonMessage::CameraStatus(new_status));
+            status_state.broadcast(DaemonMessage::CameraStatus(new_status));
+        }
+    });
+
+    let mut caps_rx = state.controller.camera_capabilities();
+    tokio::spawn(async move {
+        while caps_rx.changed().await.is_ok() {
+            let caps = caps_rx.borrow().clone();
+            state.broadcast(DaemonMessage::CameraCapabilities(caps));
         }
     });
 }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use protocol::camera::CameraStatus;
+use protocol::camera::{CameraCapabilities, CameraStatus, DEFAULT_ISO_CHOICES};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -27,6 +27,7 @@ impl Default for ConnectionConfig {
 pub struct CameraActor {
     rx: mpsc::Receiver<CameraCommand>,
     status_tx: watch::Sender<CameraStatus>,
+    capabilities_tx: watch::Sender<Option<CameraCapabilities>>,
     connection_config: ConnectionConfig,
 }
 
@@ -42,10 +43,12 @@ impl CameraActor {
     pub fn spawn() -> CameraHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (status_tx, status_rx) = watch::channel(CameraStatus::Disconnected);
+        let (capabilities_tx, capabilities_rx) = watch::channel(None);
 
         let actor = CameraActor {
             rx: cmd_rx,
             status_tx,
+            capabilities_tx,
             connection_config: ConnectionConfig::default(),
         };
 
@@ -53,13 +56,19 @@ impl CameraActor {
             actor.run().await;
         });
 
-        CameraHandle::new(cmd_tx, status_rx)
+        CameraHandle::with_capabilities(cmd_tx, status_rx, capabilities_rx)
     }
 
     /// Spawns a simulated camera actor that stays `CameraStatus::Ready` without polling USB.
     pub fn spawn_simulated() -> CameraHandle {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
         let (status_tx, status_rx) = watch::channel(CameraStatus::Ready);
+        let sim_caps = CameraCapabilities {
+            model: Some("Simulated DSLR".to_string()),
+            iso_choices: DEFAULT_ISO_CHOICES.to_vec(),
+            supports_auto_iso: true,
+        };
+        let (capabilities_tx, capabilities_rx) = watch::channel(Some(sim_caps));
 
         tokio::spawn(async move {
             info!("Simulated camera actor ready (no USB polling)");
@@ -98,10 +107,11 @@ impl CameraActor {
                     }
                 }
             }
+            drop(capabilities_tx);
             drop(status_tx);
         });
 
-        CameraHandle::new(cmd_tx, status_rx)
+        CameraHandle::with_capabilities(cmd_tx, status_rx, capabilities_rx)
     }
 
     async fn run(mut self) {
@@ -114,6 +124,7 @@ impl CameraActor {
                 }
                 Err(ConnectionError::HardwareUnresponsive) => {
                     error!("Hardware is not responding, requesting intervention");
+                    self.set_capabilities(None);
                     self.set_status(CameraStatus::Fatal(
                         "Hardware did not respond. Please check USB connection.".into(),
                     ));
@@ -128,10 +139,13 @@ impl CameraActor {
                 }
             };
 
+            let caps = Self::query_capabilities(&driver).await;
+            self.set_capabilities(caps);
             self.set_status(CameraStatus::Ready);
 
             let failure_reason = self.serve_requests(&mut driver).await;
             driver.close().await;
+            self.set_capabilities(None);
 
             if failure_reason.is_none() {
                 return;
@@ -700,8 +714,55 @@ impl CameraActor {
         Some(driver)
     }
 
+    async fn query_capabilities(driver: &Driver<Initialized>) -> Option<CameraCapabilities> {
+        let abilities = driver.camera().abilities();
+        let raw_model = abilities.model();
+        let trimmed_model = raw_model.trim();
+        let model = (!trimmed_model.is_empty()).then(|| trimmed_model.to_string());
+
+        let (iso_choices, supports_auto_iso) = match tokio::time::timeout(
+            Duration::from_secs(5),
+            driver
+                .camera()
+                .config_key::<gphoto2::widget::RadioWidget>("iso"),
+        )
+        .await
+        {
+            Ok(Ok(iso_widget)) => {
+                let raw_choices: Vec<String> = iso_widget.choices_iter().collect();
+                let (choices, auto) =
+                    parse_iso_capabilities(raw_choices.iter().map(String::as_str));
+                info!(
+                    "Queried camera capabilities (model={:?}, iso_choices={}, supports_auto={})",
+                    model,
+                    choices.len(),
+                    auto
+                );
+                (choices, auto)
+            }
+            Ok(Err(err)) => {
+                debug!("Camera ISO choices unavailable during capability query: {err}");
+                (Vec::new(), true)
+            }
+            Err(_) => {
+                warn!("Timed out querying camera ISO choices");
+                (Vec::new(), true)
+            }
+        };
+
+        (model.is_some() || !iso_choices.is_empty()).then_some(CameraCapabilities {
+            model,
+            iso_choices,
+            supports_auto_iso,
+        })
+    }
+
     fn set_status(&self, status: CameraStatus) {
         self.status_tx.send(status).ok();
+    }
+
+    fn set_capabilities(&self, caps: Option<CameraCapabilities>) {
+        self.capabilities_tx.send(caps).ok();
     }
 }
 
@@ -719,6 +780,43 @@ async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
+fn strip_iso_prefix(trimmed: &str) -> &str {
+    if trimmed
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("iso"))
+    {
+        trimmed[3..].trim()
+    } else {
+        trimmed
+    }
+}
+
+fn parse_iso_choice(choice: &str) -> Option<u32> {
+    let trimmed = choice.trim();
+    let numeric_part = strip_iso_prefix(trimmed);
+    let val: u32 = numeric_part.parse().ok()?;
+    (val > 0).then_some(val)
+}
+
+fn parse_iso_capabilities<'a>(choices: impl IntoIterator<Item = &'a str>) -> (Vec<u32>, bool) {
+    let mut supports_auto = false;
+    let mut values = Vec::new();
+    for raw in choices {
+        let trimmed = raw.trim();
+        let after_iso = strip_iso_prefix(trimmed);
+        if after_iso.eq_ignore_ascii_case("auto") {
+            supports_auto = true;
+            continue;
+        }
+        if let Some(val) = parse_iso_choice(trimmed) {
+            values.push(val);
+        }
+    }
+    values.sort_unstable();
+    values.dedup();
+    (values, supports_auto)
+}
+
 fn select_closest_iso_choice<'a>(
     choices: impl IntoIterator<Item = &'a str>,
     target_iso: u32,
@@ -731,16 +829,7 @@ fn select_closest_iso_choice<'a>(
     choices
         .into_iter()
         .filter_map(|choice| {
-            let trimmed = choice.trim();
-            let numeric_part = trimmed
-                .strip_prefix("ISO")
-                .or_else(|| trimmed.strip_prefix("iso"))
-                .unwrap_or(trimmed)
-                .trim();
-            let val: f64 = numeric_part.parse().ok()?;
-            if !val.is_finite() || val <= 0.0 {
-                return None;
-            }
+            let val = f64::from(parse_iso_choice(choice)?);
             let log_dist = (val / target).ln().abs();
             Some((choice, log_dist))
         })
@@ -790,4 +879,50 @@ fn select_closest_shutter_choice<'a>(
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(choice, _)| choice)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_iso_choice_handles_prefixed_and_non_numeric_values() {
+        assert_eq!(parse_iso_choice("100"), Some(100));
+        assert_eq!(parse_iso_choice("  ISO 800 "), Some(800));
+        assert_eq!(parse_iso_choice("iso1600"), Some(1600));
+        assert_eq!(parse_iso_choice("Iso 3200"), Some(3200));
+        assert_eq!(parse_iso_choice("Auto"), None);
+        assert_eq!(parse_iso_choice("ISO Auto"), None);
+        assert_eq!(parse_iso_choice("Hi 1"), None);
+        assert_eq!(parse_iso_choice("0"), None);
+        assert_eq!(parse_iso_choice("élan"), None);
+    }
+
+    #[test]
+    fn parse_iso_capabilities_extracts_auto_sorts_and_dedups() {
+        let (choices, auto) = parse_iso_capabilities([
+            "Auto",
+            "ISO 1600",
+            "100",
+            "Hi 1",
+            "ISO 400",
+            "400",
+            "iso 800",
+            "ISO 200",
+        ]);
+        assert!(auto);
+        assert_eq!(choices, vec![100, 200, 400, 800, 1600]);
+
+        let (no_auto_choices, no_auto) = parse_iso_capabilities(["100", "125", "160", "200"]);
+        assert!(!no_auto);
+        assert_eq!(no_auto_choices, vec![100, 125, 160, 200]);
+    }
+
+    #[test]
+    fn select_closest_iso_choice_picks_nearest_log_stop() {
+        let choices = ["Auto", "100", "ISO 200", "400", "ISO 800", "1600"];
+        assert_eq!(select_closest_iso_choice(choices, 800), Some("ISO 800"));
+        assert_eq!(select_closest_iso_choice(choices, 320), Some("400"));
+        assert_eq!(select_closest_iso_choice(choices, 50), Some("100"));
+    }
 }

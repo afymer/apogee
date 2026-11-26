@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::camera::CameraStatus;
+use crate::camera::{CameraCapabilities, CameraStatus};
 use crate::capture::SequenceStatus;
 use crate::message::DaemonStatus;
 use crate::mount::{MountStatus, MountTelemetry};
@@ -21,6 +21,8 @@ pub enum ConnectionState {
 pub struct DaemonState {
     pub connection: ConnectionState,
     pub camera: CameraStatus,
+    #[serde(default)]
+    pub camera_capabilities: Option<CameraCapabilities>,
     pub mount: MountStatus,
     pub mount_telemetry: Option<MountTelemetry>,
     pub available_mount_ports: Vec<String>,
@@ -33,6 +35,7 @@ impl Default for DaemonState {
         Self {
             connection: ConnectionState::Disconnected,
             camera: CameraStatus::Disconnected,
+            camera_capabilities: None,
             mount: MountStatus::Disconnected,
             mount_telemetry: None,
             available_mount_ports: Vec::new(),

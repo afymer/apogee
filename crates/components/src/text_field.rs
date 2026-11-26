@@ -470,7 +470,7 @@ impl TextField {
                 cx.stop_propagation();
                 return;
             }
-            "tab" => {
+            "tab" | "backtab" => {
                 return;
             }
             "backspace" => {
