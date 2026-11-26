@@ -2,6 +2,7 @@
 
 pub mod atmosphere;
 pub mod camera;
+pub mod dso;
 pub mod grids;
 pub mod ground;
 pub mod hips;
@@ -13,6 +14,9 @@ pub mod stars;
 pub mod viewport;
 
 pub use atmosphere::AtmosphereSettings;
+pub use dso::{
+    DsoGpuRecord, DsoLabel, DsoRenderParams, DsoSettings, DsoSpatialIndex, PickedDso,
+};
 pub use grids::CoordinateGridSettings;
 pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
@@ -90,6 +94,7 @@ pub struct BevyBridgeState {
     pub texture_size: Option<(u32, u32)>,
     pub view_info: PlanetariumViewInfo,
     pub star_index: Option<Arc<StarSpatialIndex>>,
+    pub dso_index: Option<Arc<DsoSpatialIndex>>,
     pub pending_commands: Vec<ViewportCommand>,
     pub overlay_active: bool,
     pub texture_is_mount_mode: bool,
@@ -131,6 +136,7 @@ impl BevyBridge {
                     texture_size: None,
                     view_info: PlanetariumViewInfo::default(),
                     star_index: None,
+                    dso_index: None,
                     pending_commands: Vec::new(),
                     overlay_active: false,
                     texture_is_mount_mode: false,
@@ -267,6 +273,15 @@ impl BevyBridge {
         guard.star_index.clone()
     }
 
+    pub fn dso_index(&self) -> Option<Arc<DsoSpatialIndex>> {
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.dso_index.clone()
+    }
+
     pub fn send_command(&self, cmd: ViewportCommand) {
         {
             let mut guard = self
@@ -330,6 +345,22 @@ impl BevyBridge {
             1.0
         };
         self.send_command(ViewportCommand::SetStarOpacity(clamped));
+    }
+
+    pub fn set_dso_opacity(&self, opacity: f32) {
+        let clamped = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.send_command(ViewportCommand::SetDsoOpacity(clamped));
+    }
+
+    pub fn set_dso_catalog_filter(&self, show_messier: bool, show_ngc: bool) {
+        self.send_command(ViewportCommand::SetDsoCatalogFilter {
+            show_messier,
+            show_ngc,
+        });
     }
 
     pub fn set_solar_system_opacity(&self, opacity: f32) {
@@ -995,6 +1026,28 @@ fn process_viewport_commands(
                     *frames_remaining = 3;
                 }
             }
+            ViewportCommand::SetDsoOpacity(opacity) => {
+                if let Some(mut settings) = app.world_mut().get_resource_mut::<dso::DsoSettings>()
+                {
+                    settings.opacity = if opacity.is_finite() {
+                        opacity.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    *frames_remaining = 3;
+                }
+            }
+            ViewportCommand::SetDsoCatalogFilter {
+                show_messier,
+                show_ngc,
+            } => {
+                if let Some(mut settings) = app.world_mut().get_resource_mut::<dso::DsoSettings>()
+                {
+                    settings.show_messier = show_messier;
+                    settings.show_ngc = show_ngc;
+                    *frames_remaining = 3;
+                }
+            }
             ViewportCommand::SetSolarSystemOpacity(opacity) => {
                 if let Some(mut settings) = app
                     .world_mut()
@@ -1481,12 +1534,78 @@ impl PlanetariumRenderer {
                     None
                 };
 
+                let dso_catalog = {
+                    let _span = tracing::info_span!("load_dso_catalog_step").entered();
+                    dso::load_dso_catalog()
+                };
+                let dso_setup = if let Some(catalog) = dso_catalog {
+                    let dso_count = catalog.records.len();
+                    let gpu_records: Vec<dso::DsoGpuRecord> = catalog
+                        .records
+                        .iter()
+                        .map(dso::DsoGpuRecord::from_record)
+                        .collect();
+                    {
+                        let _span = tracing::info_span!("build_dso_spatial_index", dso_count).entered();
+                        let index = Arc::new(dso::DsoSpatialIndex::build(catalog.records));
+                        let mut guard = bridge
+                            .inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        guard.dso_index = Some(index);
+                    }
+                    let buffer_handle = {
+                        let raw_bytes: &[u8] = bytemuck::cast_slice(&gpu_records);
+                        let storage_buffer =
+                            ShaderBuffer::new(raw_bytes, RenderAssetUsages::RENDER_WORLD);
+                        app.world_mut()
+                            .resource_mut::<Assets<ShaderBuffer>>()
+                            .add(storage_buffer)
+                    };
+                    let mesh_handle = app
+                        .world_mut()
+                        .resource_mut::<Assets<Mesh>>()
+                        .add(stars::create_star_quad_mesh());
+
+                    let sun_alt_deg = celestial::solar::solar_altitude_deg(
+                        initial_camera.observer.location,
+                        initial_camera.observer.epoch,
+                    ) as f32;
+                    let render_params = dso::DsoRenderParams::for_sky(
+                        sun_alt_deg,
+                        initial_proj.fov_y,
+                        1.0,
+                        true,
+                        true,
+                    );
+                    let dso_material = dso::CelestialDsoMaterial {
+                        uniforms: dso::CelestialDsoUniforms {
+                            transform: glam::DMat4::from_mat3(initial_eq_to_cam).as_mat4(),
+                            projection: initial_proj.into(),
+                            viewport_size: Vec2::new(width as f32, height as f32),
+                            ngc_limiting_mag: render_params.ngc_limiting_mag,
+                            messier_boost: render_params.messier_boost,
+                            fade_range: render_params.fade_range,
+                            opacity: 1.0,
+                            catalog_mask: 3,
+                            atmo_visibility: render_params.atmo_visibility,
+                        },
+                        dsos: buffer_handle,
+                        dso_count: dso_count as u32,
+                    };
+                    Some((dso_material, mesh_handle))
+                } else {
+                    None
+                };
+
                 app.init_resource::<PendingCommands>();
                 app.init_resource::<ObserverClockResource>();
                 app.init_resource::<CameraSyncState>();
                 app.init_resource::<atmosphere::AtmosphereSettings>();
                 app.init_resource::<ground::GroundSettings>();
                 app.init_resource::<stars::StarSettings>();
+                app.init_resource::<dso::DsoSettings>();
                 app.init_resource::<solar_system::SolarSystemRenderSettings>();
                 let moon_textures = {
                     let _span = tracing::info_span!("init_fallback_moon_textures").entered();
@@ -1577,6 +1696,9 @@ impl PlanetariumRenderer {
                         .id();
                     let star = star_setup
                         .map(|(material, mesh)| world.spawn((Mesh3d(mesh), material)).id());
+                    if let Some((material, mesh)) = dso_setup {
+                        world.spawn((Mesh3d(mesh), material));
+                    }
                     world.spawn((
                         Mesh3d(solar_system_quad_mesh),
                         solar_system::CelestialSolarSystemMaterial::from_camera(
@@ -1636,6 +1758,7 @@ impl PlanetariumRenderer {
                     Update,
                     (
                         camera_movement_and_interpolation_system,
+                        dso::dso_system,
                         sky::sky_system,
                         solar_system::poll_solar_system_textures_system,
                         solar_system::solar_system_system,

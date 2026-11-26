@@ -38,6 +38,7 @@ use tracing::error;
 
 use crate::{
     camera::ProjectionParams,
+    dso::{CelestialDsoDraw, CelestialDsoMaterial, CelestialDsoPipeline, CelestialDsoUniforms},
     landscape::{
         CelestialLandscapeDraw, CelestialLandscapeMaterial, CelestialLandscapePipeline,
         CelestialLandscapeUniforms, LandscapePipelineKey,
@@ -277,6 +278,7 @@ struct CelestialPipelines<'w> {
     tile: Res<'w, CelestialTilePipeline>,
     line: Res<'w, CelestialLinePipeline>,
     star: Res<'w, CelestialStarPipeline>,
+    dso: Res<'w, CelestialDsoPipeline>,
     solar_system: Res<'w, CelestialSolarSystemPipeline>,
     sky: Res<'w, CelestialSkyPipeline>,
     landscape: Res<'w, CelestialLandscapePipeline>,
@@ -287,6 +289,7 @@ struct SpecializedCelestialPipelines<'w> {
     tile: ResMut<'w, SpecializedMeshPipelines<CelestialTilePipeline>>,
     line: ResMut<'w, SpecializedMeshPipelines<CelestialLinePipeline>>,
     star: ResMut<'w, SpecializedMeshPipelines<CelestialStarPipeline>>,
+    dso: ResMut<'w, SpecializedMeshPipelines<CelestialDsoPipeline>>,
     solar_system: ResMut<'w, SpecializedMeshPipelines<CelestialSolarSystemPipeline>>,
     sky: ResMut<'w, SpecializedRenderPipelines<CelestialSkyPipeline>>,
     landscape: ResMut<'w, SpecializedRenderPipelines<CelestialLandscapePipeline>>,
@@ -297,6 +300,7 @@ struct CelestialUniforms<'w> {
     tile: Res<'w, ComponentUniforms<CelestialTileUniforms>>,
     line: Res<'w, ComponentUniforms<CelestialLineUniforms>>,
     star: Res<'w, ComponentUniforms<CelestialStarUniforms>>,
+    dso: Res<'w, ComponentUniforms<CelestialDsoUniforms>>,
     solar_system: Res<'w, ComponentUniforms<CelestialSolarSystemUniforms>>,
     sky: Res<'w, ComponentUniforms<CelestialSkyUniforms>>,
     landscape: Res<'w, ComponentUniforms<CelestialLandscapeUniforms>>,
@@ -328,6 +332,15 @@ struct CelestialDrawQueries<'w, 's> {
         (
             &'static CelestialStarDraw,
             &'static DynamicUniformIndex<CelestialStarUniforms>,
+            &'static CelestialPipelineId,
+        ),
+    >,
+    dsos: Query<
+        'w,
+        's,
+        (
+            &'static CelestialDsoDraw,
+            &'static DynamicUniformIndex<CelestialDsoUniforms>,
             &'static CelestialPipelineId,
         ),
     >,
@@ -365,6 +378,7 @@ pub fn init_celestial_materials(app: &mut App) {
     embedded_asset!(app, "shaders/celestial_tile.wgsl");
     embedded_asset!(app, "shaders/celestial_line.wgsl");
     embedded_asset!(app, "shaders/celestial_star.wgsl");
+    embedded_asset!(app, "shaders/celestial_dso.wgsl");
     embedded_asset!(app, "shaders/celestial_solar_system.wgsl");
     embedded_asset!(app, "shaders/celestial_sky.wgsl");
     embedded_asset!(app, "shaders/celestial_landscape.wgsl");
@@ -376,6 +390,8 @@ pub fn init_celestial_materials(app: &mut App) {
         UniformComponentPlugin::<CelestialLineUniforms>::default(),
         ExtractComponentPlugin::<CelestialStarMaterial>::default(),
         UniformComponentPlugin::<CelestialStarUniforms>::default(),
+        ExtractComponentPlugin::<CelestialDsoMaterial>::default(),
+        UniformComponentPlugin::<CelestialDsoUniforms>::default(),
         ExtractComponentPlugin::<CelestialSolarSystemMaterial>::default(),
         UniformComponentPlugin::<CelestialSolarSystemUniforms>::default(),
         ExtractComponentPlugin::<CelestialSkyMaterial>::default(),
@@ -391,6 +407,7 @@ pub fn init_celestial_materials(app: &mut App) {
         .init_resource::<SpecializedMeshPipelines<CelestialTilePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialLinePipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialStarPipeline>>()
+        .init_resource::<SpecializedMeshPipelines<CelestialDsoPipeline>>()
         .init_resource::<SpecializedMeshPipelines<CelestialSolarSystemPipeline>>()
         .init_resource::<SpecializedRenderPipelines<CelestialSkyPipeline>>()
         .init_resource::<SpecializedRenderPipelines<CelestialLandscapePipeline>>()
@@ -440,6 +457,9 @@ fn init_celestial_pipelines(mut commands: Commands, asset_server: Res<AssetServe
     commands.insert_resource(CelestialStarPipeline::new(
         asset_server.load("embedded://planetarium/shaders/celestial_star.wgsl"),
     ));
+    commands.insert_resource(CelestialDsoPipeline::new(
+        asset_server.load("embedded://planetarium/shaders/celestial_dso.wgsl"),
+    ));
     commands.insert_resource(CelestialSolarSystemPipeline::new(
         asset_server.load("embedded://planetarium/shaders/celestial_solar_system.wgsl"),
     ));
@@ -486,6 +506,7 @@ fn queue_celestial_pipelines(
     tiles: Query<(Entity, &CelestialTileDraw)>,
     lines: Query<(Entity, &CelestialLineDraw)>,
     stars: Query<(Entity, &CelestialStarDraw)>,
+    dsos: Query<(Entity, &CelestialDsoDraw)>,
     solar_system: Query<(Entity, &CelestialSolarSystemDraw)>,
     skies: Query<(Entity, &CelestialSkyDraw)>,
     landscapes: Query<(Entity, &CelestialLandscapeDraw)>,
@@ -522,6 +543,19 @@ fn queue_celestial_pipelines(
                 &cache,
                 &*pipelines.star,
                 &mut specialized.star,
+                &meshes,
+                draw.mesh,
+                target,
+                *msaa,
+            ) {
+                commands.entity(entity).insert(id);
+            }
+        }
+        for (entity, draw) in &dsos {
+            if let Some(id) = specialize_pipeline(
+                &cache,
+                &*pipelines.dso,
+                &mut specialized.dso,
                 &meshes,
                 draw.mesh,
                 target,
@@ -709,6 +743,34 @@ fn draw_celestial(
                 vertex_buffer: Some(vertex_buffer),
                 geometry,
                 instances: 0..draw.star_count,
+            });
+        }
+    }
+
+    if let Some(binding) = uniforms.dso.binding() {
+        for (draw, uniform_index, pipeline_id) in &queries.dsos {
+            let (Some(pipeline), Some((vertex_buffer, geometry)), Some(dsos_buffer)) = (
+                pipeline_cache.get_render_pipeline(pipeline_id.0),
+                locate_mesh(draw.mesh, &meshes, &allocator),
+                shader_buffers.get(draw.dsos),
+            ) else {
+                continue;
+            };
+            let bind_group = ctx.render_device().create_bind_group(
+                "celestial_dso_bind_group",
+                &pipeline_cache.get_bind_group_layout(&pipelines.dso.layout),
+                &BindGroupEntries::sequential((
+                    binding.clone(),
+                    dsos_buffer.buffer.as_entire_binding(),
+                )),
+            );
+            items.push(DrawItem {
+                pipeline,
+                bind_group,
+                uniform_offset: uniform_index.index(),
+                vertex_buffer: Some(vertex_buffer),
+                geometry,
+                instances: 0..draw.dso_count,
             });
         }
     }

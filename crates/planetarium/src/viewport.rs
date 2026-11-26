@@ -52,6 +52,11 @@ pub enum ViewportCommand {
     SetHipsSurvey(hips::HipsSurvey),
     SetHipsSurveyOpacity(f32),
     SetStarOpacity(f32),
+    SetDsoOpacity(f32),
+    SetDsoCatalogFilter {
+        show_messier: bool,
+        show_ngc: bool,
+    },
     SetSolarSystemOpacity(f32),
     SetAltAzGridOpacity(f32),
     SetEquatorialGridOpacity(f32),
