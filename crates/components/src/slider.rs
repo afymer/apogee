@@ -19,6 +19,22 @@ pub enum SliderEvent {
     Commit(f32),
 }
 
+fn snap_normalized(value: f32, snap_stops: Option<usize>) -> f32 {
+    let clamped = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    match snap_stops {
+        Some(0 | 1) => 0.0,
+        Some(stops) => {
+            let max_idx = (stops - 1) as f32;
+            (clamped * max_idx).round() / max_idx
+        }
+        None => clamped,
+    }
+}
+
 /// Reusable single-handle proximity-reactive slider supporting optional center-origin bipolar fill.
 pub struct Slider {
     value: f32,
@@ -29,6 +45,7 @@ pub struct Slider {
     fill_from_center: bool,
     accent_color: Option<Hsla>,
     default_value: Option<f32>,
+    snap_stops: Option<usize>,
     track_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
 }
 
@@ -47,6 +64,7 @@ impl Slider {
             fill_from_center: false,
             accent_color: None,
             default_value: None,
+            snap_stops: None,
             track_bounds: Arc::new(Mutex::new(None)),
         }
     }
@@ -83,9 +101,37 @@ impl Slider {
     #[must_use]
     pub fn default_value(mut self, value: f32) -> Self {
         if value.is_finite() {
-            self.default_value = Some(value.clamp(0.0, 1.0));
+            self.default_value = Some(snap_normalized(value, self.snap_stops));
         }
         self
+    }
+
+    /// Snaps the handle to `stops` evenly spaced discrete positions across `[0.0, 1.0]`.
+    #[must_use]
+    pub fn snap_stops(mut self, stops: usize) -> Self {
+        let normalized_stops = Some(stops.max(1));
+        self.snap_stops = normalized_stops;
+        self.value = snap_normalized(self.value, normalized_stops);
+        if let Some(default_val) = self.default_value {
+            self.default_value = Some(snap_normalized(default_val, normalized_stops));
+        }
+        self
+    }
+
+    /// Updates discrete stop snapping dynamically, re-snapping `value` when not dragging.
+    pub fn set_snap_stops(&mut self, stops: Option<usize>, cx: &mut Context<Self>) {
+        let normalized_stops = stops.map(|n| n.max(1));
+        if self.snap_stops == normalized_stops {
+            return;
+        }
+        self.snap_stops = normalized_stops;
+        if !self.is_dragging {
+            self.value = snap_normalized(self.value, normalized_stops);
+        }
+        if let Some(default_val) = self.default_value {
+            self.default_value = Some(snap_normalized(default_val, normalized_stops));
+        }
+        cx.notify();
     }
 
     /// Returns the current normalized value in `[0.0, 1.0]`.
@@ -104,7 +150,7 @@ impl Slider {
         if self.is_dragging {
             return;
         }
-        let next = if value.is_finite() { value } else { 0.0 }.clamp(0.0, 1.0);
+        let next = snap_normalized(value, self.snap_stops);
         if (self.value - next).abs() > 1e-6 {
             self.value = next;
             cx.notify();
@@ -112,7 +158,7 @@ impl Slider {
     }
 
     fn set_value_emit(&mut self, value: f32, cx: &mut Context<Self>) {
-        let next = if value.is_finite() { value } else { 0.0 }.clamp(0.0, 1.0);
+        let next = snap_normalized(value, self.snap_stops);
         if (self.value - next).abs() > 1e-6 {
             self.value = next;
             cx.emit(SliderEvent::Change(next));
@@ -300,6 +346,29 @@ impl Render for Slider {
             );
         }
 
+        if let Some(stops) = self.snap_stops
+            && stops >= 3
+            && stops <= 32
+            && p > 0.02
+        {
+            let tick_color = cx.theme().colors().text_muted.opacity(0.35 * p);
+            let tick_top = (track_h - 4.0) / 2.0;
+            let max_idx = (stops - 1) as f32;
+            for i in 1..(stops - 1) {
+                inner = inner.child(
+                    div()
+                        .absolute()
+                        .top(px(tick_top))
+                        .left(relative(i as f32 / max_idx))
+                        .ml(px(-0.5))
+                        .w(px(1.0))
+                        .h(px(4.0))
+                        .rounded_full()
+                        .bg(tick_color),
+                );
+            }
+        }
+
         if p > 0.02 {
             let knob_opacity = p.powf(1.5);
             let knob_bg = hsla(
@@ -382,5 +451,31 @@ impl Render for Slider {
                     .bg(track_bg),
             )
             .child(inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snap_normalized_quantizes_discrete_and_handles_edge_cases() {
+        assert_eq!(snap_normalized(0.37, None), 0.37);
+        assert_eq!(snap_normalized(1.5, None), 1.0);
+        assert_eq!(snap_normalized(-0.5, None), 0.0);
+        assert_eq!(snap_normalized(f32::NAN, None), 0.0);
+
+        assert_eq!(snap_normalized(0.9, Some(0)), 0.0);
+        assert_eq!(snap_normalized(0.9, Some(1)), 0.0);
+
+        assert_eq!(snap_normalized(0.49, Some(2)), 0.0);
+        assert_eq!(snap_normalized(0.51, Some(2)), 1.0);
+
+        // 9 discrete stops -> multiples of 1/8 = 0.125
+        assert!((snap_normalized(0.06, Some(9)) - 0.0).abs() < 1e-6);
+        assert!((snap_normalized(0.11, Some(9)) - 0.125).abs() < 1e-6);
+        assert!((snap_normalized(0.49, Some(9)) - 0.5).abs() < 1e-6);
+        assert!((snap_normalized(0.95, Some(9)) - 1.0).abs() < 1e-6);
+        assert_eq!(snap_normalized(f32::INFINITY, Some(9)), 0.0);
     }
 }

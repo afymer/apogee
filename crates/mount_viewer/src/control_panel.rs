@@ -124,6 +124,7 @@ impl MountControlPanel {
             let slew_rate_slider = cx.new(|_cx| {
                 Slider::new(rate_to_slider(initial_rate))
                     .default_value(rate_to_slider(initial_rate))
+                    .snap_stops(9)
             });
             cx.subscribe(
                 &slew_rate_slider,

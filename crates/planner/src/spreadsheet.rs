@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use client::GlobalDaemonState;
@@ -1269,7 +1270,11 @@ impl SequenceSpreadsheetView {
         let iso_focus = cx.focus_handle();
         let iso_norm = iso_to_slider_norm(step.params.iso, iso_slots);
         let iso_default = iso_to_slider_norm(Some(800), iso_slots);
-        let iso_slider = cx.new(|_| Slider::new(iso_norm).default_value(iso_default));
+        let iso_slider = cx.new(|_| {
+            Slider::new(iso_norm)
+                .default_value(iso_default)
+                .snap_stops(iso_slots.len())
+        });
         let count = cx.new(|cx| {
             TextField::new(step.count.to_string(), window, cx)
                 .monospace(true)
@@ -1331,6 +1336,39 @@ impl SequenceSpreadsheetView {
         }
     }
 
+    fn sync_target_group_fields(
+        group: &TargetRowGroup,
+        target: &PlannedTarget,
+        utc_offset_secs: i32,
+        slots: &[Option<u32>],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let start_txt = format_unix_hm(target.start_unix_secs, utc_offset_secs);
+        if !group.start_time.read(cx).is_focused(window) {
+            group.start_time.update(cx, |f, cx| f.set_text(start_txt, cx));
+        }
+        for (row, step) in group.rows.iter().zip(&target.steps) {
+            let exp_txt = format_secs(step.params.exposure);
+            if !row.exposure.read(cx).is_focused(window) {
+                row.exposure.update(cx, |f, cx| f.set_text(exp_txt, cx));
+            }
+            let iso_norm = iso_to_slider_norm(step.params.iso, slots);
+            row.iso_slider.update(cx, |s, cx| {
+                s.set_snap_stops(Some(slots.len()), cx);
+                s.set_value(iso_norm, cx);
+            });
+            let cnt_txt = step.count.to_string();
+            if !row.count.read(cx).is_focused(window) {
+                row.count.update(cx, |f, cx| f.set_text(cnt_txt, cx));
+            }
+            let del_txt = format_secs(step.delay_between_frames);
+            if !row.delay.read(cx).is_focused(window) {
+                row.delay.update(cx, |f, cx| f.set_text(del_txt, cx));
+            }
+        }
+    }
+
     fn ensure_groups_synced(
         &mut self,
         targets: &[PlannedTarget],
@@ -1358,37 +1396,30 @@ impl SequenceSpreadsheetView {
         }
 
         let slots = build_iso_slots(iso_choices, supports_auto);
-        if structure_matches {
-            for (group, target) in self.groups.iter().zip(targets) {
-                let start_txt = format_unix_hm(target.start_unix_secs, utc_offset_secs);
-                if !group.start_time.read(cx).is_focused(window) {
-                    group.start_time.update(cx, |f, cx| f.set_text(start_txt, cx));
-                }
-                for (row, step) in group.rows.iter().zip(&target.steps) {
-                    let exp_txt = format_secs(step.params.exposure);
-                    if !row.exposure.read(cx).is_focused(window) {
-                        row.exposure.update(cx, |f, cx| f.set_text(exp_txt, cx));
-                    }
-                    let iso_norm = iso_to_slider_norm(step.params.iso, &slots);
-                    row.iso_slider.update(cx, |s, cx| s.set_value(iso_norm, cx));
-                    let cnt_txt = step.count.to_string();
-                    if !row.count.read(cx).is_focused(window) {
-                        row.count.update(cx, |f, cx| f.set_text(cnt_txt, cx));
-                    }
-                    let del_txt = format_secs(step.delay_between_frames);
-                    if !row.delay.read(cx).is_focused(window) {
-                        row.delay.update(cx, |f, cx| f.set_text(del_txt, cx));
-                    }
-                }
+        let mut existing: HashMap<String, TargetRowGroup> = self
+            .groups
+            .drain(..)
+            .map(|g| (g.target_id.clone(), g))
+            .collect();
+
+        let mut next_groups = Vec::with_capacity(targets.len());
+        for target in targets {
+            if let Some(group) = existing.remove(&target.id)
+                && group.rows.len() == target.steps.len()
+            {
+                Self::sync_target_group_fields(&group, target, utc_offset_secs, &slots, window, cx);
+                next_groups.push(group);
+            } else {
+                next_groups.push(Self::build_target_group_fields(
+                    target,
+                    utc_offset_secs,
+                    &slots,
+                    window,
+                    cx,
+                ));
             }
-        } else {
-            self.groups = targets
-                .iter()
-                .map(|target| {
-                    Self::build_target_group_fields(target, utc_offset_secs, &slots, window, cx)
-                })
-                .collect();
         }
+        self.groups = next_groups;
         self.synced_revision = Some(revision);
         self.synced_utc_offset = Some(utc_offset_secs);
         self.synced_iso_config = Some(iso_key);

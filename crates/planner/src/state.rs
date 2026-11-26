@@ -234,11 +234,9 @@ impl PlanModel {
     }
 
     fn resolve_overlaps_in_plan(plan: &mut NightPlan) {
-        let mut order: Vec<usize> = (0..plan.targets.len()).collect();
-        order.sort_by_key(|&i| (plan.targets[i].start_unix_secs, i));
+        plan.targets.sort_by_key(|t| t.start_unix_secs);
         let mut cursor_end: Option<i64> = None;
-        for idx in order {
-            let target = &mut plan.targets[idx];
+        for target in &mut plan.targets {
             if let Some(prev_end) = cursor_end
                 && target.start_unix_secs < prev_end
             {
@@ -369,8 +367,29 @@ impl PlanModel {
         if from_idx >= len || to_idx >= len || from_idx == to_idx {
             return false;
         }
+        let lo = from_idx.min(to_idx);
+        let hi = from_idx.max(to_idx);
+        let anchor_start = self.catalog.plan.targets[lo].start_unix_secs;
+        let gaps: Vec<i64> = (lo..hi)
+            .map(|i| {
+                self.catalog.plan.targets[i + 1]
+                    .start_unix_secs
+                    .saturating_sub(self.catalog.plan.targets[i].footprint_end_unix_secs())
+                    .max(0)
+            })
+            .collect();
+
         let target = self.catalog.plan.targets.remove(from_idx);
         self.catalog.plan.targets.insert(to_idx, target);
+
+        self.catalog.plan.targets[lo].start_unix_secs = anchor_start;
+        for (offset, gap) in gaps.into_iter().enumerate() {
+            let prev_end = self.catalog.plan.targets[lo + offset].footprint_end_unix_secs();
+            self.catalog.plan.targets[lo + offset + 1].start_unix_secs =
+                prev_end.saturating_add(gap);
+        }
+
+        Self::resolve_overlaps_in_plan(&mut self.catalog.plan);
         self.save_and_notify(cx);
         true
     }
@@ -448,6 +467,7 @@ impl PlanModel {
             }
         }
         if changed {
+            self.catalog.plan.targets.sort_by_key(|t| t.start_unix_secs);
             self.save_and_notify(cx);
         }
         changed
@@ -1083,7 +1103,7 @@ mod tests {
         model.update(cx, |m, cx| {
             let id1 = m.add_target("T1", 10.0, 20.0, None, 10_000, None, cx);
             let id2 = m.add_target("T2", 20.0, 20.0, None, 10_000, None, cx);
-            let _id3 = m.add_target("T3", 30.0, 20.0, None, 10_000, None, cx);
+            let id3 = m.add_target("T3", 30.0, 20.0, None, 10_000, None, cx);
 
             m.select_target(Some(id1.clone()), cx);
             assert_eq!(m.selected_target_ids().len(), 1);
@@ -1106,10 +1126,93 @@ mod tests {
                 20_000,
                 cx,
             );
-            let new_s1 = m.plan().targets[0].start_unix_secs;
-            let new_s2 = m.plan().targets[1].start_unix_secs;
+            let ordered_ids: Vec<String> = m.plan().targets.iter().map(|t| t.id.clone()).collect();
+            assert_eq!(ordered_ids, vec![id3.clone(), id1.clone(), id2.clone()]);
+            let new_s1 = m
+                .plan()
+                .targets
+                .iter()
+                .find(|t| t.id == id1)
+                .unwrap()
+                .start_unix_secs;
+            let new_s2 = m
+                .plan()
+                .targets
+                .iter()
+                .find(|t| t.id == id2)
+                .unwrap()
+                .start_unix_secs;
+            assert!(s3_start <= new_s1);
             assert_eq!(new_s2 - new_s1, spacing);
             assert!(new_s1 >= s3_end || new_s2 <= s3_start);
+            assert_eq!(m.plan().overlapping_target_indices(), [] as [(usize, usize); 0]);
+        });
+    }
+
+    #[gpui::test]
+    fn targets_stay_chronologically_ordered_on_load_edit_and_move(cx: &mut TestAppContext) {
+        let make_target = |id: &str, name: &str, start_unix_secs: i64| PlannedTarget {
+            id: id.to_string(),
+            name: name.to_string(),
+            ra_deg: 10.0,
+            dec_deg: 20.0,
+            color_hue_deg: 205.0,
+            enabled: true,
+            start_unix_secs,
+            steps: vec![SequenceStep::capture(
+                FrameType::Light,
+                5,
+                Duration::from_secs(60),
+                Some(800),
+                Duration::ZERO,
+            )],
+            slew_to_target: true,
+            auto_meridian_flip: true,
+            rotation_deg: None,
+        };
+
+        let mut catalog = PlannerCatalog::default();
+        catalog.plan.targets = vec![
+            make_target("venus", "Venus", 5_000),
+            make_target("mars", "Mars", 3_000),
+            make_target("saturn", "Saturn", 1_000),
+        ];
+
+        let store = DocumentStore::in_memory();
+        let model = cx.new(|_cx| PlanModel::new(store, catalog));
+
+        model.update(cx, |m, cx| {
+            let order_on_load: Vec<&str> =
+                m.plan().targets.iter().map(|t| t.id.as_str()).collect();
+            assert_eq!(order_on_load, vec!["saturn", "mars", "venus"]);
+
+            // Move Venus earlier than Mars via start-time edit -> reorders chronologically
+            assert!(m.set_target_start_unix_secs("venus", 2_000, cx));
+            let order_after_edit: Vec<&str> =
+                m.plan().targets.iter().map(|t| t.id.as_str()).collect();
+            assert_eq!(order_after_edit, vec!["saturn", "venus", "mars"]);
+            assert_eq!(m.plan().overlapping_target_indices(), [] as [(usize, usize); 0]);
+
+            // Space Mars cleanly at 4000 and swap indices 1..=2 via move_target; saturn at index 0 stays unaffected.
+            assert!(m.set_target_start_unix_secs("mars", 4_000, cx));
+            let anchor_start = m.plan().targets[1].start_unix_secs;
+            let mars_end_before = m.plan().targets[2].footprint_end_unix_secs();
+            let gap_before = m.plan().targets[2].start_unix_secs
+                - m.plan().targets[1].footprint_end_unix_secs();
+            let saturn_start_before = m.plan().targets[0].start_unix_secs;
+
+            assert!(m.move_target(2, 1, cx));
+            let order_after_move: Vec<&str> =
+                m.plan().targets.iter().map(|t| t.id.as_str()).collect();
+            assert_eq!(order_after_move, vec!["saturn", "mars", "venus"]);
+            assert_eq!(m.plan().targets[0].start_unix_secs, saturn_start_before);
+            assert_eq!(m.plan().targets[1].start_unix_secs, anchor_start);
+            assert_eq!(
+                m.plan().targets[2].start_unix_secs
+                    - m.plan().targets[1].footprint_end_unix_secs(),
+                gap_before
+            );
+            assert_eq!(m.plan().targets[2].footprint_end_unix_secs(), mars_end_before);
             assert_eq!(m.plan().overlapping_target_indices(), [] as [(usize, usize); 0]);
         });
     }
