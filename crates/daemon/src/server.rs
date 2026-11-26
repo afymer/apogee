@@ -572,6 +572,27 @@ async fn handle_viewer_command(
                 });
             }
         }
+        ViewerMessage::StartNightPlan(req) => {
+            let run_id = req.run_id;
+            info!(
+                "Forwarding StartNightPlan {} ({} targets) to controller",
+                run_id,
+                req.plan.targets.len()
+            );
+            if let Err(err) = state.controller.start_night_plan(req).await {
+                error!("Failed to forward StartNightPlan to controller: {err}");
+                let _ = direct_tx.send(DaemonMessage::CaptureError {
+                    frame_id: run_id,
+                    message: err.to_string(),
+                });
+            }
+        }
+        ViewerMessage::UpdateNightPlan(plan) => {
+            info!("Forwarding UpdateNightPlan '{}' to controller", plan.id);
+            if let Err(err) = state.controller.update_night_plan(plan).await {
+                error!("Failed to forward UpdateNightPlan to controller: {err}");
+            }
+        }
         ViewerMessage::PauseSequence => {
             info!("Forwarding PauseSequence to controller");
             if let Err(err) = state.controller.pause_sequence().await {

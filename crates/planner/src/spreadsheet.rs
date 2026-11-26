@@ -399,7 +399,8 @@ impl SequenceSpreadsheetView {
         let Some(seq) = seq_status else {
             return "—".to_string();
         };
-        let matches_target = seq.target_name == target.name;
+        let matches_target = seq.current_target_id.as_deref() == Some(target.id.as_str())
+            || (seq.plan_id.is_none() && seq.target_name == target.name);
         if !matches_target || !step.enabled {
             return "—".to_string();
         }

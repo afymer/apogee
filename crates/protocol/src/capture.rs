@@ -142,9 +142,12 @@ impl ImagingSequence {
 pub enum SequencePhase {
     #[default]
     Idle,
+    WaitingForStart,
+    SlewingToTarget,
     Running,
     Paused,
     WaitingForMeridianFlip,
+    Parking,
     Completed,
     Aborted,
     Failed,
@@ -154,9 +157,12 @@ impl SequencePhase {
     pub fn label(self) -> &'static str {
         match self {
             Self::Idle => "Idle",
+            Self::WaitingForStart => "Waiting",
+            Self::SlewingToTarget => "Slewing",
             Self::Running => "Running",
             Self::Paused => "Paused",
             Self::WaitingForMeridianFlip => "Meridian Flip",
+            Self::Parking => "Parking",
             Self::Completed => "Completed",
             Self::Aborted => "Aborted",
             Self::Failed => "Failed",
@@ -166,7 +172,12 @@ impl SequencePhase {
     pub fn is_active(self) -> bool {
         matches!(
             self,
-            Self::Running | Self::Paused | Self::WaitingForMeridianFlip
+            Self::WaitingForStart
+                | Self::SlewingToTarget
+                | Self::Running
+                | Self::Paused
+                | Self::WaitingForMeridianFlip
+                | Self::Parking
         )
     }
 }
@@ -175,6 +186,16 @@ impl SequencePhase {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequenceStatus {
     pub sequence_id: u64,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub current_target_id: Option<String>,
+    #[serde(default)]
+    pub current_target_index: u32,
+    #[serde(default)]
+    pub total_targets: u32,
+    #[serde(default)]
+    pub waiting_until_unix_secs: Option<i64>,
     pub target_name: String,
     pub phase: SequencePhase,
     pub current_step: u32,

@@ -159,6 +159,14 @@ impl NightPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NightPlanRunRequest {
+    pub run_id: u64,
+    pub plan: NightPlan,
+    #[serde(default)]
+    pub start_immediately: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SequenceTemplate {
     pub id: String,
     pub name: String,
@@ -344,5 +352,14 @@ mod tests {
         let json = serde_json::to_string(&plan).unwrap();
         let decoded: NightPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, plan);
+
+        let req = NightPlanRunRequest {
+            run_id: 99,
+            plan,
+            start_immediately: true,
+        };
+        let req_json = serde_json::to_string(&req).unwrap();
+        let req_decoded: NightPlanRunRequest = serde_json::from_str(&req_json).unwrap();
+        assert_eq!(req_decoded, req);
     }
 }

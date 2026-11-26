@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::camera::CameraStatus;
 use crate::capture::{Frame, ImagingSequence, SequenceStatus};
 use crate::mount::{MountCommand, MountStatus, MountTelemetry};
+use crate::plan::{NightPlan, NightPlanRunRequest};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonStatus {
@@ -17,6 +18,8 @@ pub enum ViewerMessage {
     Connect,
     StartCapture(Frame),
     StartSequence(ImagingSequence),
+    StartNightPlan(NightPlanRunRequest),
+    UpdateNightPlan(NightPlan),
     PauseSequence,
     ResumeSequence,
     Abort,

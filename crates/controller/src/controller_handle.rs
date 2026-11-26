@@ -1,6 +1,6 @@
 use protocol::{
     CameraStatus, DaemonStatus, Frame, ImagingSequence, MountCommand, MountStatus, MountTelemetry,
-    SequenceStatus,
+    NightPlan, NightPlanRunRequest, SequenceStatus,
 };
 use synscan::{MountEvent, MountHandle};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -17,6 +17,8 @@ pub enum ControllerError {
 pub enum ControllerCommand {
     StartCapture(Frame),
     StartSequence(ImagingSequence),
+    StartNightPlan(NightPlanRunRequest),
+    UpdateNightPlan(NightPlan),
     PauseSequence,
     ResumeSequence,
     Abort,
@@ -62,6 +64,23 @@ impl ControllerHandle {
     pub async fn start_sequence(&self, sequence: ImagingSequence) -> Result<(), ControllerError> {
         self.cmd_tx
             .send(ControllerCommand::StartSequence(sequence))
+            .await
+            .map_err(|_| ControllerError::Disconnected)
+    }
+
+    pub async fn start_night_plan(
+        &self,
+        request: NightPlanRunRequest,
+    ) -> Result<(), ControllerError> {
+        self.cmd_tx
+            .send(ControllerCommand::StartNightPlan(request))
+            .await
+            .map_err(|_| ControllerError::Disconnected)
+    }
+
+    pub async fn update_night_plan(&self, plan: NightPlan) -> Result<(), ControllerError> {
+        self.cmd_tx
+            .send(ControllerCommand::UpdateNightPlan(plan))
             .await
             .map_err(|_| ControllerError::Disconnected)
     }

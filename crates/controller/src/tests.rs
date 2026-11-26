@@ -742,3 +742,380 @@ async fn test_sequence_auto_meridian_flip_coordination() {
         "Expected MountCommand::MeridianFlip to be sent before Light exposure"
     );
 }
+
+#[tokio::test]
+async fn test_night_plan_multi_target_slew_capture_and_park() {
+    use protocol::{
+        MountCommand, MountStatus, MountTelemetry, NightPlan, NightPlanPolicy,
+        NightPlanRunRequest, PlannedTarget, SaveLocationConfig, SequencePhase, SequenceStep,
+        TARGET_HUE_PALETTE,
+    };
+    use synscan::{MountEvent, MountHandle};
+    use tokio::sync::broadcast;
+
+    let (cam_tx, mut cam_rx) = mpsc::channel::<CameraCommand>(32);
+    let (_cam_status_tx, cam_status_rx) = watch::channel(protocol::CameraStatus::Ready);
+    let camera_handle = CameraHandle::new(cam_tx, cam_status_rx);
+
+    tokio::spawn(async move {
+        let mut idx = 0u32;
+        while let Some(cmd) = cam_rx.recv().await {
+            match cmd {
+                CameraCommand::Capture { reply, .. } => {
+                    idx += 1;
+                    let _ = reply.send(Ok(CameraFileRef {
+                        folder: "/store".into(),
+                        filename: format!("PLAN_{idx:04}.CR2"),
+                    }));
+                }
+                CameraCommand::Download { reply, .. } => {
+                    let _ = reply.send(Ok(vec![1, 2]));
+                }
+                CameraCommand::DeleteFile { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        }
+    });
+
+    let (mount_cmd_tx, mut mount_cmd_rx) = mpsc::channel::<MountCommand>(32);
+    let (_mount_status_tx, mount_status_rx) = watch::channel(MountStatus::Ready);
+    let initial_telem = MountTelemetry {
+        is_parked: true,
+        is_slewing: false,
+        ..MountTelemetry::default()
+    };
+    let (mount_telem_tx, mount_telem_rx) = watch::channel(Some(initial_telem.clone()));
+    let (mount_event_tx, _) = broadcast::channel::<MountEvent>(16);
+    let mount_handle = MountHandle::new(mount_cmd_tx, mount_status_rx, mount_telem_rx, mount_event_tx);
+
+    let mount_ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let mount_ops_clone = mount_ops.clone();
+
+    tokio::spawn(async move {
+        let mut state = initial_telem;
+        while let Some(cmd) = mount_cmd_rx.recv().await {
+            match cmd {
+                MountCommand::Unpark => {
+                    mount_ops_clone.lock().unwrap().push("unpark".to_string());
+                    state.is_parked = false;
+                    let _ = mount_telem_tx.send(Some(state.clone()));
+                }
+                MountCommand::SlewToEquatorial { ra_deg, dec_deg } => {
+                    mount_ops_clone
+                        .lock()
+                        .unwrap()
+                        .push(format!("slew:{ra_deg:.1},{dec_deg:.1}"));
+                    state.is_slewing = true;
+                    state.ra_deg = ra_deg;
+                    state.dec_deg = dec_deg;
+                    let _ = mount_telem_tx.send(Some(state.clone()));
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    state.is_slewing = false;
+                    let _ = mount_telem_tx.send(Some(state.clone()));
+                }
+                MountCommand::Park => {
+                    mount_ops_clone.lock().unwrap().push("park".to_string());
+                    state.is_parked = true;
+                    state.is_slewing = false;
+                    let _ = mount_telem_tx.send(Some(state.clone()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let controller_handle = Controller::spawn_with_mount(camera_handle, mount_handle);
+    let mut seq_rx = controller_handle.sequence_status();
+
+    let make_target = |id: &str, name: &str, ra: f64, enabled: bool, count: u32| PlannedTarget {
+        id: id.to_string(),
+        name: name.to_string(),
+        ra_deg: ra,
+        dec_deg: 20.0,
+        color_hue_deg: TARGET_HUE_PALETTE[0],
+        enabled,
+        start_unix_secs: 0,
+        steps: vec![SequenceStep {
+            enabled: true,
+            frame_type: FrameType::Light,
+            count,
+            params: CaptureParams {
+                exposure: Duration::from_millis(10),
+                iso: None,
+            },
+            delay_between_frames: Duration::ZERO,
+        }],
+        slew_to_target: true,
+        auto_meridian_flip: false,
+        rotation_deg: None,
+    };
+
+    let plan = NightPlan {
+        id: "tonight".to_string(),
+        name: "Tonight".to_string(),
+        night_date: "2026-11-26".to_string(),
+        targets: vec![
+            make_target("t1", "M31", 10.0, true, 2),
+            make_target("t2", "SkipMe", 50.0, false, 5),
+            make_target("t3", "M42", 83.8, true, 1),
+        ],
+        policy: NightPlanPolicy {
+            park_at_end: true,
+            default_auto_meridian_flip: false,
+            default_slew_to_target: true,
+        },
+        save_config: SaveLocationConfig::default(),
+    };
+
+    controller_handle
+        .start_night_plan(NightPlanRunRequest {
+            run_id: 11,
+            plan,
+            start_immediately: true,
+        })
+        .await
+        .unwrap();
+
+    let mut final_status = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        seq_rx
+            .wait_for(|s| {
+                if let Some(st) = s
+                    && st.phase == SequencePhase::Completed
+                {
+                    final_status = Some(st.clone());
+                    true
+                } else {
+                    false
+                }
+            })
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("NightPlan should complete");
+
+    let st = final_status.unwrap();
+    assert_eq!(st.completed, 3);
+    assert_eq!(st.total, 3);
+    assert_eq!(st.total_targets, 2);
+
+    let ops = mount_ops.lock().unwrap().clone();
+    assert_eq!(ops, vec!["unpark", "slew:10.0,20.0", "slew:83.8,20.0", "park"]);
+}
+
+#[tokio::test]
+async fn test_night_plan_waits_for_start_time_and_aborts_cleanly() {
+    use protocol::{
+        NightPlan, NightPlanPolicy, NightPlanRunRequest, PlannedTarget, SaveLocationConfig,
+        SequencePhase, SequenceStep, TARGET_HUE_PALETTE,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (cam_tx, _cam_rx) = mpsc::channel::<CameraCommand>(8);
+    let (_cam_status_tx, cam_status_rx) = watch::channel(protocol::CameraStatus::Ready);
+    let camera_handle = CameraHandle::new(cam_tx, cam_status_rx);
+
+    let controller_handle = Controller::spawn(camera_handle);
+    let mut seq_rx = controller_handle.sequence_status();
+
+    let future_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 60;
+
+    let plan = NightPlan {
+        id: "tonight".to_string(),
+        name: "Tonight".to_string(),
+        night_date: "2026-11-26".to_string(),
+        targets: vec![PlannedTarget {
+            id: "future".to_string(),
+            name: "FutureTarget".to_string(),
+            ra_deg: 100.0,
+            dec_deg: 25.0,
+            color_hue_deg: TARGET_HUE_PALETTE[0],
+            enabled: true,
+            start_unix_secs: future_unix,
+            steps: vec![SequenceStep {
+                enabled: true,
+                frame_type: FrameType::Light,
+                count: 2,
+                params: CaptureParams {
+                    exposure: Duration::from_millis(10),
+                    iso: None,
+                },
+                delay_between_frames: Duration::ZERO,
+            }],
+            slew_to_target: false,
+            auto_meridian_flip: false,
+            rotation_deg: None,
+        }],
+        policy: NightPlanPolicy {
+            park_at_end: false,
+            ..NightPlanPolicy::default()
+        },
+        save_config: SaveLocationConfig::default(),
+    };
+
+    controller_handle
+        .start_night_plan(NightPlanRunRequest {
+            run_id: 12,
+            plan,
+            start_immediately: false,
+        })
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        seq_rx
+            .wait_for(|s| {
+                s.as_ref()
+                    .is_some_and(|st| st.phase == SequencePhase::WaitingForStart)
+            })
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Should enter WaitingForStart phase");
+
+    controller_handle.abort().await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        seq_rx
+            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Aborted))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Should abort cleanly while waiting");
+
+    let mut status_rx = controller_handle.status();
+    status_rx
+        .wait_for(|s| *s == DaemonStatus::Idle)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_night_plan_pause_to_edit_updates_upcoming_target() {
+    use protocol::{
+        NightPlan, NightPlanPolicy, NightPlanRunRequest, PlannedTarget, SaveLocationConfig,
+        SequencePhase, SequenceStep, TARGET_HUE_PALETTE,
+    };
+
+    let (cam_tx, mut cam_rx) = mpsc::channel::<CameraCommand>(32);
+    let (_cam_status_tx, cam_status_rx) = watch::channel(protocol::CameraStatus::Ready);
+    let camera_handle = CameraHandle::new(cam_tx, cam_status_rx);
+
+    tokio::spawn(async move {
+        let mut idx = 0u32;
+        while let Some(cmd) = cam_rx.recv().await {
+            match cmd {
+                CameraCommand::Capture { reply, .. } => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    idx += 1;
+                    let _ = reply.send(Ok(CameraFileRef {
+                        folder: "/store".into(),
+                        filename: format!("EDIT_{idx:04}.CR2"),
+                    }));
+                }
+                CameraCommand::Download { reply, .. } => {
+                    let _ = reply.send(Ok(vec![5]));
+                }
+                CameraCommand::DeleteFile { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        }
+    });
+
+    let controller_handle = Controller::spawn(camera_handle);
+    let mut seq_rx = controller_handle.sequence_status();
+
+    let make_target = |id: &str, count: u32| PlannedTarget {
+        id: id.to_string(),
+        name: id.to_string(),
+        ra_deg: 20.0,
+        dec_deg: 30.0,
+        color_hue_deg: TARGET_HUE_PALETTE[0],
+        enabled: true,
+        start_unix_secs: 0,
+        steps: vec![SequenceStep {
+            enabled: true,
+            frame_type: FrameType::Light,
+            count,
+            params: CaptureParams {
+                exposure: Duration::from_millis(25),
+                iso: None,
+            },
+            delay_between_frames: Duration::ZERO,
+        }],
+        slew_to_target: false,
+        auto_meridian_flip: false,
+        rotation_deg: None,
+    };
+
+    let plan = NightPlan {
+        id: "tonight".to_string(),
+        name: "Tonight".to_string(),
+        night_date: "2026-11-26".to_string(),
+        targets: vec![make_target("t1", 2), make_target("t2", 3)],
+        policy: NightPlanPolicy {
+            park_at_end: false,
+            ..NightPlanPolicy::default()
+        },
+        save_config: SaveLocationConfig::default(),
+    };
+
+    controller_handle
+        .start_night_plan(NightPlanRunRequest {
+            run_id: 13,
+            plan: plan.clone(),
+            start_immediately: true,
+        })
+        .await
+        .unwrap();
+
+    controller_handle.pause_sequence().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        seq_rx
+            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Paused))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Should pause during first target");
+
+    let mut edited_plan = plan;
+    edited_plan.targets[1].steps[0].count = 1;
+    controller_handle
+        .update_night_plan(edited_plan)
+        .await
+        .unwrap();
+    controller_handle.resume_sequence().await.unwrap();
+
+    let mut final_status = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        seq_rx
+            .wait_for(|s| {
+                if let Some(st) = s
+                    && st.phase == SequencePhase::Completed
+                {
+                    final_status = Some(st.clone());
+                    true
+                } else {
+                    false
+                }
+            })
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Edited NightPlan should complete");
+
+    let st = final_status.unwrap();
+    assert_eq!(st.completed, 3);
+    assert_eq!(st.total, 3);
+}

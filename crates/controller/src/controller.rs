@@ -7,7 +7,10 @@ pub mod sequence;
 mod tests;
 
 use gphoto::handle::CameraHandle;
-use protocol::{DaemonStatus, Frame, ImagingSequence, SequencePhase, SequenceStatus};
+use protocol::{
+    DaemonStatus, Frame, ImagingSequence, NightPlan, NightPlanRunRequest, SequencePhase,
+    SequenceStatus,
+};
 use synscan::MountHandle;
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, error, info, warn};
@@ -19,7 +22,7 @@ pub use crate::capture::{
 };
 pub use crate::controller_handle::{ControllerCommand, ControllerError, ControllerHandle};
 pub use crate::controller_job::ControllerJob;
-pub use crate::sequence::{execute_sequence, needs_meridian_flip};
+pub use crate::sequence::{execute_night_plan, execute_sequence, needs_meridian_flip};
 
 #[derive(Clone, Debug)]
 pub enum ControllerEvent {
@@ -53,6 +56,7 @@ pub struct Controller {
     active_job_id: u64,
     current_cancel_tx: Option<watch::Sender<bool>>,
     current_pause_tx: Option<watch::Sender<bool>>,
+    current_plan_tx: Option<watch::Sender<Option<NightPlan>>>,
     current_abort_handle: Option<tokio::task::AbortHandle>,
 }
 
@@ -92,6 +96,7 @@ impl Controller {
             active_job_id: 0,
             current_cancel_tx: None,
             current_pause_tx: None,
+            current_plan_tx: None,
             current_abort_handle: None,
         };
 
@@ -110,6 +115,12 @@ impl Controller {
                         }
                         Some(ControllerCommand::StartSequence(sequence)) => {
                             self.handle_start_sequence(sequence);
+                        }
+                        Some(ControllerCommand::StartNightPlan(req)) => {
+                            self.handle_start_night_plan(req);
+                        }
+                        Some(ControllerCommand::UpdateNightPlan(plan)) => {
+                            self.handle_update_night_plan(plan);
                         }
                         Some(ControllerCommand::PauseSequence) => {
                             self.handle_pause_sequence();
@@ -180,6 +191,7 @@ impl Controller {
         self.current_job = Some(ControllerJob::Capture(frame.clone()));
         self.current_cancel_tx = Some(cancel_tx);
         self.current_pause_tx = None;
+        self.current_plan_tx = None;
 
         let camera = self.camera.clone();
         let internal_tx = self.internal_tx.clone();
@@ -231,6 +243,7 @@ impl Controller {
         self.current_job = Some(ControllerJob::Sequence(sequence.clone()));
         self.current_cancel_tx = Some(cancel_tx);
         self.current_pause_tx = Some(pause_tx);
+        self.current_plan_tx = None;
 
         let camera = self.camera.clone();
         let mount = self.mount.clone();
@@ -251,6 +264,74 @@ impl Controller {
         self.current_abort_handle = Some(task.abort_handle());
     }
 
+    fn handle_start_night_plan(&mut self, req: NightPlanRunRequest) {
+        info!(
+            "Controller received StartNightPlan {} (id='{}', {} targets, immediate={})",
+            req.run_id,
+            req.plan.id,
+            req.plan.targets.len(),
+            req.start_immediately
+        );
+
+        if *self.status_tx.borrow() == DaemonStatus::Capturing {
+            info!(
+                "Rejecting NightPlan {}: capture or sequence is already in progress",
+                req.run_id
+            );
+            let _ = self.event_tx.send(ControllerEvent::CaptureError {
+                frame_id: req.run_id,
+                error: "Capture is already in progress".into(),
+            });
+            return;
+        }
+
+        self.active_job_id = self.active_job_id.wrapping_add(1);
+        let job_id = self.active_job_id;
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (pause_tx, pause_rx) = watch::channel(false);
+        let (plan_tx, plan_rx) = watch::channel(None);
+
+        self.set_status(DaemonStatus::Capturing);
+        self.current_job = Some(ControllerJob::NightPlan(req.clone()));
+        self.current_cancel_tx = Some(cancel_tx);
+        self.current_pause_tx = Some(pause_tx);
+        self.current_plan_tx = Some(plan_tx);
+
+        let camera = self.camera.clone();
+        let mount = self.mount.clone();
+        let status_tx = self.sequence_status_tx.clone();
+        let event_tx = self.event_tx.clone();
+        let internal_tx = self.internal_tx.clone();
+
+        let task = tokio::spawn(async move {
+            let _ = execute_night_plan(
+                camera, mount, req, cancel_rx, pause_rx, plan_rx, status_tx, event_tx,
+            )
+            .await;
+            let _ = internal_tx
+                .send(InternalMessage::SequenceFinished { job_id })
+                .await;
+        });
+
+        self.current_abort_handle = Some(task.abort_handle());
+    }
+
+    fn handle_update_night_plan(&mut self, plan: NightPlan) {
+        let is_night_plan = matches!(self.current_job, Some(ControllerJob::NightPlan(_)));
+        let is_paused = self
+            .current_pause_tx
+            .as_ref()
+            .is_some_and(|tx| *tx.borrow());
+        if !is_night_plan || !is_paused {
+            warn!("Ignoring UpdateNightPlan: active NightPlan must be paused to apply edits");
+            return;
+        }
+        if let Some(plan_tx) = &self.current_plan_tx {
+            info!("Applying paused NightPlan update (id='{}')", plan.id);
+            let _ = plan_tx.send(Some(plan));
+        }
+    }
+
     fn handle_pause_sequence(&mut self) {
         if let Some(pause_tx) = &self.current_pause_tx {
             info!("Pausing active imaging sequence");
@@ -268,11 +349,15 @@ impl Controller {
     fn handle_abort(&mut self) {
         warn!("Controller received Abort command");
         self.active_job_id = self.active_job_id.wrapping_add(1);
-        let was_sequence = matches!(self.current_job, Some(ControllerJob::Sequence(_)));
+        let was_sequence = matches!(
+            self.current_job,
+            Some(ControllerJob::Sequence(_) | ControllerJob::NightPlan(_))
+        );
         if let Some(cancel_tx) = self.current_cancel_tx.take() {
             let _ = cancel_tx.send(true);
         }
         self.current_pause_tx = None;
+        self.current_plan_tx = None;
         if let Some(abort) = self.current_abort_handle.take() {
             abort.abort();
             info!("Aborted running capture task");
@@ -284,6 +369,7 @@ impl Controller {
                 if st.phase.is_active() {
                     st.phase = SequencePhase::Aborted;
                     st.current_frame_id = None;
+                    st.waiting_until_unix_secs = None;
                     st.message = Some("Sequence aborted".to_string());
                     let _ = self.sequence_status_tx.send(Some(st.clone()));
                     let _ = self.event_tx.send(ControllerEvent::SequenceStatus(st));
@@ -304,6 +390,7 @@ impl Controller {
         self.current_abort_handle = None;
         self.current_cancel_tx = None;
         self.current_pause_tx = None;
+        self.current_plan_tx = None;
         self.current_job = None;
         self.set_status(DaemonStatus::Idle);
     }
@@ -325,6 +412,7 @@ impl Controller {
         self.current_abort_handle = None;
         self.current_cancel_tx = None;
         self.current_pause_tx = None;
+        self.current_plan_tx = None;
         self.current_job = None;
 
         match result {

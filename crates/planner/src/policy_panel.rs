@@ -5,7 +5,8 @@ use gpui::{
 };
 use observer::GlobalObserver;
 use protocol::{
-    CameraStatus, ConnectionState, DaemonStatus, SequencePhase, SequenceStatus, ViewerMessage,
+    CameraStatus, ConnectionState, DaemonStatus, NightPlanRunRequest, SequencePhase,
+    SequenceStatus, ViewerMessage,
 };
 use ui::{ActiveTheme, Button, ButtonStyle, Color, Divider, Label, LabelSize, prelude::*};
 use workspace::{
@@ -14,10 +15,11 @@ use workspace::{
     panel::{Panel, PanelEvent},
 };
 
-use crate::state::{GlobalNightPlan, is_session_locked};
+use crate::state::{GlobalNightPlan, format_unix_hm, is_session_locked};
 
 pub struct PlanPolicyPanel {
     focus_handle: FocusHandle,
+    start_immediately: bool,
 }
 
 impl EventEmitter<PanelEvent> for PlanPolicyPanel {}
@@ -39,6 +41,7 @@ impl PlanPolicyPanel {
             }
             Self {
                 focus_handle: cx.focus_handle(),
+                start_immediately: false,
             }
         })
     }
@@ -49,6 +52,21 @@ impl PlanPolicyPanel {
                 tracing::error!("Failed to send command to daemon");
             }
         }
+    }
+
+    fn run_night_plan(&self, cx: &mut Context<Self>) {
+        let Some(plan) = cx
+            .try_global::<GlobalNightPlan>()
+            .map(|g| g.0.read(cx).plan().clone())
+        else {
+            return;
+        };
+        let req = NightPlanRunRequest {
+            run_id: client::next_frame_id(),
+            plan,
+            start_immediately: self.start_immediately,
+        };
+        self.send_viewer_message(ViewerMessage::StartNightPlan(req), cx);
     }
 
     fn run_selected_target(&self, cx: &mut Context<Self>) {
@@ -69,7 +87,11 @@ impl PlanPolicyPanel {
     fn render_sequence_status_card(&self, seq: &SequenceStatus, cx: &mut Context<Self>) -> AnyElement {
         let phase_color = match seq.phase {
             SequencePhase::Running => Color::Accent,
-            SequencePhase::Paused | SequencePhase::WaitingForMeridianFlip => Color::Warning,
+            SequencePhase::WaitingForStart
+            | SequencePhase::SlewingToTarget
+            | SequencePhase::Paused
+            | SequencePhase::WaitingForMeridianFlip
+            | SequencePhase::Parking => Color::Warning,
             SequencePhase::Completed => Color::Success,
             SequencePhase::Aborted | SequencePhase::Failed => Color::Error,
             SequencePhase::Idle => Color::Muted,
@@ -81,6 +103,10 @@ impl PlanPolicyPanel {
         };
         let is_active = seq.phase.is_active();
         let is_paused = seq.phase == SequencePhase::Paused;
+        let has_plan_id = seq.plan_id.is_some();
+        let utc_offset = cx
+            .try_global::<GlobalObserver>()
+            .map_or(0, |g| g.0.read(cx).effective_utc_offset_secs());
 
         v_flex()
             .gap_1p5()
@@ -103,6 +129,23 @@ impl PlanPolicyPanel {
                             .color(Color::Muted),
                     ),
             )
+            .when(seq.total_targets > 0 && has_plan_id, |el| {
+                el.child(
+                    Label::new(format!(
+                        "Target {}/{}",
+                        seq.current_target_index, seq.total_targets
+                    ))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+            })
+            .when_some(seq.waiting_until_unix_secs, |el, ts| {
+                el.child(
+                    Label::new(format!("Waiting until {}", format_unix_hm(ts, utc_offset)))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                )
+            })
             .child(
                 div()
                     .w_full()
@@ -156,12 +199,21 @@ impl PlanPolicyPanel {
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::Small)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                let msg = if is_paused {
-                                    ViewerMessage::ResumeSequence
+                                if is_paused {
+                                    if has_plan_id
+                                        && let Some(plan) = cx
+                                            .try_global::<GlobalNightPlan>()
+                                            .map(|g| g.0.read(cx).plan().clone())
+                                    {
+                                        this.send_viewer_message(
+                                            ViewerMessage::UpdateNightPlan(plan),
+                                            cx,
+                                        );
+                                    }
+                                    this.send_viewer_message(ViewerMessage::ResumeSequence, cx);
                                 } else {
-                                    ViewerMessage::PauseSequence
-                                };
-                                this.send_viewer_message(msg, cx);
+                                    this.send_viewer_message(ViewerMessage::PauseSequence, cx);
+                                }
                             })),
                         )
                         .child(
@@ -189,12 +241,24 @@ impl PlanPolicyPanel {
             })
             .unwrap_or((false, false, None));
 
-        let selected_frames = cx
+        let (plan_frames, selected_frames) = cx
             .try_global::<GlobalNightPlan>()
-            .and_then(|g| g.0.read(cx).selected_target().map(|t| t.total_frames()))
-            .unwrap_or(0);
+            .map(|g| {
+                let m = g.0.read(cx);
+                let total: u32 = m
+                    .plan()
+                    .targets
+                    .iter()
+                    .filter(|t| t.enabled)
+                    .map(|t| t.total_frames())
+                    .sum();
+                let sel = m.selected_target().map_or(0, |t| t.total_frames());
+                (total, sel)
+            })
+            .unwrap_or((0, 0));
 
-        let can_run = hw_ready && !is_capturing && selected_frames > 0;
+        let can_run_plan = hw_ready && !is_capturing && plan_frames > 0;
+        let can_run_sel = hw_ready && !is_capturing && selected_frames > 0;
 
         v_flex()
             .gap_2()
@@ -204,16 +268,45 @@ impl PlanPolicyPanel {
                     .color(Color::Default),
             )
             .child(
-                Button::new("pp_run_selected_btn", "Run Selected Target")
-                    .style(if can_run {
+                Button::new("pp_run_tonight_btn", format!("Run Tonight ({plan_frames}f)"))
+                    .style(if can_run_plan {
                         ButtonStyle::Filled
                     } else {
                         ButtonStyle::Subtle
                     })
-                    .disabled(!can_run)
+                    .disabled(!can_run_plan)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.run_selected_target(cx);
+                        this.run_night_plan(cx);
                     })),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("pp_run_selected_btn", "Run Selected")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::Small)
+                            .disabled(!can_run_sel)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_selected_target(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(
+                            "pp_start_now_btn",
+                            if self.start_immediately {
+                                "Start Now: On"
+                            } else {
+                                "Start Now: Off"
+                            },
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .label_size(LabelSize::Small)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_immediately = !this.start_immediately;
+                            cx.notify();
+                        })),
+                    ),
             )
             .children(
                 seq_status
