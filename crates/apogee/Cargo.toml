@@ -17,6 +17,7 @@ celestial.workspace = true
 horizon.workspace = true
 observer.workspace = true
 settings.workspace = true
+planner.workspace = true
 workspace.workspace = true
 components.workspace = true
 title_bar.workspace = true

@@ -3,6 +3,7 @@ pub mod error;
 pub mod horizon;
 pub mod mount;
 pub mod observer;
+pub mod plan;
 pub mod settings;
 pub mod store;
 pub mod tz_offset;
@@ -23,6 +24,7 @@ pub use observer::{
     estimate_longitude_from_utc_offset_minutes, estimate_utc_offset_minutes_from_longitude,
     parse_coordinate, parse_elevation_m, parse_utc_offset_minutes,
 };
+pub use plan::{PLAN_SCHEMA_VERSION, PlannerCatalog};
 pub use settings::{
     AppSettings, AtmosphereSettings, DEFAULT_ATMOSPHERE_STRENGTH, DEFAULT_GRID_OPACITY,
     DEFAULT_GROUND_OPACITY, DEFAULT_HIPS_SURVEY_OPACITY, DEFAULT_HORIZON_OPACITY,

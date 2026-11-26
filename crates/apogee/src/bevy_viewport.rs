@@ -16,8 +16,8 @@ use glam::DVec3;
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Rgba, ScrollDelta, ScrollWheelEvent, Task, Window, div, point, prelude::*, px,
-    rgb, svg,
+    Pixels, Point, Rgba, ScrollDelta, ScrollWheelEvent, Task, WeakEntity, Window, div, point,
+    prelude::*, px, rgb, svg,
 };
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
@@ -27,6 +27,7 @@ use planetarium::{
     TrackingTarget, TrajectoryRenderData, ViewMode, pick_solar_system_body,
     rendered_solar_system_disc_radius_px,
 };
+use planner::GlobalNightPlan;
 use settings::{
     GlobalSettings, LayerPillStyle, QuickLayer, SnapToDawn, SnapToDusk, TimeStepBackward,
     TimeStepBackwardCoarse, TimeStepBackwardFine, TimeStepForward, TimeStepForwardCoarse,
@@ -171,7 +172,8 @@ impl HoveredObject {
 pub fn init(cx: &mut App) {
     cx.observe_new(|workbench: &mut Workbench, window, cx| {
         if let Some(window) = window {
-            let viewport = PlanetariumPanel::build(window, cx, 1024, 1024);
+            let workbench_handle = cx.entity().downgrade();
+            let viewport = PlanetariumPanel::build(workbench_handle, window, cx, 1024, 1024);
             cx.observe(&viewport, |_this, _viewport, cx| {
                 cx.notify();
             })
@@ -230,6 +232,8 @@ pub struct PlanetariumPanel {
     mount_target_radec: Option<(f64, f64)>,
     mount_filter_task: Option<Task<()>>,
     is_following_mount: bool,
+    workbench: WeakEntity<Workbench>,
+    last_synced_explore_nonce: Option<u64>,
 }
 
 fn tracking_target_for_selected(selected: &SelectedObject) -> TrackingTarget {
@@ -251,6 +255,7 @@ impl EventEmitter<PanelEvent> for PlanetariumPanel {}
 
 impl PlanetariumPanel {
     pub fn build(
+        workbench: WeakEntity<Workbench>,
         window: &mut Window,
         cx: &mut App,
         initial_width: u32,
@@ -307,6 +312,31 @@ impl PlanetariumPanel {
                         .map(|(p, _)| (p.ra_deg, p.dec_deg));
                     this.update_mount_target_radec(next, cx);
                     cx.notify();
+                })
+                .detach();
+            }
+
+            if let Some(plan_entity) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                cx.observe(&plan_entity, |this: &mut Self, model, cx| {
+                    if let Some(req) = model.read(cx).explore_request().cloned()
+                        && this.last_synced_explore_nonce != Some(req.nonce)
+                    {
+                        this.last_synced_explore_nonce = Some(req.nonce);
+                        if let Some(workbench) = this.workbench.upgrade() {
+                            workbench.update(cx, |wb, cx| {
+                                if wb.active_workspace_kind() != WorkspaceKind::Explore {
+                                    wb.switch_workspace(WorkspaceKind::Explore, cx);
+                                }
+                            });
+                        }
+                        this.is_following_mount = false;
+                        this.bridge
+                            .track_target(Some(TrackingTarget::equatorial_deg(
+                                req.ra_deg,
+                                req.dec_deg,
+                            )));
+                        cx.notify();
+                    }
                 })
                 .detach();
             }
@@ -612,6 +642,8 @@ impl PlanetariumPanel {
                 mount_target_radec: None,
                 mount_filter_task: None,
                 is_following_mount: false,
+                workbench,
+                last_synced_explore_nonce: None,
             };
             panel.sync_horizon_to_bridge(cx);
             panel.sync_status_bar(cx);

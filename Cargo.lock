@@ -291,6 +291,7 @@ dependencies = [
  "mount_viewer",
  "observer",
  "planetarium",
+ "planner",
  "protocol",
  "raw_viewer",
  "refineable",
@@ -6178,6 +6179,20 @@ dependencies = [
  "tracy-client",
  "wgpu",
  "zstd",
+]
+
+[[package]]
+name = "planner"
+version = "0.1.0"
+dependencies = [
+ "celestial",
+ "gpui",
+ "jiff",
+ "observer",
+ "persistence",
+ "protocol",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -1,0 +1,20 @@
+[package]
+name = "planner"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+gpui.workspace = true
+protocol.workspace = true
+persistence.workspace = true
+observer.workspace = true
+celestial.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

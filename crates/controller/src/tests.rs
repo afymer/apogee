@@ -484,6 +484,7 @@ async fn test_sequence_runner_multi_step_completion() {
         target_name: "M31".into(),
         steps: vec![
             SequenceStep {
+                enabled: true,
                 frame_type: FrameType::Light,
                 count: 2,
                 params: CaptureParams {
@@ -493,6 +494,17 @@ async fn test_sequence_runner_multi_step_completion() {
                 delay_between_frames: Duration::ZERO,
             },
             SequenceStep {
+                enabled: false,
+                frame_type: FrameType::Flat,
+                count: 5,
+                params: CaptureParams {
+                    exposure: Duration::from_millis(10),
+                    iso: Some(800),
+                },
+                delay_between_frames: Duration::ZERO,
+            },
+            SequenceStep {
+                enabled: true,
                 frame_type: FrameType::Dark,
                 count: 1,
                 params: CaptureParams {
@@ -577,6 +589,7 @@ async fn test_sequence_pause_resume_and_abort() {
         id: 8,
         target_name: "M42".into(),
         steps: vec![SequenceStep {
+            enabled: true,
             frame_type: FrameType::Light,
             count: 5,
             params: CaptureParams {
@@ -700,6 +713,7 @@ async fn test_sequence_auto_meridian_flip_coordination() {
         id: 9,
         target_name: "NGC7000".into(),
         steps: vec![SequenceStep {
+            enabled: true,
             frame_type: FrameType::Light,
             count: 1,
             params: CaptureParams {

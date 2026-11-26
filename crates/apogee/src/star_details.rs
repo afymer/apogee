@@ -20,6 +20,7 @@ use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_day_profile};
 pub use observer::{GlobalVisibilityGraphPrefs, VisibilityGraphCenter, VisibilityGraphPrefsModel};
 use observer::{GraphCenterToggleStyle, graph_axis_labels, graph_center_toggle};
+use planner::GlobalNightPlan;
 use planetarium::{PickedSolarSystemBody, PickedStar};
 use protocol::{ConnectionState, MountCommand, MountStatus};
 use settings::{CenterOnSelection, ToggleObjectDetails};
@@ -429,6 +430,13 @@ impl StarDetailsPanel {
                 .detach();
             }
 
+            if let Some(plan_entity) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                cx.observe(&plan_entity, |_this: &mut Self, _model, cx| {
+                    cx.notify();
+                })
+                .detach();
+            }
+
             let mut panel = Self {
                 focus_handle: cx.focus_handle(),
                 last_activation_nonce: initial_nonce,
@@ -659,6 +667,47 @@ impl StarDetailsPanel {
                         }),
                 ),
             )
+            .into_any_element()
+    }
+
+    fn render_plan_action(&self, title: &str, ra_deg: f64, dec_deg: f64, cx: &App) -> AnyElement {
+        let existing_count = cx
+            .try_global::<GlobalNightPlan>()
+            .map_or(0, |g| g.0.read(cx).count_targets_near(ra_deg, dec_deg));
+        let label = if existing_count == 0 {
+            "Add to Plan".to_string()
+        } else {
+            format!("Add to Plan (In Plan: {existing_count})")
+        };
+        let target_name = title.to_string();
+
+        Button::new("star_details_add_to_plan_btn", label)
+            .full_width()
+            .style(ButtonStyle::Subtle)
+            .label_size(LabelSize::Small)
+            .tooltip(Tooltip::text("Add object to tonight's imaging plan"))
+            .on_click(move |_, _, cx| {
+                let Some(plan_entity) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                else {
+                    return;
+                };
+                let (night_date, start_unix_secs) = cx
+                    .try_global::<GlobalObserver>()
+                    .map(|g| planner::observer_evening_date_and_start(g.0.read(cx)))
+                    .unwrap_or_else(|| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let rounded = ((now + 299) / 300) * 300;
+                        (String::new(), rounded)
+                    });
+                let date_opt = (!night_date.is_empty()).then_some(night_date);
+                let name = target_name.clone();
+                plan_entity.update(cx, |plan, cx| {
+                    plan.add_target(name, ra_deg, dec_deg, date_opt, start_unix_secs, None, cx);
+                });
+            })
             .into_any_element()
     }
 }
@@ -1275,6 +1324,8 @@ impl Render for StarDetailsPanel {
                 )
             }
         };
+
+        let plan_action = self.render_plan_action(&title, ra_deg, dec_deg, cx);
 
         let local_horizon_alt = self
             .cached_active_horizon
@@ -1923,8 +1974,14 @@ impl Render for StarDetailsPanel {
             // 3. Compact photometry / solar-system ephemeris, coordinates & identifiers section
             .child(details_metrics_section)
             .child(div().h(px(1.0)).w_full().bg(colors.border_variant))
-            // 4. Mount actions
-            .child(self.render_mount_actions(ra_deg, dec_deg, cx))
+            // 4. Mount & Plan actions
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .child(self.render_mount_actions(ra_deg, dec_deg, cx))
+                    .child(plan_action),
+            )
             .into_any_element()
     }
 }

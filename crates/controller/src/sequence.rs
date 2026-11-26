@@ -164,7 +164,9 @@ pub async fn execute_sequence(
     event_tx: broadcast::Sender<ControllerEvent>,
 ) -> SequenceStatus {
     let total = sequence.total_frames();
-    let total_steps = sequence.steps.len() as u32;
+    let enabled_steps: Vec<&protocol::SequenceStep> =
+        sequence.steps.iter().filter(|step| step.enabled).collect();
+    let total_steps = enabled_steps.len() as u32;
 
     let emit = |st: &SequenceStatus| {
         let _ = status_tx.send(Some(st.clone()));
@@ -197,7 +199,7 @@ pub async fn execute_sequence(
 
     let mut completed: u32 = 0;
 
-    for (step_idx, step) in sequence.steps.iter().enumerate() {
+    for (step_idx, step) in enabled_steps.into_iter().enumerate() {
         status.current_step = step_idx as u32 + 1;
         status.current_step_completed = 0;
         status.current_step_total = step.count;

@@ -3,9 +3,11 @@ pub mod capture;
 pub mod connection;
 pub mod message;
 pub mod mount;
+pub mod plan;
 
 pub use camera::*;
 pub use capture::*;
 pub use connection::*;
 pub use message::*;
 pub use mount::*;
+pub use plan::*;

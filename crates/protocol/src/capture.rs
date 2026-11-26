@@ -91,11 +91,29 @@ fn default_true() -> bool {
 /// A single step in a multi-frame imaging sequence (e.g. 20x 60s Light frames).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SequenceStep {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub frame_type: FrameType,
     pub count: u32,
     pub params: CaptureParams,
     #[serde(default)]
     pub delay_between_frames: Duration,
+}
+
+impl SequenceStep {
+    /// Total expected execution time for this step (zero when disabled or count is 0).
+    pub fn estimated_duration(&self) -> Duration {
+        if !self.enabled || self.count == 0 {
+            return Duration::ZERO;
+        }
+        self.params
+            .exposure
+            .saturating_mul(self.count)
+            .saturating_add(
+                self.delay_between_frames
+                    .saturating_mul(self.count.saturating_sub(1)),
+            )
+    }
 }
 
 /// Multi-frame imaging sequence executed by the daemon controller.
@@ -114,6 +132,7 @@ impl ImagingSequence {
     pub fn total_frames(&self) -> u32 {
         self.steps
             .iter()
+            .filter(|step| step.enabled)
             .fold(0u32, |acc, step| acc.saturating_add(step.count))
     }
 }
