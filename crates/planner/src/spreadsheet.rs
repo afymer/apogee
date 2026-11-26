@@ -3,16 +3,16 @@ use std::time::Duration;
 use client::GlobalDaemonState;
 use components::{StepPrecision, TextField, TextFieldEvent};
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, Render, Subscription, Window, div, hsla,
-    prelude::*, px,
+    Anchor, AnyElement, App, Context, Entity, FontWeight, MouseButton, Render, Subscription,
+    Window, anchored, deferred, div, hsla, point, prelude::*, px,
 };
 use observer::GlobalObserver;
 use protocol::{
-    CaptureParams, FrameType, PlannedTarget, SequencePhase, SequenceStatus, SequenceStep,
+    FrameType, PlannedTarget, SequencePhase, SequenceStatus, SequenceStep, StageKind,
 };
 use ui::{
-    ActiveTheme, ButtonStyle, Color, Icon, IconButton, IconButtonShape, IconName, IconSize,
-    Label, LabelSize, StyledTypography, Tooltip, prelude::*,
+    ActiveTheme, ButtonStyle, Color, Divider, Icon, IconButton, IconButtonShape, IconName,
+    IconSize, Label, LabelSize, StyledTypography, TintColor, Tooltip, prelude::*,
 };
 
 use crate::state::{
@@ -22,7 +22,7 @@ use crate::state::{
 
 const STRIPE_W: f32 = 3.0;
 const COL_GRIP_W: f32 = 28.0;
-const COL_STAGE_W: f32 = 84.0;
+const COL_STAGE_W: f32 = 108.0;
 const COL_DURATION_W: f32 = 78.0;
 const COL_PROGRESS_W: f32 = 68.0;
 const COL_ACTIONS_W: f32 = 56.0;
@@ -30,6 +30,158 @@ const HEADER_H: f32 = 26.0;
 const ROW_H: f32 = 28.0;
 
 const ISO_STOPS: &[u32] = &[100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OpenDropdown {
+    AddStage { target_id: String },
+    StageCell { target_id: String, step_idx: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageChoice {
+    Light,
+    Dark,
+    Flat,
+    Bias,
+    Autofocus,
+    PlateSolve,
+    Wait,
+}
+
+const IMAGING_CHOICES: &[StageChoice] = &[
+    StageChoice::Light,
+    StageChoice::Dark,
+    StageChoice::Flat,
+    StageChoice::Bias,
+];
+
+const RIG_CHOICES: &[StageChoice] = &[
+    StageChoice::Autofocus,
+    StageChoice::PlateSolve,
+    StageChoice::Wait,
+];
+
+impl StageChoice {
+    fn from_step(step: &SequenceStep) -> Self {
+        match step.kind {
+            StageKind::Capture => match step.frame_type {
+                FrameType::Light => Self::Light,
+                FrameType::Dark => Self::Dark,
+                FrameType::Flat => Self::Flat,
+                FrameType::Bias => Self::Bias,
+            },
+            StageKind::Autofocus => Self::Autofocus,
+            StageKind::PlateSolve => Self::PlateSolve,
+            StageKind::Wait => Self::Wait,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+            Self::Flat => "Flat",
+            Self::Bias => "Bias",
+            Self::Autofocus => "Autofocus",
+            Self::PlateSolve => "Plate Solve",
+            Self::Wait => "Wait",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::Light => "Science frames",
+            Self::Dark => "Dark calibration",
+            Self::Flat => "Flat field",
+            Self::Bias => "Bias offset",
+            Self::Autofocus => "Focus V-curve (HFR)",
+            Self::PlateSolve => "Solve & recenter",
+            Self::Wait => "Timed delay",
+        }
+    }
+
+    fn default_step(self) -> SequenceStep {
+        match self {
+            Self::Light => SequenceStep::capture(
+                FrameType::Light,
+                10,
+                Duration::from_secs(60),
+                Some(800),
+                Duration::ZERO,
+            ),
+            Self::Dark => SequenceStep::capture(
+                FrameType::Dark,
+                10,
+                Duration::from_secs(60),
+                Some(800),
+                Duration::ZERO,
+            ),
+            Self::Flat => SequenceStep::capture(
+                FrameType::Flat,
+                15,
+                Duration::from_secs(2),
+                Some(100),
+                Duration::ZERO,
+            ),
+            Self::Bias => SequenceStep::capture(
+                FrameType::Bias,
+                20,
+                Duration::from_millis(10),
+                Some(800),
+                Duration::ZERO,
+            ),
+            Self::Autofocus => SequenceStep::autofocus(),
+            Self::PlateSolve => SequenceStep::plate_solve(),
+            Self::Wait => SequenceStep::wait(Duration::from_secs(60)),
+        }
+    }
+
+    fn apply_to_step(self, step: &mut SequenceStep) {
+        let prev_kind = step.kind;
+        match self {
+            Self::Light | Self::Dark | Self::Flat | Self::Bias => {
+                let ft = match self {
+                    Self::Light => FrameType::Light,
+                    Self::Dark => FrameType::Dark,
+                    Self::Flat => FrameType::Flat,
+                    Self::Bias => FrameType::Bias,
+                    _ => unreachable!(),
+                };
+                step.kind = StageKind::Capture;
+                step.frame_type = ft;
+                if prev_kind == StageKind::Wait {
+                    step.delay_between_frames = Duration::ZERO;
+                }
+                if !prev_kind.is_capture() || step.count == 0 {
+                    step.count = 10;
+                }
+                if step.params.exposure.is_zero() {
+                    step.params.exposure = Duration::from_secs(60);
+                }
+            }
+            Self::Autofocus => {
+                step.kind = StageKind::Autofocus;
+            }
+            Self::PlateSolve => {
+                step.kind = StageKind::PlateSolve;
+            }
+            Self::Wait => {
+                step.kind = StageKind::Wait;
+                if step.delay_between_frames.is_zero() {
+                    step.delay_between_frames = Duration::from_secs(60);
+                }
+            }
+        }
+    }
+}
+
+struct StageMenuTarget {
+    id_base: usize,
+    anchor: Anchor,
+    selected: Option<StageChoice>,
+    target_id: String,
+    step_idx: Option<usize>,
+}
 
 #[derive(Clone)]
 struct DraggedTargetGroup {
@@ -220,15 +372,6 @@ impl StepFieldKind {
     }
 }
 
-fn next_frame_type(ft: FrameType) -> FrameType {
-    match ft {
-        FrameType::Light => FrameType::Dark,
-        FrameType::Dark => FrameType::Flat,
-        FrameType::Flat => FrameType::Bias,
-        FrameType::Bias => FrameType::Light,
-    }
-}
-
 fn format_secs(d: Duration) -> String {
     let s = d.as_secs_f64();
     if (s - s.round()).abs() < 1e-3 {
@@ -290,6 +433,7 @@ pub struct SequenceSpreadsheetView {
     input_error: Option<String>,
     hovered_target_id: Option<String>,
     hovered_step_row: Option<(String, usize)>,
+    open_dropdown: Option<OpenDropdown>,
 }
 
 impl SequenceSpreadsheetView {
@@ -321,8 +465,170 @@ impl SequenceSpreadsheetView {
                 input_error: None,
                 hovered_target_id: None,
                 hovered_step_row: None,
+                open_dropdown: None,
             }
         })
+    }
+
+    fn render_menu_backdrop(
+        &self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        deferred(
+            anchored()
+                .position(point(px(0.0), px(0.0)))
+                .anchor(Anchor::TopLeft)
+                .child(
+                    div()
+                        .id("sp_menu_backdrop")
+                        .occlude()
+                        .w(viewport.width)
+                        .h(viewport.height)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.open_dropdown = None;
+                                cx.notify();
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _, _, cx| {
+                                this.open_dropdown = None;
+                                cx.notify();
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+                ),
+        )
+        .with_priority(5)
+        .into_any_element()
+    }
+
+    fn render_stage_menu(
+        &self,
+        menu: StageMenuTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let target_id = menu.target_id;
+        let step_idx = menu.step_idx;
+        let id_base = menu.id_base;
+        let selected = menu.selected;
+
+        let render_option = |opt_idx: usize, choice: StageChoice| {
+            let tid = target_id.clone();
+            let is_selected = selected == Some(choice);
+            h_flex()
+                .id(("sp_menu_opt", id_base * 16 + opt_idx))
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .items_center()
+                .justify_between()
+                .rounded_sm()
+                .cursor_pointer()
+                .when(is_selected, |el| el.bg(colors.ghost_element_selected))
+                .hover(|s| s.bg(colors.element_hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_dropdown = None;
+                    if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone()) {
+                        let t_ref = tid.clone();
+                        plan.update(cx, |m, cx| match step_idx {
+                            Some(idx) => {
+                                m.update_step(&t_ref, idx, |s| choice.apply_to_step(s), cx);
+                            }
+                            None => {
+                                m.add_step(&t_ref, choice.default_step(), cx);
+                            }
+                        });
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(colors.text)
+                                .child(choice.label()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(colors.text_muted)
+                                .child(choice.subtitle()),
+                        ),
+                )
+                .when(is_selected, |el| {
+                    el.child(
+                        Icon::new(IconName::Check)
+                            .size(IconSize::XSmall)
+                            .color(Color::Accent),
+                    )
+                })
+        };
+
+        let panel = v_flex()
+            .id(("sp_stage_menu", id_base))
+            .w(px(196.0))
+            .occlude()
+            .shadow_lg()
+            .p_1()
+            .gap_0p5()
+            .rounded_md()
+            .bg(colors.elevated_surface_background.alpha(1.0))
+            .border_1()
+            .border_color(colors.border)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px_2()
+                    .py_0p5()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.text_muted)
+                    .child("Imaging"),
+            )
+            .children(
+                IMAGING_CHOICES
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, c)| render_option(i, c)),
+            )
+            .child(Divider::horizontal())
+            .child(
+                div()
+                    .px_2()
+                    .py_0p5()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.text_muted)
+                    .child("Rig & Alignment"),
+            )
+            .children(
+                RIG_CHOICES
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, c)| render_option(IMAGING_CHOICES.len() + i, c)),
+            );
+
+        deferred(
+            anchored()
+                .anchor(menu.anchor)
+                .snap_to_window_with_margin(px(8.0))
+                .child(panel),
+        )
+        .with_priority(10)
+        .into_any_element()
     }
 
     fn bind_start_time_field(
@@ -755,11 +1061,27 @@ impl SequenceSpreadsheetView {
         let step = &target.steps[step_idx];
         let step_ordinal = (step_idx + 1) as u32;
         match step_ordinal.cmp(&seq.current_step) {
-            std::cmp::Ordering::Less => format!("{}/{}", step.count, step.count),
-            std::cmp::Ordering::Equal => {
-                format!("{}/{}", seq.current_step_completed, seq.current_step_total)
+            std::cmp::Ordering::Less => {
+                if step.kind.is_capture() {
+                    format!("{}/{}", step.count, step.count)
+                } else {
+                    "Done".to_string()
+                }
             }
-            std::cmp::Ordering::Greater => format!("0/{}", step.count),
+            std::cmp::Ordering::Equal => {
+                if step.kind.is_capture() {
+                    format!("{}/{}", seq.current_step_completed, seq.current_step_total)
+                } else {
+                    "Running".to_string()
+                }
+            }
+            std::cmp::Ordering::Greater => {
+                if step.kind.is_capture() {
+                    format!("0/{}", step.count)
+                } else {
+                    String::new()
+                }
+            }
         }
     }
 
@@ -797,10 +1119,15 @@ impl SequenceSpreadsheetView {
         let grid_border = colors.border.opacity(0.6);
         let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
         let is_hovered = self.hovered_target_id.as_deref() == Some(target.id.as_str());
+        let is_add_open = self.open_dropdown
+            == Some(OpenDropdown::AddStage {
+                target_id: target.id.clone(),
+            });
 
         let tid_hover = target.id.clone();
         let tid_sel = target.id.clone();
         let tid_add = target.id.clone();
+        let tid_menu = target.id.clone();
         let tid_del = target.id.clone();
 
         let dur_txt = format_duration_compact(target.estimated_duration());
@@ -951,37 +1278,49 @@ impl SequenceSpreadsheetView {
                     .items_center()
                     .justify_end()
                     .gap_0p5()
-                    .when(is_hovered && !locked, |el| {
+                    .when((is_hovered || is_add_open) && !locked, |el| {
                         el.child(
-                            IconButton::new(("sp_grp_add", target_idx), IconName::Plus)
-                                .shape(IconButtonShape::Square)
-                                .icon_size(IconSize::XSmall)
-                                .style(ButtonStyle::Subtle)
-                                .tooltip(Tooltip::text("Add capture stage"))
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(plan) =
-                                        cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                                    {
-                                        let tid = tid_add.clone();
-                                        plan.update(cx, |m, cx| {
-                                            m.add_step(
-                                                &tid,
-                                                SequenceStep {
-                                                    enabled: true,
-                                                    frame_type: FrameType::Light,
-                                                    count: 10,
-                                                    params: CaptureParams {
-                                                        exposure: Duration::from_secs(60),
-                                                        iso: Some(800),
-                                                    },
-                                                    delay_between_frames: Duration::ZERO,
+                            div()
+                                .relative()
+                                .child(
+                                    IconButton::new(("sp_grp_add", target_idx), IconName::Plus)
+                                        .shape(IconButtonShape::Square)
+                                        .icon_size(IconSize::XSmall)
+                                        .style(if is_add_open {
+                                            ButtonStyle::Tinted(TintColor::Accent)
+                                        } else {
+                                            ButtonStyle::Subtle
+                                        })
+                                        .tooltip(Tooltip::text("Add stage"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            let next = OpenDropdown::AddStage {
+                                                target_id: tid_add.clone(),
+                                            };
+                                            if this.open_dropdown.as_ref() == Some(&next) {
+                                                this.open_dropdown = None;
+                                            } else {
+                                                this.open_dropdown = Some(next);
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .when(is_add_open, |el| {
+                                    el.child(
+                                        div().absolute().right_0().top_full().child(
+                                            self.render_stage_menu(
+                                                StageMenuTarget {
+                                                    id_base: 100_000 + target_idx,
+                                                    anchor: Anchor::TopRight,
+                                                    selected: None,
+                                                    target_id: tid_menu,
+                                                    step_idx: None,
                                                 },
                                                 cx,
-                                            );
-                                        });
-                                    }
-                                })),
+                                            ),
+                                        ),
+                                    )
+                                }),
                         )
                         .child(
                             IconButton::new(("sp_grp_del", target_idx), IconName::Trash)
@@ -1147,25 +1486,50 @@ impl SequenceSpreadsheetView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let locked = rctx.locked;
-        let colors = cx.theme().colors();
-        let grid_border = colors.border.opacity(0.6);
         let seq_status = rctx.seq_status.as_ref();
         let step = &target.steps[step_idx];
         let target_id = target.id.clone();
         let row_key = target_idx * 1024 + step_idx;
         let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
         let stripe_col = hsla(hue, 0.72, 0.54, 0.75);
-        let dur_txt = format_duration_compact(step.estimated_duration());
+        let dur_txt = match step.kind {
+            StageKind::Capture => format_duration_compact(step.estimated_duration()),
+            StageKind::Autofocus | StageKind::PlateSolve => "Auto".to_string(),
+            StageKind::Wait => format_duration_compact(step.delay_between_frames),
+        };
         let progress_txt = Self::step_progress_label(target, step_idx, seq_status);
+        let is_hovered = self
+            .hovered_step_row
+            .as_ref()
+            .is_some_and(|(id, idx)| id == &target_id && *idx == step_idx);
+        let is_stage_open = self.open_dropdown
+            == Some(OpenDropdown::StageCell {
+                target_id: target_id.clone(),
+                step_idx,
+            });
+        let cur_choice = StageChoice::from_step(step);
+        let stage_label = step.stage_label();
+
+        let stage_menu = (is_stage_open && !locked).then(|| {
+            self.render_stage_menu(
+                StageMenuTarget {
+                    id_base: row_key,
+                    anchor: Anchor::TopLeft,
+                    selected: Some(cur_choice),
+                    target_id: target_id.clone(),
+                    step_idx: Some(step_idx),
+                },
+                cx,
+            )
+        });
+
+        let colors = cx.theme().colors();
+        let grid_border = colors.border.opacity(0.6);
         let row_bg = if step_idx % 2 == 0 {
             colors.elevated_surface_background
         } else {
             colors.surface_background
         };
-        let is_hovered = self
-            .hovered_step_row
-            .as_ref()
-            .is_some_and(|(id, idx)| id == &target_id && *idx == step_idx);
 
         let tid_hover = target_id.clone();
         let tid_drag = target_id.clone();
@@ -1174,8 +1538,6 @@ impl SequenceSpreadsheetView {
         let tid_ft = target_id.clone();
         let tid_dup = target_id.clone();
         let tid_del = target_id.clone();
-        let cur_ft = step.frame_type;
-        let cur_ft_label = cur_ft.label();
 
         h_flex()
             .id(("sp_step_row", row_key))
@@ -1240,7 +1602,7 @@ impl SequenceSpreadsheetView {
                             DraggedStageRow {
                                 target_id: tid_drag,
                                 from_idx: step_idx,
-                                label: cur_ft_label.to_string(),
+                                label: stage_label.to_string(),
                                 hue,
                             },
                             |d, _offset, _window, cx| {
@@ -1266,37 +1628,66 @@ impl SequenceSpreadsheetView {
                     }),
             )
             .child(
-                grid_cell(grid_border)
-                    .id(("sp_type", row_key))
+                div()
+                    .relative()
                     .w(px(COL_STAGE_W))
                     .flex_none()
-                    .px_2()
-                    .text_size(px(12.0))
-                    .text_color(colors.text)
-                    .when(!locked, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.bg(colors.ghost_element_hover))
-                            .tooltip(Tooltip::text("Click to cycle stage type"))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Some(plan) =
-                                    cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
-                                {
-                                    let tid = tid_ft.clone();
-                                    plan.update(cx, |m, cx| {
-                                        m.update_step(
-                                            &tid,
+                    .h_full()
+                    .child(
+                        grid_cell(grid_border)
+                            .id(("sp_type", row_key))
+                            .size_full()
+                            .px_2()
+                            .justify_between()
+                            .gap_1()
+                            .text_size(px(12.0))
+                            .text_color(colors.text)
+                            .when(is_stage_open, |el| el.bg(colors.ghost_element_selected))
+                            .when(!locked, |el| {
+                                el.cursor_pointer()
+                                    .hover(|s| s.bg(colors.ghost_element_hover))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        let next = OpenDropdown::StageCell {
+                                            target_id: tid_ft.clone(),
                                             step_idx,
-                                            |s| s.frame_type = next_frame_type(cur_ft),
-                                            cx,
-                                        );
-                                    });
-                                }
-                            }))
-                    })
-                    .child(cur_ft_label),
+                                        };
+                                        if this.open_dropdown.as_ref() == Some(&next) {
+                                            this.open_dropdown = None;
+                                        } else {
+                                            this.open_dropdown = Some(next);
+                                        }
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.0))
+                                    .child(stage_label),
+                            )
+                            .when(!locked, |el| {
+                                el.child(
+                                    Icon::new(if is_stage_open {
+                                        IconName::ChevronUp
+                                    } else {
+                                        IconName::ChevronDown
+                                    })
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                                )
+                            }),
+                    )
+                    .when_some(stage_menu, |el, menu| {
+                        el.child(div().absolute().left_0().top_full().child(menu))
+                    }),
             )
-            .child(
-                h_flex()
+            .child(match step.kind {
+                StageKind::Capture => h_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
@@ -1327,8 +1718,38 @@ impl SequenceSpreadsheetView {
                             .min_w(px(52.0))
                             .px_1p5()
                             .child(row.delay.clone()),
-                    ),
-            )
+                    )
+                    .into_any_element(),
+                StageKind::Autofocus => grid_cell(grid_border)
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .text_size(px(12.0))
+                    .text_color(colors.text_muted)
+                    .child("Autofocus routine (HFR)")
+                    .into_any_element(),
+                StageKind::PlateSolve => grid_cell(grid_border)
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .text_size(px(12.0))
+                    .text_color(colors.text_muted)
+                    .child("Plate-solve and recenter")
+                    .into_any_element(),
+                StageKind::Wait => grid_cell(grid_border)
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(colors.text_muted)
+                            .child("Wait"),
+                    )
+                    .child(div().w(px(72.0)).child(row.delay.clone()))
+                    .into_any_element(),
+            })
             .child(
                 grid_cell(grid_border)
                     .w(px(COL_DURATION_W))
@@ -1336,7 +1757,11 @@ impl SequenceSpreadsheetView {
                     .px_2()
                     .font_buffer(cx)
                     .text_size(px(12.0))
-                    .text_color(colors.text)
+                    .text_color(if step.kind.is_capture() || step.kind == StageKind::Wait {
+                        colors.text
+                    } else {
+                        colors.text_muted
+                    })
                     .child(dur_txt),
             )
             .child(
@@ -1484,40 +1909,71 @@ impl Render for SequenceSpreadsheetView {
         }
 
         let locked = is_session_locked(cx);
+        let dropdown_valid = match &self.open_dropdown {
+            None => true,
+            Some(OpenDropdown::AddStage { target_id }) => targets.iter().any(|t| t.id == *target_id),
+            Some(OpenDropdown::StageCell {
+                target_id,
+                step_idx,
+            }) => targets
+                .iter()
+                .find(|t| t.id == *target_id)
+                .is_some_and(|t| *step_idx < t.steps.len()),
+        };
+        if locked || !dropdown_valid {
+            self.open_dropdown = None;
+        }
+
         let seq_status = cx
             .try_global::<GlobalDaemonState>()
             .and_then(|g| g.0.read(cx).state.sequence.clone());
         let rctx = SpreadsheetRenderCtx { seq_status, locked };
         let colors = cx.theme().colors();
+        let grid_border = colors.border.opacity(0.6);
+        let has_open_dropdown = self.open_dropdown.is_some();
+        let viewport = window.viewport_size();
 
         v_flex()
             .id("sequence_spreadsheet_root")
             .w_full()
             .flex_1()
             .min_h_0()
-            .p_3()
-            .gap_2()
             .overflow_y_scroll()
+            .when(has_open_dropdown, |el| {
+                el.child(self.render_menu_backdrop(viewport, cx))
+            })
             .when(locked, |el| {
                 el.child(
-                    Label::new("Session running - Pause in Policy panel to edit plan")
-                        .size(LabelSize::XSmall)
-                        .color(Color::Warning),
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(grid_border)
+                        .child(
+                            Label::new("Session running - Pause in Policy panel to edit plan")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning),
+                        ),
                 )
             })
             .children(self.input_error.clone().map(|err| {
-                Label::new(err)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Error)
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(grid_border)
+                    .child(
+                        Label::new(err)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Error),
+                    )
             }))
             .child(
                 v_flex()
                     .w_full()
                     .min_w(px(560.0))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(colors.border)
-                    .overflow_hidden()
                     .child(self.render_table_header(cx))
                     .children(
                         targets
@@ -1558,5 +2014,36 @@ mod tests {
         assert_eq!(step_iso(Some(500), -1, StepPrecision::Normal), Some(400));
         assert_eq!(step_iso(Some(25600), 1, StepPrecision::Normal), Some(25600));
         assert_eq!(step_iso(Some(100), -1, StepPrecision::Normal), Some(100));
+    }
+
+    #[test]
+    fn stage_choice_roundtrip_and_apply_to_step() {
+        let mut step = StageChoice::Light.default_step();
+        assert_eq!(StageChoice::from_step(&step), StageChoice::Light);
+        assert_eq!(step.kind, StageKind::Capture);
+        assert_eq!(step.frame_count(), 10);
+
+        StageChoice::Autofocus.apply_to_step(&mut step);
+        assert_eq!(StageChoice::from_step(&step), StageChoice::Autofocus);
+        assert_eq!(step.kind, StageKind::Autofocus);
+        assert_eq!(step.frame_count(), 0);
+        assert_eq!(step.params.exposure, Duration::from_secs(60));
+
+        StageChoice::PlateSolve.apply_to_step(&mut step);
+        assert_eq!(StageChoice::from_step(&step), StageChoice::PlateSolve);
+        assert_eq!(step.kind, StageKind::PlateSolve);
+
+        StageChoice::Wait.apply_to_step(&mut step);
+        assert_eq!(StageChoice::from_step(&step), StageChoice::Wait);
+        assert_eq!(step.kind, StageKind::Wait);
+        assert_eq!(step.delay_between_frames, Duration::from_secs(60));
+        assert_eq!(step.estimated_duration(), Duration::from_secs(60));
+
+        StageChoice::Dark.apply_to_step(&mut step);
+        assert_eq!(StageChoice::from_step(&step), StageChoice::Dark);
+        assert_eq!(step.kind, StageKind::Capture);
+        assert_eq!(step.frame_type, FrameType::Dark);
+        assert_eq!(step.delay_between_frames, Duration::ZERO);
+        assert_eq!(step.frame_count(), 10);
     }
 }

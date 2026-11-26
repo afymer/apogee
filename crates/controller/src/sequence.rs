@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gphoto::handle::CameraHandle;
 use protocol::{
     Frame, FrameType, ImagingSequence, MountCommand, MountStatus, MountTelemetry, NightPlan,
-    NightPlanRunRequest, PierSide, PlannedTarget, SequencePhase, SequenceStatus,
+    NightPlanRunRequest, PierSide, PlannedTarget, SequencePhase, SequenceStatus, StageKind,
 };
 use synscan::MountHandle;
 use tokio::sync::{broadcast, watch};
@@ -232,6 +232,58 @@ async fn park_mount_at_end(
     wait_for_mount_slew_settle(mount, cancel_rx, 120, true, "mount park").await
 }
 
+async fn execute_non_capture_stage(
+    step: &protocol::SequenceStep,
+    pause_rx: &mut watch::Receiver<bool>,
+    cancel_rx: &mut watch::Receiver<bool>,
+    status: &mut SequenceStatus,
+    emit: &impl Fn(&SequenceStatus),
+) -> Result<(), ()> {
+    if wait_for_pause_or_cancel(pause_rx, cancel_rx, status, emit).await {
+        return Err(());
+    }
+    status.current_frame_type = None;
+    match step.kind {
+        StageKind::Capture => Ok(()),
+        StageKind::Autofocus => {
+            info!(
+                "Sequence {}: Autofocus stage (not yet connected, continuing)",
+                status.sequence_id
+            );
+            status.message = Some("Autofocus (not yet connected, continuing)".to_string());
+            emit(status);
+            Ok(())
+        }
+        StageKind::PlateSolve => {
+            info!(
+                "Sequence {}: Plate Solve stage (not yet connected, continuing)",
+                status.sequence_id
+            );
+            status.message = Some("Plate Solve (not yet connected, continuing)".to_string());
+            emit(status);
+            Ok(())
+        }
+        StageKind::Wait => {
+            if !step.delay_between_frames.is_zero() {
+                status.message = Some(format!(
+                    "Waiting {}s...",
+                    step.delay_between_frames.as_secs()
+                ));
+                emit(status);
+                tokio::select! {
+                    res = cancel_rx.changed() => {
+                        if res.is_err() || *cancel_rx.borrow() {
+                            return Err(());
+                        }
+                    }
+                    () = tokio::time::sleep(step.delay_between_frames) => {}
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Executes a single-target multi-frame imaging sequence, emitting progress and frame events.
 pub async fn execute_sequence(
     camera: CameraHandle,
@@ -287,6 +339,19 @@ pub async fn execute_sequence(
         status.current_step = step_idx as u32 + 1;
         status.current_step_completed = 0;
         status.current_step_total = step.count;
+        if step.kind != StageKind::Capture {
+            if execute_non_capture_stage(step, &mut pause_rx, &mut cancel_rx, &mut status, &emit)
+                .await
+                .is_err()
+            {
+                status.phase = SequencePhase::Aborted;
+                status.current_frame_id = None;
+                status.message = Some("Sequence aborted".to_string());
+                emit(&status);
+                return status;
+            }
+            continue;
+        }
         status.current_frame_type = Some(step.frame_type);
 
         for frame_in_step in 0..step.count {
@@ -604,6 +669,26 @@ pub async fn execute_night_plan(
             status.current_step = step_idx as u32 + 1;
             status.current_step_completed = 0;
             status.current_step_total = step.count;
+            if step.kind != StageKind::Capture {
+                if execute_non_capture_stage(
+                    &step,
+                    &mut pause_rx,
+                    &mut cancel_rx,
+                    &mut status,
+                    &emit,
+                )
+                .await
+                .is_err()
+                {
+                    status.phase = SequencePhase::Aborted;
+                    status.current_frame_id = None;
+                    status.message = Some("Night plan aborted".to_string());
+                    emit(&status);
+                    return status;
+                }
+                step_idx += 1;
+                continue;
+            }
             status.current_frame_type = Some(step.frame_type);
 
             for frame_in_step in 0..step.count {

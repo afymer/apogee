@@ -88,11 +88,38 @@ fn default_true() -> bool {
     true
 }
 
+/// Functional kind of a stage inside a target's sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StageKind {
+    #[default]
+    Capture,
+    Autofocus,
+    PlateSolve,
+    Wait,
+}
+
+impl StageKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Capture => "Capture",
+            Self::Autofocus => "Autofocus",
+            Self::PlateSolve => "Plate Solve",
+            Self::Wait => "Wait",
+        }
+    }
+
+    pub fn is_capture(self) -> bool {
+        matches!(self, Self::Capture)
+    }
+}
+
 /// A single step in a multi-frame imaging sequence (e.g. 20x 60s Light frames).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SequenceStep {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub kind: StageKind,
     pub frame_type: FrameType,
     pub count: u32,
     pub params: CaptureParams,
@@ -101,18 +128,103 @@ pub struct SequenceStep {
 }
 
 impl SequenceStep {
-    /// Total expected execution time for this step (zero when disabled or count is 0).
+    pub fn capture(
+        frame_type: FrameType,
+        count: u32,
+        exposure: Duration,
+        iso: Option<u32>,
+        delay_between_frames: Duration,
+    ) -> Self {
+        Self {
+            enabled: true,
+            kind: StageKind::Capture,
+            frame_type,
+            count,
+            params: CaptureParams { exposure, iso },
+            delay_between_frames,
+        }
+    }
+
+    pub fn autofocus() -> Self {
+        Self {
+            enabled: true,
+            kind: StageKind::Autofocus,
+            frame_type: FrameType::Light,
+            count: 0,
+            params: CaptureParams {
+                exposure: Duration::from_secs(3),
+                iso: Some(1600),
+            },
+            delay_between_frames: Duration::ZERO,
+        }
+    }
+
+    pub fn plate_solve() -> Self {
+        Self {
+            enabled: true,
+            kind: StageKind::PlateSolve,
+            frame_type: FrameType::Light,
+            count: 0,
+            params: CaptureParams {
+                exposure: Duration::from_secs(5),
+                iso: Some(1600),
+            },
+            delay_between_frames: Duration::ZERO,
+        }
+    }
+
+    pub fn wait(duration: Duration) -> Self {
+        Self {
+            enabled: true,
+            kind: StageKind::Wait,
+            frame_type: FrameType::Light,
+            count: 0,
+            params: CaptureParams {
+                exposure: Duration::from_secs(1),
+                iso: None,
+            },
+            delay_between_frames: duration,
+        }
+    }
+
+    pub fn stage_label(&self) -> &'static str {
+        match self.kind {
+            StageKind::Capture => self.frame_type.label(),
+            StageKind::Autofocus => "Autofocus",
+            StageKind::PlateSolve => "Plate Solve",
+            StageKind::Wait => "Wait",
+        }
+    }
+
+    pub fn frame_count(&self) -> u32 {
+        if self.enabled && self.kind.is_capture() {
+            self.count
+        } else {
+            0
+        }
+    }
+
+    /// Total expected execution time for this step (zero when disabled or non-timed).
     pub fn estimated_duration(&self) -> Duration {
-        if !self.enabled || self.count == 0 {
+        if !self.enabled {
             return Duration::ZERO;
         }
-        self.params
-            .exposure
-            .saturating_mul(self.count)
-            .saturating_add(
-                self.delay_between_frames
-                    .saturating_mul(self.count.saturating_sub(1)),
-            )
+        match self.kind {
+            StageKind::Capture => {
+                if self.count == 0 {
+                    return Duration::ZERO;
+                }
+                self.params
+                    .exposure
+                    .saturating_mul(self.count)
+                    .saturating_add(
+                        self.delay_between_frames
+                            .saturating_mul(self.count.saturating_sub(1)),
+                    )
+            }
+            StageKind::Autofocus | StageKind::PlateSolve => Duration::ZERO,
+            StageKind::Wait => self.delay_between_frames,
+        }
     }
 }
 
@@ -132,8 +244,7 @@ impl ImagingSequence {
     pub fn total_frames(&self) -> u32 {
         self.steps
             .iter()
-            .filter(|step| step.enabled)
-            .fold(0u32, |acc, step| acc.saturating_add(step.count))
+            .fold(0u32, |acc, step| acc.saturating_add(step.frame_count()))
     }
 }
 

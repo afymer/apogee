@@ -449,7 +449,7 @@ fn test_needs_meridian_flip() {
 
 #[tokio::test]
 async fn test_sequence_runner_multi_step_completion() {
-    use protocol::{ImagingSequence, SequencePhase, SequenceStep};
+    use protocol::{ImagingSequence, SequencePhase, SequenceStep, StageKind};
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<CameraCommand>(32);
     let (_status_tx, status_rx) = watch::channel(protocol::CameraStatus::Ready);
@@ -485,6 +485,7 @@ async fn test_sequence_runner_multi_step_completion() {
         steps: vec![
             SequenceStep {
                 enabled: true,
+                kind: StageKind::Capture,
                 frame_type: FrameType::Light,
                 count: 2,
                 params: CaptureParams {
@@ -495,6 +496,7 @@ async fn test_sequence_runner_multi_step_completion() {
             },
             SequenceStep {
                 enabled: false,
+                kind: StageKind::Capture,
                 frame_type: FrameType::Flat,
                 count: 5,
                 params: CaptureParams {
@@ -505,6 +507,7 @@ async fn test_sequence_runner_multi_step_completion() {
             },
             SequenceStep {
                 enabled: true,
+                kind: StageKind::Capture,
                 frame_type: FrameType::Dark,
                 count: 1,
                 params: CaptureParams {
@@ -554,7 +557,7 @@ async fn test_sequence_runner_multi_step_completion() {
 
 #[tokio::test]
 async fn test_sequence_pause_resume_and_abort() {
-    use protocol::{ImagingSequence, SequencePhase, SequenceStep};
+    use protocol::{ImagingSequence, SequencePhase, SequenceStep, StageKind};
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<CameraCommand>(32);
     let (_status_tx, status_rx) = watch::channel(protocol::CameraStatus::Ready);
@@ -590,6 +593,7 @@ async fn test_sequence_pause_resume_and_abort() {
         target_name: "M42".into(),
         steps: vec![SequenceStep {
             enabled: true,
+            kind: StageKind::Capture,
             frame_type: FrameType::Light,
             count: 5,
             params: CaptureParams {
@@ -714,6 +718,7 @@ async fn test_sequence_auto_meridian_flip_coordination() {
         target_name: "NGC7000".into(),
         steps: vec![SequenceStep {
             enabled: true,
+            kind: protocol::StageKind::Capture,
             frame_type: FrameType::Light,
             count: 1,
             params: CaptureParams {
@@ -838,6 +843,7 @@ async fn test_night_plan_multi_target_slew_capture_and_park() {
         start_unix_secs: 0,
         steps: vec![SequenceStep {
             enabled: true,
+            kind: protocol::StageKind::Capture,
             frame_type: FrameType::Light,
             count,
             params: CaptureParams {
@@ -940,6 +946,7 @@ async fn test_night_plan_waits_for_start_time_and_aborts_cleanly() {
             start_unix_secs: future_unix,
             steps: vec![SequenceStep {
                 enabled: true,
+                kind: protocol::StageKind::Capture,
                 frame_type: FrameType::Light,
                 count: 2,
                 params: CaptureParams {
@@ -1044,6 +1051,7 @@ async fn test_night_plan_pause_to_edit_updates_upcoming_target() {
         start_unix_secs: 0,
         steps: vec![SequenceStep {
             enabled: true,
+            kind: protocol::StageKind::Capture,
             frame_type: FrameType::Light,
             count,
             params: CaptureParams {
@@ -1118,4 +1126,85 @@ async fn test_night_plan_pause_to_edit_updates_upcoming_target() {
     let st = final_status.unwrap();
     assert_eq!(st.completed, 3);
     assert_eq!(st.total, 3);
+}
+
+#[tokio::test]
+async fn test_sequence_executes_autofocus_plate_solve_and_wait_stages() {
+    use protocol::{ImagingSequence, SequencePhase, SequenceStep, StageKind};
+
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<CameraCommand>(32);
+    let (_status_tx, status_rx) = watch::channel(protocol::CameraStatus::Ready);
+    let camera_handle = CameraHandle::new(cmd_tx, status_rx);
+
+    tokio::spawn(async move {
+        let mut idx = 0u32;
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                CameraCommand::Capture { reply, .. } => {
+                    idx += 1;
+                    let _ = reply.send(Ok(CameraFileRef {
+                        folder: "/store".into(),
+                        filename: format!("MIX_{idx:04}.CR2"),
+                    }));
+                }
+                CameraCommand::Download { reply, .. } => {
+                    let _ = reply.send(Ok(vec![1, 2]));
+                }
+                CameraCommand::DeleteFile { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        }
+    });
+
+    let controller_handle = Controller::spawn(camera_handle);
+    let mut seq_rx = controller_handle.sequence_status();
+
+    let sequence = ImagingSequence {
+        id: 14,
+        target_name: "M31".into(),
+        steps: vec![
+            SequenceStep::autofocus(),
+            SequenceStep::plate_solve(),
+            SequenceStep::wait(Duration::from_millis(15)),
+            SequenceStep::capture(
+                FrameType::Light,
+                2,
+                Duration::from_millis(10),
+                Some(800),
+                Duration::ZERO,
+            ),
+        ],
+        save_config: SaveLocationConfig::default(),
+        auto_meridian_flip: false,
+    };
+
+    assert_eq!(sequence.total_frames(), 2);
+    controller_handle.start_sequence(sequence).await.unwrap();
+
+    let mut final_status = None;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        seq_rx
+            .wait_for(|s| {
+                if let Some(st) = s
+                    && st.phase == SequencePhase::Completed
+                {
+                    final_status = Some(st.clone());
+                    true
+                } else {
+                    false
+                }
+            })
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("Mixed-stage sequence should complete");
+
+    let st = final_status.unwrap();
+    assert_eq!(st.completed, 2);
+    assert_eq!(st.total, 2);
+    assert_eq!(st.total_steps, 4);
+    assert_eq!(st.current_step, 4);
+    let _ = StageKind::Capture;
 }

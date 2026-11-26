@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use protocol::{
-    FrameType, NightPlan, SequenceStep, SequenceTemplate, builtin_sequence_templates,
+    FrameType, NightPlan, SequenceStep, SequenceTemplate, StageKind, builtin_sequence_templates,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ fn default_schema_version() -> u32 {
 
 fn sanitize_steps(steps: &mut [SequenceStep]) {
     for step in steps.iter_mut() {
-        if step.params.exposure.is_zero() {
+        if step.kind == StageKind::Capture && step.params.exposure.is_zero() {
             step.params.exposure = match step.frame_type {
                 FrameType::Bias => Duration::from_millis(10),
                 FrameType::Light | FrameType::Dark | FrameType::Flat => Duration::from_secs(1),
@@ -153,6 +153,7 @@ mod tests {
             start_unix_secs: 1_700_000_000,
             steps: vec![SequenceStep {
                 enabled: true,
+                kind: StageKind::Capture,
                 frame_type: FrameType::Light,
                 count: 10,
                 params: CaptureParams {
@@ -205,6 +206,7 @@ mod tests {
             start_unix_secs: 1000,
             steps: vec![SequenceStep {
                 enabled: true,
+                kind: StageKind::Capture,
                 frame_type: FrameType::Light,
                 count: 1,
                 params: CaptureParams {

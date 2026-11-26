@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::capture::{CaptureParams, FrameType, ImagingSequence, SaveLocationConfig, SequenceStep};
+use crate::capture::{FrameType, ImagingSequence, SaveLocationConfig, SequenceStep};
 
 pub const TARGET_HUE_PALETTE: [f32; 8] = [205.0, 32.0, 145.0, 285.0, 345.0, 52.0, 175.0, 240.0];
 pub const MIN_BLOCK_FOOTPRINT_SECS: i64 = 60;
@@ -59,8 +59,7 @@ impl PlannedTarget {
     pub fn total_frames(&self) -> u32 {
         self.steps
             .iter()
-            .filter(|step| step.enabled)
-            .fold(0u32, |acc, step| acc.saturating_add(step.count))
+            .fold(0u32, |acc, step| acc.saturating_add(step.frame_count()))
     }
 
     pub fn to_imaging_sequence(
@@ -270,68 +269,53 @@ pub fn builtin_sequence_templates() -> Vec<SequenceTemplate> {
             name: "DSLR Broadband".to_string(),
             builtin: true,
             steps: vec![
-                SequenceStep {
-                    enabled: true,
-                    frame_type: FrameType::Light,
-                    count: 30,
-                    params: CaptureParams {
-                        exposure: Duration::from_secs(120),
-                        iso: Some(800),
-                    },
-                    delay_between_frames: Duration::from_secs(2),
-                },
-                SequenceStep {
-                    enabled: true,
-                    frame_type: FrameType::Dark,
-                    count: 10,
-                    params: CaptureParams {
-                        exposure: Duration::from_secs(120),
-                        iso: Some(800),
-                    },
-                    delay_between_frames: Duration::ZERO,
-                },
+                SequenceStep::capture(
+                    FrameType::Light,
+                    30,
+                    Duration::from_secs(120),
+                    Some(800),
+                    Duration::from_secs(2),
+                ),
+                SequenceStep::capture(
+                    FrameType::Dark,
+                    10,
+                    Duration::from_secs(120),
+                    Some(800),
+                    Duration::ZERO,
+                ),
             ],
         },
         SequenceTemplate {
             id: "quick-test".to_string(),
             name: "Quick Test".to_string(),
             builtin: true,
-            steps: vec![SequenceStep {
-                enabled: true,
-                frame_type: FrameType::Light,
-                count: 5,
-                params: CaptureParams {
-                    exposure: Duration::from_secs(2),
-                    iso: Some(800),
-                },
-                delay_between_frames: Duration::ZERO,
-            }],
+            steps: vec![SequenceStep::capture(
+                FrameType::Light,
+                5,
+                Duration::from_secs(2),
+                Some(800),
+                Duration::ZERO,
+            )],
         },
         SequenceTemplate {
             id: "calibration".to_string(),
             name: "Calibration (Dark + Bias)".to_string(),
             builtin: true,
             steps: vec![
-                SequenceStep {
-                    enabled: true,
-                    frame_type: FrameType::Dark,
-                    count: 15,
-                    params: CaptureParams {
-                        exposure: Duration::from_secs(60),
-                        iso: Some(800),
-                    },
-                    delay_between_frames: Duration::ZERO,
-                },
-                SequenceStep {
-                    enabled: true,
-                    frame_type: FrameType::Bias,
-                    count: 20,
-                    params: CaptureParams {
-                        exposure: Duration::from_millis(10),
-                        iso: Some(800),
-                    },
-                    delay_between_frames: Duration::ZERO,
-                },
+                SequenceStep::capture(
+                    FrameType::Dark,
+                    15,
+                    Duration::from_secs(60),
+                    Some(800),
+                    Duration::ZERO,
+                ),
+                SequenceStep::capture(
+                    FrameType::Bias,
+                    20,
+                    Duration::from_millis(10),
+                    Some(800),
+                    Duration::ZERO,
+                ),
             ],
         },
     ]
@@ -340,10 +324,12 @@ pub fn builtin_sequence_templates() -> Vec<SequenceTemplate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::{CaptureParams, StageKind};
 
     fn sample_step(enabled: bool, count: u32, exposure_secs: u64, delay_secs: u64) -> SequenceStep {
         SequenceStep {
             enabled,
+            kind: StageKind::Capture,
             frame_type: FrameType::Light,
             count,
             params: CaptureParams {
@@ -495,5 +481,38 @@ mod tests {
             snap_group_delta_without_overlap(&group, &[(400, 500)], 280, -500, 500),
             400
         );
+    }
+
+    #[test]
+    fn sequence_step_legacy_json_defaults_stage_kind_and_non_capture_stages() {
+        let legacy_json = r#"{
+            "frame_type": "Light",
+            "count": 10,
+            "params": { "exposure": { "secs": 60, "nanos": 0 }, "iso": 800 }
+        }"#;
+        let decoded: SequenceStep = serde_json::from_str(legacy_json).expect("legacy json parses");
+        assert_eq!(decoded.kind, StageKind::Capture);
+        assert!(decoded.enabled);
+        assert_eq!(decoded.frame_count(), 10);
+        assert_eq!(decoded.estimated_duration(), Duration::from_secs(600));
+        assert_eq!(decoded.stage_label(), "Light");
+
+        let af = SequenceStep::autofocus();
+        assert_eq!(af.kind, StageKind::Autofocus);
+        assert_eq!(af.frame_count(), 0);
+        assert_eq!(af.estimated_duration(), Duration::ZERO);
+        assert_eq!(af.stage_label(), "Autofocus");
+
+        let ps = SequenceStep::plate_solve();
+        assert_eq!(ps.kind, StageKind::PlateSolve);
+        assert_eq!(ps.frame_count(), 0);
+        assert_eq!(ps.estimated_duration(), Duration::ZERO);
+        assert_eq!(ps.stage_label(), "Plate Solve");
+
+        let wait = SequenceStep::wait(Duration::from_secs(45));
+        assert_eq!(wait.kind, StageKind::Wait);
+        assert_eq!(wait.frame_count(), 0);
+        assert_eq!(wait.estimated_duration(), Duration::from_secs(45));
+        assert_eq!(wait.stage_label(), "Wait");
     }
 }

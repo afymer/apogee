@@ -984,7 +984,7 @@ pub fn format_radec_compact(ra_deg: f64, dec_deg: f64) -> String {
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
-    use protocol::{CaptureParams, FrameType, TARGET_HUE_PALETTE};
+    use protocol::{CaptureParams, FrameType, StageKind, TARGET_HUE_PALETTE};
 
     use super::*;
 
@@ -1028,6 +1028,7 @@ mod tests {
                 &id1,
                 SequenceStep {
                     enabled: true,
+                    kind: StageKind::Capture,
                     frame_type: FrameType::Dark,
                     count: 5,
                     params: CaptureParams {
