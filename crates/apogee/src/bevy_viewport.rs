@@ -243,50 +243,12 @@ fn rasterize_startup_sky_backdrop(
 }
 
 fn startup_loading_badge() -> AnyElement {
-    let badge_bg: Hsla = rgb(0x0b101b).into();
-    let badge_border: Hsla = rgb(0x64748b).into();
-    let ring_accent: Hsla = rgb(0x3dd9c7).into();
-    let label_color: Hsla = rgb(0xe2e8f0).into();
-
-    h_flex()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_1p5()
-        .rounded_full()
-        .bg(badge_bg.opacity(0.76))
-        .border_1()
-        .border_color(badge_border.opacity(0.28))
-        .shadow_md()
-        .child(
-            div()
-                .relative()
-                .size(px(14.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .size(px(14.0))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(ring_accent.opacity(0.55)),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .size(px(4.0))
-                        .rounded_full()
-                        .bg(ring_accent.opacity(0.92)),
-                ),
-        )
-        .child(
-            div()
-                .text_size(px(11.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(label_color.opacity(0.88))
-                .child("Preparing sky…"),
-        )
+    div()
+        .bg(rgb(0x000000))
+        .text_size(px(11.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(0xe2e8f0))
+        .child("Preparing sky...")
         .into_any_element()
 }
 
@@ -2505,73 +2467,18 @@ impl Render for PlanetariumPanel {
                         let ring_d = 26.0_f32;
                         let tick_len = 7.0_f32;
                         let tick_gap = 5.0_f32;
-                        let pill_x = (sx + 18.0).clamp(10.0, (bw - 128.0).max(10.0));
-                        let pill_y = (sy - 11.0).clamp(10.0, (bh - 30.0).max(10.0));
                         let opacity = if is_live { 0.95 } else { 0.62 };
+                        let half_box = (ring_d * 0.5).max(tick_gap + tick_len);
+                        let box_d = half_box * 2.0;
 
                         el.child(
                             div()
+                                .id("planetarium_mount_reticle")
                                 .absolute()
-                                .left(px(sx as f32 - ring_d * 0.5))
-                                .top(px(sy as f32 - ring_d * 0.5))
-                                .w(px(ring_d))
-                                .h(px(ring_d))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(accent.opacity(opacity)),
-                        )
-                        // 4 crisp crosshair ticks
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(sx as f32 - 0.5))
-                                .top(px(sy as f32 - tick_gap - tick_len))
-                                .w(px(1.5))
-                                .h(px(tick_len))
-                                .bg(accent.opacity(opacity)),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(sx as f32 - 0.5))
-                                .top(px(sy as f32 + tick_gap))
-                                .w(px(1.5))
-                                .h(px(tick_len))
-                                .bg(accent.opacity(opacity)),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(sx as f32 - tick_gap - tick_len))
-                                .top(px(sy as f32 - 0.5))
-                                .w(px(tick_len))
-                                .h(px(1.5))
-                                .bg(accent.opacity(opacity)),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(sx as f32 + tick_gap))
-                                .top(px(sy as f32 - 0.5))
-                                .w(px(tick_len))
-                                .h(px(1.5))
-                                .bg(accent.opacity(opacity)),
-                        )
-                        .child(
-                            h_flex()
-                                .id("planetarium_mount_badge")
-                                .absolute()
-                                .left(px(pill_x as f32))
-                                .top(px(pill_y as f32))
-                                .items_center()
-                                .gap_1()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(popover_bg)
-                                .border_1()
-                                .border_color(accent.opacity(if is_live { 0.75 } else { 0.45 }))
-                                .shadow_md()
+                                .left(px(sx as f32 - half_box))
+                                .top(px(sy as f32 - half_box))
+                                .w(px(box_d))
+                                .h(px(box_d))
                                 .cursor_pointer()
                                 .tooltip(Tooltip::text(tip))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -2580,13 +2487,53 @@ impl Render for PlanetariumPanel {
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.follow_mount(ra_deg, dec_deg, cx);
                                 }))
-                                .child(div().size(px(6.0)).rounded_full().bg(accent))
                                 .child(
                                     div()
-                                        .text_size(px(10.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(if is_live { text_color } else { muted_text })
-                                        .child(badge_text),
+                                        .absolute()
+                                        .left(px(half_box - ring_d * 0.5))
+                                        .top(px(half_box - ring_d * 0.5))
+                                        .w(px(ring_d))
+                                        .h(px(ring_d))
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(accent.opacity(opacity)),
+                                )
+                                // 4 crisp crosshair ticks
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(half_box - 0.5))
+                                        .top(px(half_box - tick_gap - tick_len))
+                                        .w(px(1.5))
+                                        .h(px(tick_len))
+                                        .bg(accent.opacity(opacity)),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(half_box - 0.5))
+                                        .top(px(half_box + tick_gap))
+                                        .w(px(1.5))
+                                        .h(px(tick_len))
+                                        .bg(accent.opacity(opacity)),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(half_box - tick_gap - tick_len))
+                                        .top(px(half_box - 0.5))
+                                        .w(px(tick_len))
+                                        .h(px(1.5))
+                                        .bg(accent.opacity(opacity)),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(half_box + tick_gap))
+                                        .top(px(half_box - 0.5))
+                                        .w(px(tick_len))
+                                        .h(px(1.5))
+                                        .bg(accent.opacity(opacity)),
                                 ),
                         )
                     } else {
