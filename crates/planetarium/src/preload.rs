@@ -218,9 +218,7 @@ pub fn load_cached_hips_base_tiles(
                 });
             }
         });
-        tiles = decoded
-            .into_inner()
-            .unwrap_or_else(PoisonError::into_inner);
+        tiles = decoded.into_inner().unwrap_or_else(PoisonError::into_inner);
         tiles.sort_unstable_by_key(|tile| tile.hash);
     }
 

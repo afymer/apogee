@@ -268,8 +268,12 @@ impl SimulatedMount {
     }
 
     pub fn park_at(&mut self, lst_deg: f64) {
-        let (ra, dec) =
-            horizontal_to_equatorial(self.park_az_deg, self.park_alt_deg, self.site_lat_deg, lst_deg);
+        let (ra, dec) = horizontal_to_equatorial(
+            self.park_az_deg,
+            self.park_alt_deg,
+            self.site_lat_deg,
+            lst_deg,
+        );
         self.target_ra_deg = Some(ra);
         self.target_dec_deg = Some(dec);
         self.target_pier_side = Some(PierSide::West);

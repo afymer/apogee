@@ -680,9 +680,8 @@ fn compute_tile_fade(
     let Some(&start) = tile_fade_starts.get(&key) else {
         return (1.0, false);
     };
-    let t = (now.saturating_duration_since(start).as_secs_f32()
-        / TILE_FADE_DURATION.as_secs_f32())
-    .clamp(0.0, 1.0);
+    let t = (now.saturating_duration_since(start).as_secs_f32() / TILE_FADE_DURATION.as_secs_f32())
+        .clamp(0.0, 1.0);
     if t >= 1.0 {
         tile_fade_starts.remove(&key);
         (1.0, false)
@@ -713,8 +712,7 @@ pub(crate) fn hips_survey_system(
         match rx.try_recv() {
             Ok(base) => {
                 if base.survey_name == settings.survey.name {
-                    let after_first_survey_init =
-                        active_survey_tiles.current_survey_name.is_some();
+                    let after_first_survey_init = active_survey_tiles.current_survey_name.is_some();
                     let inserted = image_cache.seed_preloaded_base(base, &mut images);
                     if after_first_survey_init {
                         for key in inserted {

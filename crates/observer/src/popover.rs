@@ -1873,8 +1873,7 @@ impl ObserverPopover {
                                 .w_full()
                                 .gap_0p5()
                                 .children(week.iter().map(|&cell_date| {
-                                    let is_current_month = i32::from(cell_date.year())
-                                        == view_year
+                                    let is_current_month = i32::from(cell_date.year()) == view_year
                                         && u32::from(cell_date.month().unsigned_abs())
                                             == view_month;
                                     let is_selected = cell_date == selected_date;
@@ -3176,20 +3175,19 @@ mod tests {
 
         let observer = visual_cx.read(|cx| cx.global::<GlobalObserver>().0.clone());
         let today = observer.read_with(visual_cx, |m, _| m.today_local_date());
-        let (initial_date, picked_date, day_selector) =
-            if today == jiff::civil::date(2026, 5, 15) {
-                (
-                    jiff::civil::date(2026, 6, 15),
-                    jiff::civil::date(2026, 6, 20),
-                    "calendar_day_2026-06-20",
-                )
-            } else {
-                (
-                    jiff::civil::date(2026, 5, 15),
-                    jiff::civil::date(2026, 5, 20),
-                    "calendar_day_2026-05-20",
-                )
-            };
+        let (initial_date, picked_date, day_selector) = if today == jiff::civil::date(2026, 5, 15) {
+            (
+                jiff::civil::date(2026, 6, 15),
+                jiff::civil::date(2026, 6, 20),
+                "calendar_day_2026-06-20",
+            )
+        } else {
+            (
+                jiff::civil::date(2026, 5, 15),
+                jiff::civil::date(2026, 5, 20),
+                "calendar_day_2026-05-20",
+            )
+        };
 
         observer.update(visual_cx, |m, cx| {
             m.set_local_date(initial_date, cx);

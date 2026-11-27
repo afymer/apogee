@@ -39,7 +39,11 @@ pub(crate) fn render_switch_row(
         .child(
             div()
                 .text_size(px(12.0))
-                .text_color(if checked { colors.text } else { colors.text_muted })
+                .text_color(if checked {
+                    colors.text
+                } else {
+                    colors.text_muted
+                })
                 .child(label),
         )
         .child(

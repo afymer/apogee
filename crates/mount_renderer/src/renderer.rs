@@ -195,9 +195,7 @@ impl GrowableBuffer {
         }
         let bytes = bytemuck::cast_slice(data);
         let needed = (bytes.len() as u64).max(4);
-        let needs_alloc = slot
-            .as_ref()
-            .is_none_or(|buf| buf.capacity_bytes < needed);
+        let needs_alloc = slot.as_ref().is_none_or(|buf| buf.capacity_bytes < needed);
         if needs_alloc {
             let cap = needed.next_power_of_two().max(1024);
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -577,7 +575,11 @@ impl MountOverlayRenderer {
         let sun_intensity = smoothstep(-1.5, 6.0, sun_alt);
         let sun_warmth = smoothstep(0.0, 22.0, sun_alt);
 
-        let sun_color = lerp3(Vec3::new(1.0, 0.56, 0.30), Vec3::new(1.0, 0.96, 0.90), sun_warmth);
+        let sun_color = lerp3(
+            Vec3::new(1.0, 0.56, 0.30),
+            Vec3::new(1.0, 0.96, 0.90),
+            sun_warmth,
+        );
         let horiz_sun_len = sun_dir.x.hypot(sun_dir.z);
         let twilight_dir = if horiz_sun_len > 1e-4 {
             Vec3::new(sun_dir.x, 0.22 * horiz_sun_len, sun_dir.z).normalize()
@@ -586,12 +588,20 @@ impl MountOverlayRenderer {
         };
         let twilight_weight = tw_t * (1.0 - day_t * 0.85);
         let sky_ambient = lerp3(
-            lerp3(Vec3::new(0.17, 0.22, 0.32), Vec3::new(0.24, 0.22, 0.32), tw_t),
+            lerp3(
+                Vec3::new(0.17, 0.22, 0.32),
+                Vec3::new(0.24, 0.22, 0.32),
+                tw_t,
+            ),
             Vec3::new(0.30, 0.39, 0.54),
             day_t,
         );
         let gnd_ambient = lerp3(
-            lerp3(Vec3::new(0.07, 0.09, 0.13), Vec3::new(0.09, 0.09, 0.12), tw_t),
+            lerp3(
+                Vec3::new(0.07, 0.09, 0.13),
+                Vec3::new(0.09, 0.09, 0.12),
+                tw_t,
+            ),
             Vec3::new(0.16, 0.15, 0.14),
             day_t,
         );
@@ -608,7 +618,12 @@ impl MountOverlayRenderer {
             ],
             sun_dir_intensity: [sun_dir.x, sun_dir.y, sun_dir.z, sun_intensity],
             sun_color_night_w: [sun_color.x, sun_color.y, sun_color.z, 1.0 - day_t],
-            twilight_dir_weight: [twilight_dir.x, twilight_dir.y, twilight_dir.z, twilight_weight],
+            twilight_dir_weight: [
+                twilight_dir.x,
+                twilight_dir.y,
+                twilight_dir.z,
+                twilight_weight,
+            ],
             sky_ambient: [sky_ambient.x, sky_ambient.y, sky_ambient.z, 0.0],
             gnd_ambient: [gnd_ambient.x, gnd_ambient.y, gnd_ambient.z, 0.0],
             rim_color: [rim_color.x, rim_color.y, rim_color.z, 0.0],
@@ -650,10 +665,9 @@ impl MountOverlayRenderer {
 
         // 1. Translucent safety & meridian limit zones (at infinity, over Explore sky)
         if self.sky_translucent_mesh.index_count > 0 {
-            if let (Some(vb), Some(ib)) = (
-                &self.sky_translucent_mesh.vb,
-                &self.sky_translucent_mesh.ib,
-            ) {
+            if let (Some(vb), Some(ib)) =
+                (&self.sky_translucent_mesh.vb, &self.sky_translucent_mesh.ib)
+            {
                 pass.set_pipeline(&self.infinity_mesh_pipeline);
                 pass.set_vertex_buffer(0, vb.buffer.slice(..));
                 pass.set_index_buffer(ib.buffer.slice(..), wgpu::IndexFormat::Uint32);

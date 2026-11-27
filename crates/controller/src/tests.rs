@@ -612,7 +612,10 @@ async fn test_sequence_pause_resume_and_abort() {
 
     tokio::time::timeout(Duration::from_secs(3), async {
         seq_rx
-            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Paused))
+            .wait_for(|s| {
+                s.as_ref()
+                    .is_some_and(|st| st.phase == SequencePhase::Paused)
+            })
             .await
             .unwrap();
     })
@@ -623,7 +626,10 @@ async fn test_sequence_pause_resume_and_abort() {
     controller_handle.resume_sequence().await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         seq_rx
-            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Running))
+            .wait_for(|s| {
+                s.as_ref()
+                    .is_some_and(|st| st.phase == SequencePhase::Running)
+            })
             .await
             .unwrap();
     })
@@ -633,7 +639,10 @@ async fn test_sequence_pause_resume_and_abort() {
     controller_handle.abort().await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         seq_rx
-            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Aborted))
+            .wait_for(|s| {
+                s.as_ref()
+                    .is_some_and(|st| st.phase == SequencePhase::Aborted)
+            })
             .await
             .unwrap();
     })
@@ -689,7 +698,12 @@ async fn test_sequence_auto_meridian_flip_coordination() {
     };
     let (mount_telem_tx, mount_telem_rx) = watch::channel(Some(initial_telem.clone()));
     let (mount_event_tx, _) = broadcast::channel::<MountEvent>(16);
-    let mount_handle = MountHandle::new(mount_cmd_tx, mount_status_rx, mount_telem_rx, mount_event_tx);
+    let mount_handle = MountHandle::new(
+        mount_cmd_tx,
+        mount_status_rx,
+        mount_telem_rx,
+        mount_event_tx,
+    );
 
     let flip_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flip_received_clone = flip_received.clone();
@@ -735,7 +749,10 @@ async fn test_sequence_auto_meridian_flip_coordination() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         seq_rx
-            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Completed))
+            .wait_for(|s| {
+                s.as_ref()
+                    .is_some_and(|st| st.phase == SequencePhase::Completed)
+            })
             .await
             .unwrap();
     })
@@ -751,9 +768,8 @@ async fn test_sequence_auto_meridian_flip_coordination() {
 #[tokio::test]
 async fn test_night_plan_multi_target_slew_capture_and_park() {
     use protocol::{
-        MountCommand, MountStatus, MountTelemetry, NightPlan, NightPlanPolicy,
-        NightPlanRunRequest, PlannedTarget, SaveLocationConfig, SequencePhase, SequenceStep,
-        TARGET_HUE_PALETTE,
+        MountCommand, MountStatus, MountTelemetry, NightPlan, NightPlanPolicy, NightPlanRunRequest,
+        PlannedTarget, SaveLocationConfig, SequencePhase, SequenceStep, TARGET_HUE_PALETTE,
     };
     use synscan::{MountEvent, MountHandle};
     use tokio::sync::broadcast;
@@ -792,7 +808,12 @@ async fn test_night_plan_multi_target_slew_capture_and_park() {
     };
     let (mount_telem_tx, mount_telem_rx) = watch::channel(Some(initial_telem.clone()));
     let (mount_event_tx, _) = broadcast::channel::<MountEvent>(16);
-    let mount_handle = MountHandle::new(mount_cmd_tx, mount_status_rx, mount_telem_rx, mount_event_tx);
+    let mount_handle = MountHandle::new(
+        mount_cmd_tx,
+        mount_status_rx,
+        mount_telem_rx,
+        mount_event_tx,
+    );
 
     let mount_ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let mount_ops_clone = mount_ops.clone();
@@ -908,7 +929,10 @@ async fn test_night_plan_multi_target_slew_capture_and_park() {
     assert_eq!(st.total_targets, 2);
 
     let ops = mount_ops.lock().unwrap().clone();
-    assert_eq!(ops, vec!["unpark", "slew:10.0,20.0", "slew:83.8,20.0", "park"]);
+    assert_eq!(
+        ops,
+        vec!["unpark", "slew:10.0,20.0", "slew:83.8,20.0", "park"]
+    );
 }
 
 #[tokio::test]
@@ -991,7 +1015,10 @@ async fn test_night_plan_waits_for_start_time_and_aborts_cleanly() {
 
     tokio::time::timeout(Duration::from_secs(3), async {
         seq_rx
-            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Aborted))
+            .wait_for(|s| {
+                s.as_ref()
+                    .is_some_and(|st| st.phase == SequencePhase::Aborted)
+            })
             .await
             .unwrap();
     })
@@ -1089,7 +1116,10 @@ async fn test_night_plan_pause_to_edit_updates_upcoming_target() {
     controller_handle.pause_sequence().await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         seq_rx
-            .wait_for(|s| s.as_ref().is_some_and(|st| st.phase == SequencePhase::Paused))
+            .wait_for(|s| {
+                s.as_ref()
+                    .is_some_and(|st| st.phase == SequencePhase::Paused)
+            })
             .await
             .unwrap();
     })

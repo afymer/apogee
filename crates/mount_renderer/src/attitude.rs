@@ -63,7 +63,13 @@ mod tests {
     fn ignores_nan_targets_without_poisoning_state() {
         let mut ra = 42.0;
         let mut dec = 23.0;
-        assert!(!step_angular_lowpass(&mut ra, &mut dec, f64::NAN, 23.0, 0.016));
+        assert!(!step_angular_lowpass(
+            &mut ra,
+            &mut dec,
+            f64::NAN,
+            23.0,
+            0.016
+        ));
         assert_eq!(ra, 42.0);
         assert_eq!(dec, 23.0);
     }
@@ -72,7 +78,9 @@ mod tests {
     fn snaps_when_within_settle_epsilon() {
         let mut ra = 100.0;
         let mut dec = 20.0;
-        assert!(!step_angular_lowpass(&mut ra, &mut dec, 100.001, 20.001, 0.016));
+        assert!(!step_angular_lowpass(
+            &mut ra, &mut dec, 100.001, 20.001, 0.016
+        ));
         assert_eq!(ra, 100.001);
         assert_eq!(dec, 20.001);
     }

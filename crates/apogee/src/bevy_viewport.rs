@@ -1454,8 +1454,7 @@ impl PlanetariumPanel {
         match self.first_bevy_frame_at {
             None => (1.0, 1.0),
             Some(started) => {
-                let t = (started.elapsed().as_secs_f32()
-                    / STARTUP_REVEAL_DURATION.as_secs_f32())
+                let t = (started.elapsed().as_secs_f32() / STARTUP_REVEAL_DURATION.as_secs_f32())
                     .clamp(0.0, 1.0);
                 if t >= 1.0 {
                     (0.0, 0.0)
@@ -1749,10 +1748,7 @@ impl Render for PlanetariumPanel {
         } else {
             snapshot.texture_view
         };
-        if self.first_bevy_frame_at.is_none()
-            && self.cached_texture.is_some()
-            && !is_mount_frame
-        {
+        if self.first_bevy_frame_at.is_none() && self.cached_texture.is_some() && !is_mount_frame {
             self.first_bevy_frame_at = Some(std::time::Instant::now());
             self.start_startup_reveal_animation(cx);
         }
@@ -1936,14 +1932,13 @@ impl Render for PlanetariumPanel {
                     SelectedObject::Dso(dso) => {
                         let focal_px = (bh * scale_factor)
                             / (2.0 * (0.5 * f64::from(fov_y_rad)).tan().max(1e-6));
-                        let semi_major_rad = 0.5
-                            * f64::from(
+                        let semi_major_rad =
+                            0.5 * f64::from(
                                 dso.record
                                     .major_arcmin
                                     .filter(|v| v.is_finite() && *v > 0.0)
                                     .unwrap_or(0.0),
-                            )
-                            * (std::f64::consts::PI / 10_800.0);
+                            ) * (std::f64::consts::PI / 10_800.0);
                         let true_a_px = (semi_major_rad * focal_px) as f32;
                         let min_icon_r = if dso.record.is_messier() { 7.5 } else { 6.0 };
                         (dso.icrs_dir(), true_a_px.max(min_icon_r))
@@ -2049,8 +2044,14 @@ impl Render for PlanetariumPanel {
             .as_ref()
             .filter(|_| self.hover_preview_visible)
             .map(HoveredObject::id);
-        let dso_labels_overlay =
-            self.render_dso_labels(flags, proj_size, selected_target_id, hovered_id, scale_factor, cx);
+        let dso_labels_overlay = self.render_dso_labels(
+            flags,
+            proj_size,
+            selected_target_id,
+            hovered_id,
+            scale_factor,
+            cx,
+        );
 
         let hovered_overlay = self
             .hovered_object
@@ -3493,8 +3494,7 @@ mod tests {
 
     #[test]
     fn rasterize_startup_sky_backdrop_reflects_day_and_night_conditions() {
-        let day_img =
-            rasterize_startup_sky_backdrop(64, 48, DVec3::new(0.0, 0.5, 0.866), 1.0, 1.0);
+        let day_img = rasterize_startup_sky_backdrop(64, 48, DVec3::new(0.0, 0.5, 0.866), 1.0, 1.0);
         let day_bytes = day_img.as_bytes(0).expect("frame 0 bytes");
         assert_eq!(day_bytes.len(), 64 * 48 * 4);
         // Center pixel looks near zenith during daytime: sky blue has B > R and opaque alpha.

@@ -244,11 +244,20 @@ mod tests {
         assert_eq!(parse_firmware_version(b"ERR#"), None);
         assert_eq!(parse_firmware_version(b"#"), None);
 
-        assert_eq!(parse_mount_model(&[0, b'#']).as_deref(), Some("EQ6 / NEQ6-Pro"));
+        assert_eq!(
+            parse_mount_model(&[0, b'#']).as_deref(),
+            Some("EQ6 / NEQ6-Pro")
+        );
         assert_eq!(parse_mount_model(b"#"), None);
 
-        assert_eq!(decode_tracking_mode(&[2, b'#']), Some(TrackingRate::Sidereal));
-        assert_eq!(decode_tracking_mode(&[3, b'#']), Some(TrackingRate::SiderealPec));
+        assert_eq!(
+            decode_tracking_mode(&[2, b'#']),
+            Some(TrackingRate::Sidereal)
+        );
+        assert_eq!(
+            decode_tracking_mode(&[3, b'#']),
+            Some(TrackingRate::SiderealPec)
+        );
         assert_eq!(decode_tracking_mode(b"#"), None);
         assert_eq!(decode_tracking_mode(b"ERR#"), None);
     }

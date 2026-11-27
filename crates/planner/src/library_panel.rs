@@ -178,7 +178,12 @@ impl PlanLibraryPanel {
         cx.notify();
     }
 
-    fn render_date_header(&self, night_date: &str, locked: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_date_header(
+        &self,
+        night_date: &str,
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let display_date = if night_date.trim().is_empty() {
             cx.try_global::<GlobalObserver>()
                 .map(|g| observer_evening_date_and_start(g.0.read(cx)).0)
@@ -252,7 +257,11 @@ impl PlanLibraryPanel {
             .into_any_element()
     }
 
-    fn render_sequence_status_card(&self, seq: &SequenceStatus, cx: &mut Context<Self>) -> AnyElement {
+    fn render_sequence_status_card(
+        &self,
+        seq: &SequenceStatus,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let phase_color = match seq.phase {
             SequencePhase::Running => Color::Accent,
             SequencePhase::WaitingForStart
@@ -379,23 +388,25 @@ impl PlanLibraryPanel {
                             )
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::Small)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if is_paused {
-                                    if has_plan_id
-                                        && let Some(plan) = cx
-                                            .try_global::<GlobalNightPlan>()
-                                            .map(|g| g.0.read(cx).plan().clone())
-                                    {
-                                        this.send_viewer_message(
-                                            ViewerMessage::UpdateNightPlan(plan),
-                                            cx,
-                                        );
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if is_paused {
+                                        if has_plan_id
+                                            && let Some(plan) = cx
+                                                .try_global::<GlobalNightPlan>()
+                                                .map(|g| g.0.read(cx).plan().clone())
+                                        {
+                                            this.send_viewer_message(
+                                                ViewerMessage::UpdateNightPlan(plan),
+                                                cx,
+                                            );
+                                        }
+                                        this.send_viewer_message(ViewerMessage::ResumeSequence, cx);
+                                    } else {
+                                        this.send_viewer_message(ViewerMessage::PauseSequence, cx);
                                     }
-                                    this.send_viewer_message(ViewerMessage::ResumeSequence, cx);
-                                } else {
-                                    this.send_viewer_message(ViewerMessage::PauseSequence, cx);
-                                }
-                            })),
+                                },
+                            )),
                         )
                         .child(
                             Button::new("pp_abort_btn", "Abort")
@@ -446,16 +457,19 @@ impl PlanLibraryPanel {
                     .color(Color::Default),
             )
             .child(
-                Button::new("pp_run_tonight_btn", format!("Run Tonight ({plan_frames}f)"))
-                    .style(if can_run_plan {
-                        ButtonStyle::Filled
-                    } else {
-                        ButtonStyle::Subtle
-                    })
-                    .disabled(!can_run_plan)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.run_night_plan(cx);
-                    })),
+                Button::new(
+                    "pp_run_tonight_btn",
+                    format!("Run Tonight ({plan_frames}f)"),
+                )
+                .style(if can_run_plan {
+                    ButtonStyle::Filled
+                } else {
+                    ButtonStyle::Subtle
+                })
+                .disabled(!can_run_plan)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.run_night_plan(cx);
+                })),
             )
             .child(crate::render_switch_row(
                 "pp_start_now_btn",
@@ -551,11 +565,11 @@ impl PlanLibraryPanel {
             .child(self.name_input.clone())
             .child(self.ra_input.clone())
             .child(self.dec_input.clone())
-            .children(self.add_error.clone().map(|err| {
-                Label::new(err)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Error)
-            }))
+            .children(
+                self.add_error
+                    .clone()
+                    .map(|err| Label::new(err).size(LabelSize::XSmall).color(Color::Error)),
+            )
             .child(
                 Button::new("pl_submit_add_target_btn", "+ Add Target")
                     .style(ButtonStyle::Subtle)

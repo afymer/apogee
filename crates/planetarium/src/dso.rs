@@ -79,8 +79,8 @@ impl DsoGpuRecord {
             .unwrap_or(0.0)
             .to_radians();
 
-        let mut flags =
-            (u32::from(rec.kind.symbol_code()) & 0xFF) | ((u32::from(rec.kind.color_id()) & 0xFF) << 8);
+        let mut flags = (u32::from(rec.kind.symbol_code()) & 0xFF)
+            | ((u32::from(rec.kind.color_id()) & 0xFF) << 8);
         if rec.is_messier() {
             flags |= 1 << 16;
         }
@@ -165,7 +165,12 @@ impl DsoRenderParams {
         if !self.record_enabled(rec) || self.atmo_visibility <= 1e-3 {
             return 0.0;
         }
-        let limit = self.ngc_limiting_mag + if rec.is_messier() { self.messier_boost } else { 0.0 };
+        let limit = self.ngc_limiting_mag
+            + if rec.is_messier() {
+                self.messier_boost
+            } else {
+                0.0
+            };
         let fade_range = self.fade_range.max(0.1);
         let mag_vis =
             ((limit + fade_range - rec.effective_display_mag()) / fade_range).clamp(0.0, 1.0);
@@ -294,10 +299,7 @@ impl DsoSpatialIndex {
     }
 
     pub fn iter_dsos(&self) -> impl Iterator<Item = (u32, &DsoRecord)> + '_ {
-        self.records
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (i as u32, r))
+        self.records.iter().enumerate().map(|(i, r)| (i as u32, r))
     }
 
     /// Computes approximate physical pixels per radian at `v_icrs` around the projection center.
@@ -468,8 +470,9 @@ impl DsoSpatialIndex {
             let rendered_logical = f64::from(rendered_px) / safe_scale;
             let center_hit_r = rendered_logical.clamp(10.0, 26.0);
             let center_hit = dist_logical <= center_hit_r;
-            let perimeter_hit =
-                !center_hit && rendered_logical > 26.0 && (dist_logical - rendered_logical).abs() <= 6.0;
+            let perimeter_hit = !center_hit
+                && rendered_logical > 26.0
+                && (dist_logical - rendered_logical).abs() <= 6.0;
             if !center_hit && !perimeter_hit {
                 continue;
             }
@@ -481,8 +484,10 @@ impl DsoSpatialIndex {
             } else {
                 (dist_logical - rendered_logical).abs() / 6.0
             };
-            let score =
-                f64::from(rec.effective_display_mag()) + messier_bonus + perimeter_penalty + 2.0 * dist_norm;
+            let score = f64::from(rec.effective_display_mag())
+                + messier_bonus
+                + perimeter_penalty
+                + 2.0 * dist_norm;
 
             let is_better = best.as_ref().is_none_or(|prev| {
                 if (score - prev.score).abs() > 1e-9 {
@@ -601,10 +606,7 @@ impl DsoSpatialIndex {
 
             let label_rect = (lx, ly, lx + box_w, ly + box_h);
             let collides = occupied.iter().any(|&(ax0, ay0, ax1, ay1)| {
-                label_rect.0 < ax1
-                    && label_rect.2 > ax0
-                    && label_rect.1 < ay1
-                    && label_rect.3 > ay0
+                label_rect.0 < ax1 && label_rect.2 > ax0 && label_rect.1 < ay1 && label_rect.3 > ay0
             });
             if collides {
                 continue;
@@ -657,11 +659,7 @@ pub struct CelestialDsoDraw {
 }
 
 impl SyncComponent for CelestialDsoMaterial {
-    type Target = (
-        CelestialDsoUniforms,
-        CelestialDsoDraw,
-        CelestialPipelineId,
-    );
+    type Target = (CelestialDsoUniforms, CelestialDsoDraw, CelestialPipelineId);
 }
 
 impl ExtractComponent for CelestialDsoMaterial {
@@ -742,10 +740,9 @@ pub(crate) fn dso_system(
     };
     let aspect = dims.width.max(1) as f32 / dims.height.max(1) as f32;
     let proj_params = camera.projection_params(aspect);
-    let sun_alt_deg = celestial::solar::solar_altitude_deg(
-        camera.observer.location,
-        camera.observer.epoch,
-    ) as f32;
+    let sun_alt_deg =
+        celestial::solar::solar_altitude_deg(camera.observer.location, camera.observer.epoch)
+            as f32;
     let render_params = DsoRenderParams::for_sky(
         sun_alt_deg,
         proj_params.fov_y,
@@ -939,8 +936,24 @@ mod tests {
         let viewport = (1600.0, 900.0);
 
         let records = vec![
-            dso_at_offset_px(&info, viewport, (0.0, 0.0), Some(31), Some("224"), 3.44, Some(177.0)),
-            dso_at_offset_px(&info, viewport, (40.0, 0.0), None, Some("7000"), 4.0, Some(120.0)),
+            dso_at_offset_px(
+                &info,
+                viewport,
+                (0.0, 0.0),
+                Some(31),
+                Some("224"),
+                3.44,
+                Some(177.0),
+            ),
+            dso_at_offset_px(
+                &info,
+                viewport,
+                (40.0, 0.0),
+                None,
+                Some("7000"),
+                4.0,
+                Some(120.0),
+            ),
         ];
         let index = DsoSpatialIndex::build(records);
 
@@ -951,7 +964,8 @@ mod tests {
         assert_eq!(picked_m.record.messier, Some(31));
 
         // Disabling Messier hides M31 (it still has NGC 224 unless NGC disabled too; test NGC-only filter!).
-        let params_messier_only = DsoRenderParams::for_sky(-25.0, cam.fov_y as f32, 1.0, true, false);
+        let params_messier_only =
+            DsoRenderParams::for_sky(-25.0, cam.fov_y as f32, 1.0, true, false);
         let ngc_ndc_x = (2.0 * 40.0) / viewport.0;
         assert!(
             index
@@ -988,9 +1002,33 @@ mod tests {
         let (cam, info) = setup_test_view_info();
         let viewport = (1200.0, 800.0);
         let records = vec![
-            dso_at_offset_px(&info, viewport, (0.0, 0.0), Some(31), Some("224"), 3.4, Some(10.0)),
-            dso_at_offset_px(&info, viewport, (4.0, 0.0), Some(32), Some("221"), 8.1, Some(5.0)),
-            dso_at_offset_px(&info, viewport, (150.0, 0.0), Some(110), Some("205"), 8.5, Some(10.0)),
+            dso_at_offset_px(
+                &info,
+                viewport,
+                (0.0, 0.0),
+                Some(31),
+                Some("224"),
+                3.4,
+                Some(10.0),
+            ),
+            dso_at_offset_px(
+                &info,
+                viewport,
+                (4.0, 0.0),
+                Some(32),
+                Some("221"),
+                8.1,
+                Some(5.0),
+            ),
+            dso_at_offset_px(
+                &info,
+                viewport,
+                (150.0, 0.0),
+                Some(110),
+                Some("205"),
+                8.5,
+                Some(10.0),
+            ),
         ];
         let index = DsoSpatialIndex::build(records);
         let params = DsoRenderParams::for_sky(-25.0, cam.fov_y as f32, 1.0, true, true);
@@ -1016,11 +1054,7 @@ mod tests {
             catalog.header.ngc_count
         );
 
-        let messier_set: HashSet<u16> = catalog
-            .records
-            .iter()
-            .filter_map(|r| r.messier)
-            .collect();
+        let messier_set: HashSet<u16> = catalog.records.iter().filter_map(|r| r.messier).collect();
         for m in 1..=110_u16 {
             assert!(messier_set.contains(&m), "Missing Messier object M{m}");
         }
@@ -1038,7 +1072,9 @@ mod tests {
             .expect("M102 present");
         assert_eq!(m102.ngc.as_deref(), Some("5866"));
 
-        for ngc_id in ["253", "281", "869", "1499", "2237", "2239", "5139", "6960", "7000", "7293"] {
+        for ngc_id in [
+            "253", "281", "869", "1499", "2237", "2239", "5139", "6960", "7000", "7293",
+        ] {
             assert!(
                 catalog
                     .records

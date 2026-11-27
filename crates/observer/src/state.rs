@@ -508,9 +508,7 @@ impl ObserverModel {
             Zoned::now().date()
         } else {
             let offset = self.fixed_offset_at(now_unix_seconds());
-            Timestamp::now()
-                .to_zoned(TimeZone::fixed(offset))
-                .date()
+            Timestamp::now().to_zoned(TimeZone::fixed(offset)).date()
         }
     }
 

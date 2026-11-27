@@ -190,14 +190,7 @@ impl CameraControlPanel {
         model: &Entity<client::DaemonStateModel>,
         cx: &mut Context<Self>,
     ) {
-        let (
-            latest_frame,
-            connection,
-            camera,
-            daemon,
-            seq_active,
-            last_error_frame,
-        ) = {
+        let (latest_frame, connection, camera, daemon, seq_active, last_error_frame) = {
             let model_ref = model.read(cx);
             (
                 model_ref.latest_frame.clone(),
@@ -409,8 +402,9 @@ impl CameraControlPanel {
                     .child(self.target_input.clone()),
             )
             .child(
-                h_flex().gap_1().children(
-                    FrameType::all().iter().enumerate().map(|(idx, &ft)| {
+                h_flex()
+                    .gap_1()
+                    .children(FrameType::all().iter().enumerate().map(|(idx, &ft)| {
                         let selected = self.selected_frame_type == ft;
                         Button::new(("camera_ft_btn", idx), ft.label())
                             .style(if selected {
@@ -423,8 +417,7 @@ impl CameraControlPanel {
                                 this.selected_frame_type = ft;
                                 cx.notify();
                             }))
-                    }),
-                ),
+                    })),
             )
             .child(
                 h_flex()
@@ -452,11 +445,11 @@ impl CameraControlPanel {
                             .child(self.iso_input.clone()),
                     ),
             )
-            .children(self.input_error.clone().map(|err| {
-                Label::new(err)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Error)
-            }))
+            .children(
+                self.input_error
+                    .clone()
+                    .map(|err| Label::new(err).size(LabelSize::XSmall).color(Color::Error)),
+            )
             .child(
                 h_flex()
                     .gap_1()
@@ -475,7 +468,11 @@ impl CameraControlPanel {
                     .child(
                         Button::new(
                             "loop_capture_btn",
-                            if self.loop_enabled { "Loop: On" } else { "Loop" },
+                            if self.loop_enabled {
+                                "Loop: On"
+                            } else {
+                                "Loop"
+                            },
                         )
                         .style(if self.loop_enabled {
                             ButtonStyle::Filled
@@ -483,9 +480,11 @@ impl CameraControlPanel {
                             ButtonStyle::Subtle
                         })
                         .disabled(!self.loop_enabled && !can_toggle_loop)
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.toggle_loop(can_capture, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _event, _window, cx| {
+                                this.toggle_loop(can_capture, cx);
+                            },
+                        )),
                     )
                     .when(
                         (ui_state.is_capturing && !ui_state.seq_active) || self.loop_enabled,

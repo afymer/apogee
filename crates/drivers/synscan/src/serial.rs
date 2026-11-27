@@ -40,8 +40,8 @@ pub fn list_serial_ports() -> Vec<String> {
                 || name_str.starts_with("cu.usb")
             {
                 let full_path = format!("/dev/{name_str}");
-                let canonical = std::fs::canonicalize(&full_path)
-                    .unwrap_or_else(|_| PathBuf::from(&full_path));
+                let canonical =
+                    std::fs::canonicalize(&full_path).unwrap_or_else(|_| PathBuf::from(&full_path));
                 if !seen_targets.contains(&canonical) {
                     ports.insert(full_path);
                 }

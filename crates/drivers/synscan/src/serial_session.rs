@@ -6,9 +6,7 @@ use protocol::{
     MountAxis, MountDriverKind, MountLimits, MountTelemetry, PierSide, SlewDirection, TrackingRate,
 };
 
-use crate::coords::{
-    current_lst_deg, equatorial_to_horizontal, now_unix_ms, pole_horizontal,
-};
+use crate::coords::{current_lst_deg, equatorial_to_horizontal, now_unix_ms, pole_horizontal};
 use crate::protocol as synscan_proto;
 use crate::serial::SerialTransport;
 use crate::types::MountError;
@@ -226,7 +224,8 @@ impl SerialSession {
     }
 
     pub async fn park(&mut self) -> Result<(), MountError> {
-        let payload = synscan_proto::encode_precise_azalt_payload(self.park_az_deg, self.park_alt_deg)?;
+        let payload =
+            synscan_proto::encode_precise_azalt_payload(self.park_az_deg, self.park_alt_deg)?;
         self.exchange(format!("b{payload}").into_bytes()).await?;
         self.parking_in_progress = true;
         self.target_ra_deg = None;
@@ -240,7 +239,10 @@ impl SerialSession {
         self.parking_in_progress = false;
     }
 
-    pub fn set_park_here(&mut self, current_telemetry: Option<&MountTelemetry>) -> Result<(), MountError> {
+    pub fn set_park_here(
+        &mut self,
+        current_telemetry: Option<&MountTelemetry>,
+    ) -> Result<(), MountError> {
         let t = current_telemetry.ok_or_else(|| {
             MountError::Protocol("No telemetry available yet to record park position".into())
         })?;
@@ -289,50 +291,53 @@ impl SerialSession {
         let prev_tracking = self.cached_tracking;
         let prev_pier_side = self.cached_pier_side;
 
-        let sample = tokio::task::spawn_blocking(move || -> Result<SerialPollSample, MountError> {
-            let mut guard = transport
-                .lock()
-                .map_err(|_| MountError::Io("Serial mutex poisoned".into()))?;
-            let eq_raw = guard.exchange(b"e")?;
-            let eq_str = String::from_utf8_lossy(&eq_raw);
-            let (ra_deg, dec_deg) = synscan_proto::decode_precise_radec(&eq_str)
-                .ok_or_else(|| MountError::Protocol(format!("Invalid 'e' response: {eq_str}")))?;
+        let sample =
+            tokio::task::spawn_blocking(move || -> Result<SerialPollSample, MountError> {
+                let mut guard = transport
+                    .lock()
+                    .map_err(|_| MountError::Io("Serial mutex poisoned".into()))?;
+                let eq_raw = guard.exchange(b"e")?;
+                let eq_str = String::from_utf8_lossy(&eq_raw);
+                let (ra_deg, dec_deg) =
+                    synscan_proto::decode_precise_radec(&eq_str).ok_or_else(|| {
+                        MountError::Protocol(format!("Invalid 'e' response: {eq_str}"))
+                    })?;
 
-            let lst = current_lst_deg(site_lon);
-            let (az_deg, alt_deg) = equatorial_to_horizontal(ra_deg, dec_deg, site_lat, lst);
+                let lst = current_lst_deg(site_lon);
+                let (az_deg, alt_deg) = equatorial_to_horizontal(ra_deg, dec_deg, site_lat, lst);
 
-            let is_slewing = guard
-                .exchange(b"L")
-                .is_ok_and(|raw| raw.first() == Some(&b'1'));
+                let is_slewing = guard
+                    .exchange(b"L")
+                    .is_ok_and(|raw| raw.first() == Some(&b'1'));
 
-            let (tracking, pier_side) = if do_slow_poll {
-                let tracking = guard
-                    .exchange(b"t")
-                    .ok()
-                    .and_then(|raw| synscan_proto::decode_tracking_mode(&raw))
-                    .unwrap_or(prev_tracking);
-                let pier_side = guard
-                    .exchange(b"p")
-                    .ok()
-                    .map(|raw| synscan_proto::decode_pier_side(&raw))
-                    .unwrap_or(prev_pier_side);
-                (tracking, pier_side)
-            } else {
-                (prev_tracking, prev_pier_side)
-            };
+                let (tracking, pier_side) = if do_slow_poll {
+                    let tracking = guard
+                        .exchange(b"t")
+                        .ok()
+                        .and_then(|raw| synscan_proto::decode_tracking_mode(&raw))
+                        .unwrap_or(prev_tracking);
+                    let pier_side = guard
+                        .exchange(b"p")
+                        .ok()
+                        .map(|raw| synscan_proto::decode_pier_side(&raw))
+                        .unwrap_or(prev_pier_side);
+                    (tracking, pier_side)
+                } else {
+                    (prev_tracking, prev_pier_side)
+                };
 
-            Ok(SerialPollSample {
-                ra_deg,
-                dec_deg,
-                az_deg,
-                alt_deg,
-                is_slewing,
-                tracking,
-                pier_side,
+                Ok(SerialPollSample {
+                    ra_deg,
+                    dec_deg,
+                    az_deg,
+                    alt_deg,
+                    is_slewing,
+                    tracking,
+                    pier_side,
+                })
             })
-        })
-        .await
-        .map_err(|e| MountError::Io(format!("Serial poll task panicked: {e}")))??;
+            .await
+            .map_err(|e| MountError::Io(format!("Serial poll task panicked: {e}")))??;
 
         self.poll_counter = self.poll_counter.wrapping_add(1);
         self.slow_poll_dirty = false;
@@ -491,6 +496,9 @@ mod tests {
         assert!(!t2.is_slewing);
         assert!(t2.is_parked);
         assert_eq!(t2.tracking, TrackingRate::Off);
-        assert_eq!(sent.lock().unwrap().last().map(Vec::as_slice), Some(&[b'T', 0][..]));
+        assert_eq!(
+            sent.lock().unwrap().last().map(Vec::as_slice),
+            Some(&[b'T', 0][..])
+        );
     }
 }

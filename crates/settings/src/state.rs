@@ -344,10 +344,7 @@ impl SettingsModel {
 
     /// Sets whether NGC objects are shown in the deep-sky layer and persists the change.
     pub fn set_dso_show_ngc(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.update(
-            |settings| settings.planetarium.deep_sky.show_ngc = show,
-            cx,
-        );
+        self.update(|settings| settings.planetarium.deep_sky.show_ngc = show, cx);
     }
 
     /// Returns the solar-system bodies (Sun and Moon) layer settings.

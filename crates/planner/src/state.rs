@@ -53,7 +53,10 @@ pub fn observer_evening_date_and_start(observer: &ObserverModel) -> (String, i64
     };
 
     let events = observer.daily_solar_events();
-    let dusk_hour = events.astro_dusk_hour.or(events.sunset_hour).unwrap_or(21.0);
+    let dusk_hour = events
+        .astro_dusk_hour
+        .or(events.sunset_hour)
+        .unwrap_or(21.0);
     let midnight = observer.local_midnight_unix_seconds();
     let dusk_secs = if local_hour < 12.0 {
         midnight - (24.0 - dusk_hour) * 3600.0
@@ -209,16 +212,14 @@ impl PlanModel {
             .into_iter()
             .filter(|id| valid_ids.contains(id))
             .collect();
-        let next_primary = primary
-            .filter(|id| next_set.contains(id))
-            .or_else(|| {
-                self.catalog
-                    .plan
-                    .targets
-                    .iter()
-                    .find(|t| next_set.contains(&t.id))
-                    .map(|t| t.id.clone())
-            });
+        let next_primary = primary.filter(|id| next_set.contains(id)).or_else(|| {
+            self.catalog
+                .plan
+                .targets
+                .iter()
+                .find(|t| next_set.contains(&t.id))
+                .map(|t| t.id.clone())
+        });
         if self.selected_target_ids != next_set || self.selected_target_id != next_primary {
             self.selected_target_ids = next_set;
             self.selected_target_id = next_primary;
@@ -351,7 +352,12 @@ impl PlanModel {
                 .map(|t| t.id.clone())
                 .or_else(|| {
                     let next_idx = pos.min(self.catalog.plan.targets.len().saturating_sub(1));
-                    let next = self.catalog.plan.targets.get(next_idx).map(|t| t.id.clone());
+                    let next = self
+                        .catalog
+                        .plan
+                        .targets
+                        .get(next_idx)
+                        .map(|t| t.id.clone());
                     if let Some(ref nid) = next {
                         self.selected_target_ids.insert(nid.clone());
                     }
@@ -1064,7 +1070,8 @@ mod tests {
                 before_dur + Duration::from_secs(50)
             );
             assert!(
-                m.plan().targets[1].start_unix_secs >= m.plan().targets[0].footprint_end_unix_secs()
+                m.plan().targets[1].start_unix_secs
+                    >= m.plan().targets[0].footprint_end_unix_secs()
             );
 
             assert!(m.duplicate_step(&id1, 1, cx));
@@ -1145,7 +1152,10 @@ mod tests {
             assert!(s3_start <= new_s1);
             assert_eq!(new_s2 - new_s1, spacing);
             assert!(new_s1 >= s3_end || new_s2 <= s3_start);
-            assert_eq!(m.plan().overlapping_target_indices(), [] as [(usize, usize); 0]);
+            assert_eq!(
+                m.plan().overlapping_target_indices(),
+                [] as [(usize, usize); 0]
+            );
         });
     }
 
@@ -1182,8 +1192,7 @@ mod tests {
         let model = cx.new(|_cx| PlanModel::new(store, catalog));
 
         model.update(cx, |m, cx| {
-            let order_on_load: Vec<&str> =
-                m.plan().targets.iter().map(|t| t.id.as_str()).collect();
+            let order_on_load: Vec<&str> = m.plan().targets.iter().map(|t| t.id.as_str()).collect();
             assert_eq!(order_on_load, vec!["saturn", "mars", "venus"]);
 
             // Move Venus earlier than Mars via start-time edit -> reorders chronologically
@@ -1191,14 +1200,17 @@ mod tests {
             let order_after_edit: Vec<&str> =
                 m.plan().targets.iter().map(|t| t.id.as_str()).collect();
             assert_eq!(order_after_edit, vec!["saturn", "venus", "mars"]);
-            assert_eq!(m.plan().overlapping_target_indices(), [] as [(usize, usize); 0]);
+            assert_eq!(
+                m.plan().overlapping_target_indices(),
+                [] as [(usize, usize); 0]
+            );
 
             // Space Mars cleanly at 4000 and swap indices 1..=2 via move_target; saturn at index 0 stays unaffected.
             assert!(m.set_target_start_unix_secs("mars", 4_000, cx));
             let anchor_start = m.plan().targets[1].start_unix_secs;
             let mars_end_before = m.plan().targets[2].footprint_end_unix_secs();
-            let gap_before = m.plan().targets[2].start_unix_secs
-                - m.plan().targets[1].footprint_end_unix_secs();
+            let gap_before =
+                m.plan().targets[2].start_unix_secs - m.plan().targets[1].footprint_end_unix_secs();
             let saturn_start_before = m.plan().targets[0].start_unix_secs;
 
             assert!(m.move_target(2, 1, cx));
@@ -1208,12 +1220,17 @@ mod tests {
             assert_eq!(m.plan().targets[0].start_unix_secs, saturn_start_before);
             assert_eq!(m.plan().targets[1].start_unix_secs, anchor_start);
             assert_eq!(
-                m.plan().targets[2].start_unix_secs
-                    - m.plan().targets[1].footprint_end_unix_secs(),
+                m.plan().targets[2].start_unix_secs - m.plan().targets[1].footprint_end_unix_secs(),
                 gap_before
             );
-            assert_eq!(m.plan().targets[2].footprint_end_unix_secs(), mars_end_before);
-            assert_eq!(m.plan().overlapping_target_indices(), [] as [(usize, usize); 0]);
+            assert_eq!(
+                m.plan().targets[2].footprint_end_unix_secs(),
+                mars_end_before
+            );
+            assert_eq!(
+                m.plan().overlapping_target_indices(),
+                [] as [(usize, usize); 0]
+            );
         });
     }
 
@@ -1256,8 +1273,7 @@ mod tests {
             parse_hm_to_night_unix_secs("0625", night, utc_plus_1, 0).expect("4-digit hhmm");
         assert_eq!(four_digit, compact_hm);
 
-        let hour_only =
-            parse_hm_to_night_unix_secs("21", night, utc_plus_1, 0).expect("hour only");
+        let hour_only = parse_hm_to_night_unix_secs("21", night, utc_plus_1, 0).expect("hour only");
         assert_eq!(format_unix_hm(hour_only, utc_plus_1), "21:00");
 
         assert!(parse_hm_to_night_unix_secs("", night, utc_plus_1, 0).is_none());

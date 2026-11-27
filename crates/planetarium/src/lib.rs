@@ -18,9 +18,7 @@ pub mod viewport;
 pub use preload::start_preload;
 
 pub use atmosphere::AtmosphereSettings;
-pub use dso::{
-    DsoGpuRecord, DsoLabel, DsoRenderParams, DsoSettings, DsoSpatialIndex, PickedDso,
-};
+pub use dso::{DsoGpuRecord, DsoLabel, DsoRenderParams, DsoSettings, DsoSpatialIndex, PickedDso};
 pub use grids::CoordinateGridSettings;
 pub use ground::GroundSettings;
 pub use hips::{HipsActiveTiles, HipsGridSettings, HipsMeshCache, HipsTile};
@@ -674,27 +672,27 @@ fn mark_update_start(mut timer: ResMut<BevyStageTimer>) {
 #[allow(clippy::needless_pass_by_value)]
 fn mark_after_camera(mut timer: ResMut<BevyStageTimer>) {
     let now = std::time::Instant::now();
-    timer.camera_grid_us = timer
-        .cursor
-        .map_or(0, |prev| metrics::duration_to_us(now.saturating_duration_since(prev)));
+    timer.camera_grid_us = timer.cursor.map_or(0, |prev| {
+        metrics::duration_to_us(now.saturating_duration_since(prev))
+    });
     timer.cursor = Some(now);
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn mark_after_celestial(mut timer: ResMut<BevyStageTimer>) {
     let now = std::time::Instant::now();
-    timer.celestial_us = timer
-        .cursor
-        .map_or(0, |prev| metrics::duration_to_us(now.saturating_duration_since(prev)));
+    timer.celestial_us = timer.cursor.map_or(0, |prev| {
+        metrics::duration_to_us(now.saturating_duration_since(prev))
+    });
     timer.cursor = Some(now);
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn mark_after_hips(mut timer: ResMut<BevyStageTimer>) {
     let now = std::time::Instant::now();
-    timer.hips_us = timer
-        .cursor
-        .map_or(0, |prev| metrics::duration_to_us(now.saturating_duration_since(prev)));
+    timer.hips_us = timer.cursor.map_or(0, |prev| {
+        metrics::duration_to_us(now.saturating_duration_since(prev))
+    });
     timer.cursor = Some(now);
 }
 
@@ -1158,8 +1156,7 @@ fn process_viewport_commands(
                 }
             }
             ViewportCommand::SetDsoOpacity(opacity) => {
-                if let Some(mut settings) = app.world_mut().get_resource_mut::<dso::DsoSettings>()
-                {
+                if let Some(mut settings) = app.world_mut().get_resource_mut::<dso::DsoSettings>() {
                     settings.opacity = if opacity.is_finite() {
                         opacity.clamp(0.0, 1.0)
                     } else {
@@ -1172,8 +1169,7 @@ fn process_viewport_commands(
                 show_messier,
                 show_ngc,
             } => {
-                if let Some(mut settings) = app.world_mut().get_resource_mut::<dso::DsoSettings>()
-                {
+                if let Some(mut settings) = app.world_mut().get_resource_mut::<dso::DsoSettings>() {
                     settings.show_messier = show_messier;
                     settings.show_ngc = show_ngc;
                     *frames_remaining = 3;
@@ -1269,8 +1265,9 @@ fn process_viewport_commands(
                 let handles = app.world().get_resource::<CelestialHandles>().cloned();
                 if let Some(handles) = handles {
                     let active = maybe_traj.is_some();
-                    let alpha = if let Some(mut settings) =
-                        app.world_mut().get_resource_mut::<TrajectoryRenderSettings>()
+                    let alpha = if let Some(mut settings) = app
+                        .world_mut()
+                        .get_resource_mut::<TrajectoryRenderSettings>()
                     {
                         settings.active = active;
                         trajectory_line_alpha(*settings)
@@ -1320,8 +1317,9 @@ fn process_viewport_commands(
                 } else {
                     1.0
                 };
-                let alpha = if let Some(mut settings) =
-                    app.world_mut().get_resource_mut::<TrajectoryRenderSettings>()
+                let alpha = if let Some(mut settings) = app
+                    .world_mut()
+                    .get_resource_mut::<TrajectoryRenderSettings>()
                 {
                     settings.opacity = clamped;
                     trajectory_line_alpha(*settings)

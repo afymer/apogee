@@ -473,7 +473,10 @@ fn compute_plan_totals(
         .filter(|t| !completed_target_ids.contains(&t.id))
         .map(|t| t.total_frames())
         .sum();
-    (total_targets, completed_so_far.saturating_add(remaining_frames))
+    (
+        total_targets,
+        completed_so_far.saturating_add(remaining_frames),
+    )
 }
 
 /// Executes an autonomous multi-target `NightPlan`: waiting for target start times,

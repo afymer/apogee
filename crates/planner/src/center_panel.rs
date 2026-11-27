@@ -25,7 +25,8 @@ impl PlanCenterPanel {
         let spreadsheet = SequenceSpreadsheetView::build(cx);
         cx.new(|cx| {
             cx.observe(&timeline, |_this, _tl, cx| cx.notify()).detach();
-            cx.observe(&spreadsheet, |_this, _sp, cx| cx.notify()).detach();
+            cx.observe(&spreadsheet, |_this, _sp, cx| cx.notify())
+                .detach();
             Self {
                 timeline,
                 spreadsheet,

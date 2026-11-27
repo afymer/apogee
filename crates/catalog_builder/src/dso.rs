@@ -6,9 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use celestial::dso::{
-    DsoCatalog, DsoCatalogHeader, DsoKind, DsoRecord, write_dso_catalog_to_zst,
-};
+use celestial::dso::{DsoCatalog, DsoCatalogHeader, DsoKind, DsoRecord, write_dso_catalog_to_zst};
 use clap::Args;
 use tracing::{info, warn};
 
@@ -552,7 +550,10 @@ mod tests {
 
     #[test]
     fn normalizes_common_names_and_leading_zeros() {
-        assert_eq!(normalize_numeric_catalog_id("0061A").as_deref(), Some("61A"));
+        assert_eq!(
+            normalize_numeric_catalog_id("0061A").as_deref(),
+            Some("61A")
+        );
         assert_eq!(
             normalize_numeric_catalog_id("0190 NED01").as_deref(),
             Some("190 NED01")

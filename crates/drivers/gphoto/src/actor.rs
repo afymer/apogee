@@ -901,14 +901,7 @@ mod tests {
     #[test]
     fn parse_iso_capabilities_extracts_auto_sorts_and_dedups() {
         let (choices, auto) = parse_iso_capabilities([
-            "Auto",
-            "ISO 1600",
-            "100",
-            "Hi 1",
-            "ISO 400",
-            "400",
-            "iso 800",
-            "ISO 200",
+            "Auto", "ISO 1600", "100", "Hi 1", "ISO 400", "400", "iso 800", "ISO 200",
         ]);
         assert!(auto);
         assert_eq!(choices, vec![100, 200, 400, 800, 1600]);

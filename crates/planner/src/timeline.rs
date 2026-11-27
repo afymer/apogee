@@ -20,9 +20,7 @@ use observer::icons::{ICON_MOON, render_svg_icon};
 use observer::{GlobalObserver, solar_altitude_to_sky_color};
 use ui::{ActiveTheme, Button, ButtonStyle, Color, Label, LabelSize, Tooltip, prelude::*};
 
-use crate::state::{
-    GlobalNightPlan, format_duration_compact, format_unix_hm, is_session_locked,
-};
+use crate::state::{GlobalNightPlan, format_duration_compact, format_unix_hm, is_session_locked};
 
 const GRAPH_SAMPLES: usize = 97;
 const GRAPH_HEIGHT_PX: f32 = 190.0;
@@ -451,7 +449,10 @@ impl NightTimelineView {
             let mut has_dim = false;
 
             for i in 1..curve.alts.len() {
-                let p0 = point(px(x_of(i - 1)), px(Self::alt_to_y(curve.alts[i - 1], bounds)));
+                let p0 = point(
+                    px(x_of(i - 1)),
+                    px(Self::alt_to_y(curve.alts[i - 1], bounds)),
+                );
                 let p1 = point(px(x_of(i)), px(Self::alt_to_y(curve.alts[i], bounds)));
                 if curve.visible[i - 1] && curve.visible[i] {
                     vis_path.move_to(p0);
@@ -476,7 +477,10 @@ impl NightTimelineView {
                 let ty = Self::alt_to_y(curve.alts[idx], bounds);
                 let r = if is_selected { 3.5 } else { 2.5 };
                 window.paint_quad(fill(
-                    Bounds::new(point(px(tx - r), px(ty - r)), size(px(r * 2.0), px(r * 2.0))),
+                    Bounds::new(
+                        point(px(tx - r), px(ty - r)),
+                        size(px(r * 2.0), px(r * 2.0)),
+                    ),
                     hsla(hue_norm, 0.85, 0.70, 0.95),
                 ));
             }
@@ -526,10 +530,7 @@ impl NightTimelineView {
             })
             .unwrap_or((None, 0));
 
-        let moon_illum = self
-            .sampled
-            .as_ref()
-            .map_or(0.0, |s| s.moon_illum_pct);
+        let moon_illum = self.sampled.as_ref().map_or(0.0, |s| s.moon_illum_pct);
         let selected_min_sep = self.sampled.as_ref().and_then(|s| {
             let sid = selected_id.as_deref()?;
             s.targets
@@ -706,8 +707,7 @@ impl NightTimelineView {
                             .targets
                             .iter()
                             .filter(|tgt| {
-                                tgt.start_unix_secs <= t_hi
-                                    && tgt.footprint_end_unix_secs() >= t_lo
+                                tgt.start_unix_secs <= t_hi && tgt.footprint_end_unix_secs() >= t_lo
                             })
                             .map(|tgt| tgt.id.clone())
                             .collect();
@@ -752,8 +752,9 @@ impl NightTimelineView {
                     .clamp(0.0, 1.0) as f32;
                 let left_px = start_f * track_width_px;
                 let raw_w_px = (end_f - start_f) * track_width_px;
-                let width_px =
-                    raw_w_px.max(22.0).min(track_width_px - left_px.min(track_width_px - 22.0));
+                let width_px = raw_w_px
+                    .max(22.0)
+                    .min(track_width_px - left_px.min(track_width_px - 22.0));
                 let hue = target.color_hue_deg.rem_euclid(360.0) / 360.0;
                 let is_sel = selected_ids.contains(&target.id);
                 let dur_text = format_duration_compact(target.estimated_duration());
@@ -829,14 +830,14 @@ impl NightTimelineView {
             .collect();
         let has_labels = !time_labels.is_empty();
 
-        let marquee_rect = if let Some(TimelineDrag::MarqueeSelect { start_x, current_x }) = &self.drag
-        {
-            let x0 = start_x.min(*current_x);
-            let w = (start_x - current_x).abs().max(2.0);
-            Some((x0, w))
-        } else {
-            None
-        };
+        let marquee_rect =
+            if let Some(TimelineDrag::MarqueeSelect { start_x, current_x }) = &self.drag {
+                let x0 = start_x.min(*current_x);
+                let w = (start_x - current_x).abs().max(2.0);
+                Some((x0, w))
+            } else {
+                None
+            };
 
         let view_entity = cx.entity().clone();
         let colors = cx.theme().colors();
@@ -872,8 +873,7 @@ impl NightTimelineView {
 
                         let entity = view_entity.clone();
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
-                            if phase == DispatchPhase::Capture
-                                && event.button == MouseButton::Left
+                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left
                             {
                                 entity.update(cx, |this, cx| {
                                     this.finish_drag(cx);
@@ -892,8 +892,8 @@ impl NightTimelineView {
                         return;
                     };
                     let width = f32::from(bounds.size.width).max(1.0);
-                    let local_x = (f32::from(ev.position.x) - f32::from(bounds.origin.x))
-                        .clamp(0.0, width);
+                    let local_x =
+                        (f32::from(ev.position.x) - f32::from(bounds.origin.x)).clamp(0.0, width);
                     this.drag = Some(TimelineDrag::MarqueeSelect {
                         start_x: local_x,
                         current_x: local_x,
@@ -960,7 +960,8 @@ impl NightTimelineView {
                             cx.stop_propagation();
                             let mods = ev.modifiers;
                             let is_mod = mods.control || mods.platform || mods.shift;
-                            let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                            let Some(plan) =
+                                cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
                             else {
                                 return;
                             };
@@ -982,8 +983,7 @@ impl NightTimelineView {
                                 && let Some(bounds) = bounds_for_down.lock().ok().and_then(|g| *g)
                             {
                                 let width = f32::from(bounds.size.width).max(1.0);
-                                let frac = ((f32::from(ev.position.x)
-                                    - f32::from(bounds.origin.x))
+                                let frac = ((f32::from(ev.position.x) - f32::from(bounds.origin.x))
                                     / width)
                                     .clamp(0.0, 1.0)
                                     as f64;
@@ -1109,8 +1109,16 @@ impl Render for NightTimelineView {
                             .top_1()
                             .left_1p5()
                             .gap_4()
-                            .child(Label::new("60°").size(LabelSize::XSmall).color(Color::Muted))
-                            .child(Label::new("30°").size(LabelSize::XSmall).color(Color::Muted)),
+                            .child(
+                                Label::new("60°")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new("30°")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
                     )
                     .when(self.show_moon_sep, |el| {
                         el.child(
@@ -1144,20 +1152,12 @@ mod tests {
 
     #[test]
     fn compute_night_window_centers_on_following_midnight() {
-        let (start_16, end_16) = compute_night_window_unix_secs(
-            "2026-11-26",
-            3600,
-            0.0,
-            TimelineWindowMode::Night16h,
-        );
+        let (start_16, end_16) =
+            compute_night_window_unix_secs("2026-11-26", 3600, 0.0, TimelineWindowMode::Night16h);
         assert!((end_16 - start_16 - 16.0 * 3600.0).abs() < 1e-6);
 
-        let (start_24, end_24) = compute_night_window_unix_secs(
-            "2026-11-26",
-            3600,
-            0.0,
-            TimelineWindowMode::FullDay24h,
-        );
+        let (start_24, end_24) =
+            compute_night_window_unix_secs("2026-11-26", 3600, 0.0, TimelineWindowMode::FullDay24h);
         assert!((end_24 - start_24 - 24.0 * 3600.0).abs() < 1e-6);
         assert!((f64::midpoint(start_16, end_16) - f64::midpoint(start_24, end_24)).abs() < 1e-6);
     }

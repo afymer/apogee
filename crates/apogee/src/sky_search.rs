@@ -403,10 +403,7 @@ impl DsoSearchNames {
             .ngc
             .as_deref()
             .map(|s| normalize_with_prefix("ngc", s));
-        let ic_compact = record
-            .ic
-            .as_deref()
-            .map(|s| normalize_with_prefix("ic", s));
+        let ic_compact = record.ic.as_deref().map(|s| normalize_with_prefix("ic", s));
         let alt_ngc_compacts = record
             .alt_ngc
             .iter()
@@ -755,7 +752,11 @@ fn match_dso(dso: &SearchableDso, query: &QuerySpec) -> Option<u32> {
     if !raw_cat.is_empty() && primary_ids.into_iter().flatten().any(|id| id == raw_cat) {
         return Some(0);
     }
-    if names.common_names_lower.iter().any(|n| n == &query.raw_lower) {
+    if names
+        .common_names_lower
+        .iter()
+        .any(|n| n == &query.raw_lower)
+    {
         return Some(0);
     }
 
@@ -798,7 +799,10 @@ fn match_dso(dso: &SearchableDso, query: &QuerySpec) -> Option<u32> {
                 .into_iter()
                 .flatten()
                 .any(|id| id.contains(&tok_cat))
-                || names.alt_ngc_compacts.iter().any(|id| id.contains(&tok_cat)))
+                || names
+                    .alt_ngc_compacts
+                    .iter()
+                    .any(|id| id.contains(&tok_cat)))
         {
             return true;
         }
@@ -815,7 +819,11 @@ fn match_dso(dso: &SearchableDso, query: &QuerySpec) -> Option<u32> {
         if names.kind_lower.contains(tok) || names.group_lower.contains(tok) {
             return true;
         }
-        if names.hubble_lower.as_deref().is_some_and(|h| h.contains(tok)) {
+        if names
+            .hubble_lower
+            .as_deref()
+            .is_some_and(|h| h.contains(tok))
+        {
             return true;
         }
         names

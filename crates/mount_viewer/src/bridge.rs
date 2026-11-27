@@ -24,11 +24,7 @@ fn to_planetarium_override(camera: OrbitCamera) -> MountCameraOverride {
     }
 }
 
-fn step_filtered_scene(
-    displayed: &mut MountSceneState,
-    target: &MountSceneState,
-    dt: f64,
-) -> bool {
+fn step_filtered_scene(displayed: &mut MountSceneState, target: &MountSceneState, dt: f64) -> bool {
     let moving_eq = step_angular_lowpass(
         &mut displayed.ra_deg,
         &mut displayed.dec_deg,

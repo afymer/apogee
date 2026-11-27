@@ -41,9 +41,9 @@ pub struct PlannedTarget {
 
 impl PlannedTarget {
     pub fn estimated_duration(&self) -> Duration {
-        self.steps
-            .iter()
-            .fold(Duration::ZERO, |acc, step| acc.saturating_add(step.estimated_duration()))
+        self.steps.iter().fold(Duration::ZERO, |acc, step| {
+            acc.saturating_add(step.estimated_duration())
+        })
     }
 
     pub fn end_unix_secs(&self) -> i64 {
@@ -52,8 +52,9 @@ impl PlannedTarget {
     }
 
     pub fn footprint_end_unix_secs(&self) -> i64 {
-        self.start_unix_secs
-            .saturating_add((self.estimated_duration().as_secs() as i64).max(MIN_BLOCK_FOOTPRINT_SECS))
+        self.start_unix_secs.saturating_add(
+            (self.estimated_duration().as_secs() as i64).max(MIN_BLOCK_FOOTPRINT_SECS),
+        )
     }
 
     pub fn total_frames(&self) -> u32 {

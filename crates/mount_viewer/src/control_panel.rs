@@ -487,7 +487,11 @@ impl MountControlPanel {
             .into_any_element()
     }
 
-    fn render_tracking_section(&self, snap: &MountUiSnapshot, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tracking_section(
+        &self,
+        snap: &MountUiSnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut tracking_row = h_flex().gap_1().flex_wrap();
         for (idx, &rate) in TrackingRate::all().iter().enumerate() {
             let active = snap.tracking == rate;
@@ -561,15 +565,11 @@ impl MountControlPanel {
                         }),
                     )
             })
-            .child(
-                Label::new(label)
-                    .size(LabelSize::Small)
-                    .color(if disabled {
-                        Color::Disabled
-                    } else {
-                        Color::Default
-                    }),
-            )
+            .child(Label::new(label).size(LabelSize::Small).color(if disabled {
+                Color::Disabled
+            } else {
+                Color::Default
+            }))
             .into_any_element()
     }
 

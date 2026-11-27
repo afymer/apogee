@@ -833,11 +833,7 @@ impl SequenceSpreadsheetView {
         .into_any_element()
     }
 
-    fn render_stage_menu(
-        &self,
-        menu: StageMenuTarget,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_stage_menu(&self, menu: StageMenuTarget, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         let target_id = menu.target_id;
         let step_idx = menu.step_idx;
@@ -1115,12 +1111,8 @@ impl SequenceSpreadsheetView {
                             &t_ref,
                             step_idx,
                             |s| {
-                                next_txt = Some(kind.step_and_apply(
-                                    &cur_txt,
-                                    s,
-                                    *direction,
-                                    *precision,
-                                ));
+                                next_txt =
+                                    Some(kind.step_and_apply(&cur_txt, s, *direction, *precision));
                             },
                             cx,
                         );
@@ -1137,12 +1129,7 @@ impl SequenceSpreadsheetView {
                     let t_ref = tid.clone();
                     let mut result = Ok(());
                     plan.update(cx, |m, cx| {
-                        m.update_step(
-                            &t_ref,
-                            step_idx,
-                            |s| result = kind.apply_parsed(txt, s),
-                            cx,
-                        );
+                        m.update_step(&t_ref, step_idx, |s| result = kind.apply_parsed(txt, s), cx);
                     });
                     match result {
                         Ok(()) => {
@@ -1346,7 +1333,9 @@ impl SequenceSpreadsheetView {
     ) {
         let start_txt = format_unix_hm(target.start_unix_secs, utc_offset_secs);
         if !group.start_time.read(cx).is_focused(window) {
-            group.start_time.update(cx, |f, cx| f.set_text(start_txt, cx));
+            group
+                .start_time
+                .update(cx, |f, cx| f.set_text(start_txt, cx));
         }
         for (row, step) in group.rows.iter().zip(&target.steps) {
             let exp_txt = format_secs(step.params.exposure);
@@ -1433,7 +1422,9 @@ impl SequenceSpreadsheetView {
                 .h_full()
                 .items_center()
                 .px_2()
-                .when(has_right_border, |el| el.border_r_1().border_color(grid_border));
+                .when(has_right_border, |el| {
+                    el.border_r_1().border_color(grid_border)
+                });
             cell = match w_px {
                 Some(w) => cell.w(px(w)).flex_none(),
                 None => cell.flex_1().min_w(px(52.0)),
@@ -1512,7 +1503,10 @@ impl SequenceSpreadsheetView {
         }
     }
 
-    fn slew_progress_label(target: &PlannedTarget, seq_status: Option<&SequenceStatus>) -> &'static str {
+    fn slew_progress_label(
+        target: &PlannedTarget,
+        seq_status: Option<&SequenceStatus>,
+    ) -> &'static str {
         if !target.slew_to_target {
             return "";
         }
@@ -1627,7 +1621,11 @@ impl SequenceSpreadsheetView {
                                     .color(Color::Muted)
                                     .into_any_element()
                             } else {
-                                div().size(px(8.0)).rounded_full().bg(accent_dot).into_any_element()
+                                div()
+                                    .size(px(8.0))
+                                    .rounded_full()
+                                    .bg(accent_dot)
+                                    .into_any_element()
                             }),
                     )
                     .child(
@@ -1728,20 +1726,18 @@ impl SequenceSpreadsheetView {
                                         })),
                                 )
                                 .when(is_add_open, |el| {
-                                    el.child(
-                                        div().absolute().right_0().top_full().child(
-                                            self.render_stage_menu(
-                                                StageMenuTarget {
-                                                    id_base: 100_000 + target_idx,
-                                                    anchor: Anchor::TopRight,
-                                                    selected: None,
-                                                    target_id: tid_menu,
-                                                    step_idx: None,
-                                                },
-                                                cx,
-                                            ),
+                                    el.child(div().absolute().right_0().top_full().child(
+                                        self.render_stage_menu(
+                                            StageMenuTarget {
+                                                id_base: 100_000 + target_idx,
+                                                anchor: Anchor::TopRight,
+                                                selected: None,
+                                                target_id: tid_menu,
+                                                step_idx: None,
+                                            },
+                                            cx,
                                         ),
-                                    )
+                                    ))
                                 }),
                         )
                         .child(
@@ -2211,7 +2207,8 @@ impl SequenceSpreadsheetView {
                                                 } else if is_end {
                                                     slots[slots.len() - 1]
                                                 } else {
-                                                    let dir = if action == Some(true) { 1 } else { -1 };
+                                                    let dir =
+                                                        if action == Some(true) { 1 } else { -1 };
                                                     step_iso_in_slots(
                                                         s.params.iso,
                                                         dir,
@@ -2505,9 +2502,11 @@ impl Render for SequenceSpreadsheetView {
                 .justify_center()
                 .p_4()
                 .child(
-                    Label::new("No objects planned yet. Add targets from Explore or the left Plan panel.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
+                    Label::new(
+                        "No objects planned yet. Add targets from Explore or the left Plan panel.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
                 )
                 .into_any_element();
         }
@@ -2515,7 +2514,9 @@ impl Render for SequenceSpreadsheetView {
         let locked = is_session_locked(cx);
         let dropdown_valid = match &self.open_dropdown {
             None => true,
-            Some(OpenDropdown::AddStage { target_id }) => targets.iter().any(|t| t.id == *target_id),
+            Some(OpenDropdown::AddStage { target_id }) => {
+                targets.iter().any(|t| t.id == *target_id)
+            }
             Some(OpenDropdown::StageCell {
                 target_id,
                 step_idx,
@@ -2579,30 +2580,22 @@ impl Render for SequenceSpreadsheetView {
                     .py_1()
                     .border_b_1()
                     .border_color(grid_border)
-                    .child(
-                        Label::new(err)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Error),
-                    )
+                    .child(Label::new(err).size(LabelSize::XSmall).color(Color::Error))
             }))
             .child(
                 v_flex()
                     .w_full()
                     .min_w(px(648.0))
                     .child(self.render_table_header(cx))
-                    .children(
-                        targets
-                            .iter()
-                            .zip(&self.groups)
-                            .enumerate()
-                            .map(|(target_idx, (target, group))| {
-                                let info = TargetRenderInfo {
-                                    idx: target_idx,
-                                    is_selected: selected_ids.contains(&target.id),
-                                };
-                                self.render_target_group(info, target, group, &rctx, window, cx)
-                            }),
-                    ),
+                    .children(targets.iter().zip(&self.groups).enumerate().map(
+                        |(target_idx, (target, group))| {
+                            let info = TargetRenderInfo {
+                                idx: target_idx,
+                                is_selected: selected_ids.contains(&target.id),
+                            };
+                            self.render_target_group(info, target, group, &rctx, window, cx)
+                        },
+                    )),
             )
             .into_any_element()
     }
@@ -2654,14 +2647,38 @@ mod tests {
 
     #[test]
     fn step_delay_distinguishes_wait_and_capture() {
-        assert_eq!(step_delay(0.0, StageKind::Capture, 1, StepPrecision::Normal), 1.0);
-        assert_eq!(step_delay(10.0, StageKind::Capture, 1, StepPrecision::Normal), 15.0);
-        assert_eq!(step_delay(10.0, StageKind::Capture, -1, StepPrecision::Normal), 9.0);
-        assert_eq!(step_delay(0.0, StageKind::Wait, 1, StepPrecision::Normal), 10.0);
-        assert_eq!(step_delay(60.0, StageKind::Wait, 1, StepPrecision::Normal), 90.0);
-        assert_eq!(step_delay(60.0, StageKind::Wait, -1, StepPrecision::Normal), 50.0);
-        assert_eq!(step_delay(300.0, StageKind::Wait, 1, StepPrecision::Coarse), 600.0);
-        assert_eq!(step_delay(12.0, StageKind::Wait, 1, StepPrecision::Fine), 13.0);
+        assert_eq!(
+            step_delay(0.0, StageKind::Capture, 1, StepPrecision::Normal),
+            1.0
+        );
+        assert_eq!(
+            step_delay(10.0, StageKind::Capture, 1, StepPrecision::Normal),
+            15.0
+        );
+        assert_eq!(
+            step_delay(10.0, StageKind::Capture, -1, StepPrecision::Normal),
+            9.0
+        );
+        assert_eq!(
+            step_delay(0.0, StageKind::Wait, 1, StepPrecision::Normal),
+            10.0
+        );
+        assert_eq!(
+            step_delay(60.0, StageKind::Wait, 1, StepPrecision::Normal),
+            90.0
+        );
+        assert_eq!(
+            step_delay(60.0, StageKind::Wait, -1, StepPrecision::Normal),
+            50.0
+        );
+        assert_eq!(
+            step_delay(300.0, StageKind::Wait, 1, StepPrecision::Coarse),
+            600.0
+        );
+        assert_eq!(
+            step_delay(12.0, StageKind::Wait, 1, StepPrecision::Fine),
+            13.0
+        );
     }
 
     #[test]
@@ -2669,7 +2686,15 @@ mod tests {
         let slots = build_iso_slots(&[100, 125, 160, 200, 400, 800], true);
         assert_eq!(
             slots,
-            vec![None, Some(100), Some(125), Some(160), Some(200), Some(400), Some(800)]
+            vec![
+                None,
+                Some(100),
+                Some(125),
+                Some(160),
+                Some(200),
+                Some(400),
+                Some(800)
+            ]
         );
         assert_eq!(iso_to_slider_norm(None, &slots), 0.0);
         assert_eq!(iso_to_slider_norm(Some(800), &slots), 1.0);

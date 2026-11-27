@@ -20,8 +20,8 @@ use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverModel, paint_twilight_backdrop, sample_day_profile};
 pub use observer::{GlobalVisibilityGraphPrefs, VisibilityGraphCenter, VisibilityGraphPrefsModel};
 use observer::{GraphCenterToggleStyle, graph_axis_labels, graph_center_toggle};
-use planner::GlobalNightPlan;
 use planetarium::{PickedDso, PickedSolarSystemBody, PickedStar};
+use planner::GlobalNightPlan;
 use protocol::{ConnectionState, MountCommand, MountStatus};
 use settings::{
     CenterOnSelection, GlobalSettings, ICON_LAYER_TRAJECTORIES, QuickLayer, ToggleObjectDetails,
@@ -1346,8 +1346,10 @@ impl Render for StarDetailsPanel {
             .unwrap_or_default();
 
         let category_badge = selected_obj.category_badge();
-        let is_accent_badge =
-            matches!(selected_obj, SelectedObject::SolarSystem(_) | SelectedObject::Dso(_));
+        let is_accent_badge = matches!(
+            selected_obj,
+            SelectedObject::SolarSystem(_) | SelectedObject::Dso(_)
+        );
 
         let (title, subtitle, ra_deg, dec_deg, az_deg, alt_deg, solar_eph) = match &selected_obj {
             SelectedObject::Star(star) => {
@@ -1663,12 +1665,7 @@ impl Render for StarDetailsPanel {
                 if let Some(sb) = dso.record.surface_brightness.filter(|v| v.is_finite()) {
                     extra.push(("Surf Br", format!("{sb:.1} mag/″²")));
                 }
-                if let Some(hubble) = dso
-                    .record
-                    .hubble_type
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                {
+                if let Some(hubble) = dso.record.hubble_type.as_deref().filter(|s| !s.is_empty()) {
                     extra.push(("Morph", hubble.to_string()));
                 }
                 if let Some(con) = dso.record.constellation_str() {
@@ -1920,9 +1917,8 @@ impl Render for StarDetailsPanel {
                                         "Show trajectory"
                                     }))
                                     .on_click(cx.listener(|_this, _event, _window, cx| {
-                                        let layer_visible = cx
-                                            .try_global::<GlobalSettings>()
-                                            .is_none_or(|g| {
+                                        let layer_visible =
+                                            cx.try_global::<GlobalSettings>().is_none_or(|g| {
                                                 QuickLayer::Trajectories.is_visible(g.0.read(cx))
                                             });
                                         if !layer_visible {

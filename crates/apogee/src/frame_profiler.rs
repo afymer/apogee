@@ -13,11 +13,13 @@ use std::{
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Hsla,
-    IntoElement, MouseButton, Pixels, Render, Task, Window, div, fill, point, prelude::*, px,
-    rgb,
+    IntoElement, MouseButton, Pixels, Render, Task, Window, div, fill, point,
+    prelude::*,
     profiler::journal::{
-        ForegroundEvent, ForegroundJournalCollector, FrameSnapshot, IntervalBoundary, IntervalSealer,
+        ForegroundEvent, ForegroundJournalCollector, FrameSnapshot, IntervalBoundary,
+        IntervalSealer,
     },
+    px, rgb,
 };
 use jiff::Zoned;
 use planetarium::{BevyFrameSample, metrics::duration_to_us};
@@ -223,11 +225,7 @@ fn find_top_blocker(snapshot: &FrameSnapshot) -> Option<BlockerSummary> {
 
     let small = snapshot.small_poll_summary();
     let small_us = duration_to_us(small.total);
-    if small_us >= 1_000
-        && best
-            .as_ref()
-            .is_none_or(|cur| small_us > cur.duration_us)
-    {
+    if small_us >= 1_000 && best.as_ref().is_none_or(|cur| small_us > cur.duration_us) {
         best = Some(BlockerSummary {
             kind: BlockerKind::SmallPolls,
             label: format!("{} tiny polls", small.count),
@@ -404,7 +402,9 @@ impl ProfilerHistory {
                     let spike_us = sample
                         .input_to_present_us
                         .or(sample.dirty_to_present_us)
-                        .filter(|&lat| lat > sample.total_us && sample.total_us <= SPIKE_THRESHOLD_US)
+                        .filter(|&lat| {
+                            lat > sample.total_us && sample.total_us <= SPIKE_THRESHOLD_US
+                        })
                         .unwrap_or(sample.total_us);
                     let detail = describe_gpui_spike(&sample);
                     self.push_spike(SpikeRecord {
@@ -431,7 +431,9 @@ impl ProfilerHistory {
                             blocker.label,
                             f64::from(blocker.duration_us) / 1000.0
                         ),
-                        None => format!("fg stall {:.1}ms without frame", f64::from(occ_us) / 1000.0),
+                        None => {
+                            format!("fg stall {:.1}ms without frame", f64::from(occ_us) / 1000.0)
+                        }
                     };
                     self.push_spike(SpikeRecord {
                         timestamp: now_stamp(),
@@ -801,9 +803,10 @@ impl FrameProfilerOverlay {
                 let after_notify = self
                     .last_self_notify_at
                     .is_some_and(|t| presented.frame.draw_start >= t);
-                let has_user_activity = snap.events.iter().any(|ev| {
-                    matches!(ev, ForegroundEvent::Input(_) | ForegroundEvent::Action(_))
-                });
+                let has_user_activity = snap
+                    .events
+                    .iter()
+                    .any(|ev| matches!(ev, ForegroundEvent::Input(_) | ForegroundEvent::Action(_)));
                 let total_us = duration_to_us(snap.occupancy()).max(duration_to_us(
                     presented.frame.draw_duration() + presented.presentation.present_duration(),
                 ));
@@ -834,9 +837,7 @@ impl FrameProfilerOverlay {
             }
         }
 
-        let feedback_expired = self
-            .copied_feedback_until
-            .is_some_and(|until| now >= until);
+        let feedback_expired = self.copied_feedback_until.is_some_and(|until| now >= until);
         if feedback_expired {
             self.copied_feedback_until = None;
             changed = true;
@@ -1013,7 +1014,10 @@ fn paint_sparkline(
 
     let y_16 = origin_y + height * (1.0 - (16.67_f32 / SPARKLINE_CEILING_MS).clamp(0.0, 1.0));
     window.paint_quad(fill(
-        Bounds::new(point(px(origin_x), px(y_16)), gpui::size(px(width), px(1.0))),
+        Bounds::new(
+            point(px(origin_x), px(y_16)),
+            gpui::size(px(width), px(1.0)),
+        ),
         budget_16_color,
     ));
 
@@ -1070,7 +1074,10 @@ mod tests {
     #[test]
     fn shorten_location_strips_workspace_prefixes() {
         assert_eq!(
-            shorten_location("/home/remy/data/dev/apogee/crates/apogee/src/bevy_viewport.rs", 622),
+            shorten_location(
+                "/home/remy/data/dev/apogee/crates/apogee/src/bevy_viewport.rs",
+                622
+            ),
             "apogee/src/bevy_viewport.rs:622"
         );
         assert_eq!(

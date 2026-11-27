@@ -100,8 +100,9 @@ impl ConnectPanel {
             .detach();
 
             for field in [&mount_port_input, &mount_baud_input] {
-                cx.subscribe(field, |this: &mut Self, _, event: &TextFieldEvent, cx| {
-                    match event {
+                cx.subscribe(
+                    field,
+                    |this: &mut Self, _, event: &TextFieldEvent, cx| match event {
                         TextFieldEvent::Change(_) => {
                             if this.validation_error.take().is_some() {
                                 cx.notify();
@@ -111,8 +112,8 @@ impl ConnectPanel {
                             this.connect_mount(cx);
                         }
                         _ => {}
-                    }
-                })
+                    },
+                )
                 .detach();
             }
 
@@ -172,8 +173,7 @@ impl ConnectPanel {
 
         let baud_rate = if driver == MountDriverKind::SynScanSerial {
             if port.is_empty() {
-                self.validation_error =
-                    Some("Enter a serial port path (e.g. /dev/ttyUSB0)".into());
+                self.validation_error = Some("Enter a serial port path (e.g. /dev/ttyUSB0)".into());
                 cx.notify();
                 return;
             }
@@ -187,7 +187,11 @@ impl ConnectPanel {
                 }
             }
         } else {
-            baud_raw.parse::<u32>().ok().filter(|&b| b > 0).unwrap_or(9600)
+            baud_raw
+                .parse::<u32>()
+                .ok()
+                .filter(|&b| b > 0)
+                .unwrap_or(9600)
         };
 
         self.validation_error = None;

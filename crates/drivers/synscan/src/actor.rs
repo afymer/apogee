@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-use protocol::{MountCommand, MountDriverKind, MountLimits, MountStatus, MountTelemetry, TrackingRate};
+use protocol::{
+    MountCommand, MountDriverKind, MountLimits, MountStatus, MountTelemetry, TrackingRate,
+};
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{info, warn};
 
@@ -317,9 +319,7 @@ impl MountActor {
         } else {
             port.clone()
         };
-        self.set_status(MountStatus::Connecting {
-            port: display_port,
-        });
+        self.set_status(MountStatus::Connecting { port: display_port });
 
         match driver {
             MountDriverKind::Simulator => {

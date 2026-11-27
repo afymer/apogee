@@ -99,10 +99,20 @@ impl ManualSlewKeyController {
         let ra_held = self.held[2] || self.held[3];
         self.held = [false; 4];
         if dec_held {
-            send_mount_command(MountCommand::StopManualSlew { axis: MountAxis::Dec }, cx);
+            send_mount_command(
+                MountCommand::StopManualSlew {
+                    axis: MountAxis::Dec,
+                },
+                cx,
+            );
         }
         if ra_held {
-            send_mount_command(MountCommand::StopManualSlew { axis: MountAxis::Ra }, cx);
+            send_mount_command(
+                MountCommand::StopManualSlew {
+                    axis: MountAxis::Ra,
+                },
+                cx,
+            );
         }
     }
 

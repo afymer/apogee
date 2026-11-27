@@ -51,7 +51,11 @@ impl CameraProjection {
         } else {
             ProjectionKind::Blended((60.0 - fov_deg) / 40.0)
         };
-        Self::new(Angle::from_radians(fov_y_rad), f64::from(aspect_ratio), kind)
+        Self::new(
+            Angle::from_radians(fov_y_rad),
+            f64::from(aspect_ratio),
+            kind,
+        )
     }
 
     /// Blend between Stereographic (0.0) and Perspective (1.0)

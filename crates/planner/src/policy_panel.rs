@@ -56,10 +56,7 @@ impl PlanPolicyPanel {
             .try_global::<GlobalNightPlan>()
             .map(|g| {
                 let m = g.0.read(cx);
-                (
-                    m.selected_target().cloned(),
-                    m.selected_target_ids().len(),
-                )
+                (m.selected_target().cloned(), m.selected_target_ids().len())
             })
             .unwrap_or((None, 0));
 
@@ -128,8 +125,7 @@ impl PlanPolicyPanel {
                     locked,
                     move |state, _, cx| {
                         let next = *state == ToggleState::Selected;
-                        if let Some(plan) =
-                            cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                        if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
                         {
                             let tid = tid1.clone();
                             plan.update(cx, |m, cx| {
@@ -146,8 +142,7 @@ impl PlanPolicyPanel {
                     locked,
                     move |state, _, cx| {
                         let next = *state == ToggleState::Selected;
-                        if let Some(plan) =
-                            cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
+                        if let Some(plan) = cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
                         {
                             let tid = tid2.clone();
                             plan.update(cx, |m, cx| {
@@ -252,10 +247,8 @@ impl PlanPolicyPanel {
                                 if let Some(plan) =
                                     cx.try_global::<GlobalNightPlan>().map(|g| g.0.clone())
                                 {
-                                    let sid = plan
-                                        .read(cx)
-                                        .selected_target_id()
-                                        .map(str::to_string);
+                                    let sid =
+                                        plan.read(cx).selected_target_id().map(str::to_string);
                                     if let Some(target_id) = sid {
                                         plan.update(cx, |m, cx| {
                                             m.save_template_from_target(&target_id, name, cx);

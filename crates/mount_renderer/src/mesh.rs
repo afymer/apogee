@@ -142,8 +142,16 @@ impl MeshBuilder {
             let n = transform
                 .transform_vector3(Vec3::new(c, slope_y, s))
                 .normalize_or_zero();
-            self.push_vertex(transform.transform_point3(Vec3::new(c * r0, y0, s * r0)), n, color);
-            self.push_vertex(transform.transform_point3(Vec3::new(c * r1, y1, s * r1)), n, color);
+            self.push_vertex(
+                transform.transform_point3(Vec3::new(c * r0, y0, s * r0)),
+                n,
+                color,
+            );
+            self.push_vertex(
+                transform.transform_point3(Vec3::new(c * r1, y1, s * r1)),
+                n,
+                color,
+            );
         }
         for i in 0..segs {
             let next = (i + 1) % segs;
@@ -333,9 +341,8 @@ pub(crate) fn assert_outward_ccw_winding(mesh: &MeshBuilder) {
         let p1 = Vec3::from_array(v1.position);
         let p2 = Vec3::from_array(v2.position);
         let geo_n = (p1 - p0).cross(p2 - p0);
-        let avg_n = Vec3::from_array(v0.normal)
-            + Vec3::from_array(v1.normal)
-            + Vec3::from_array(v2.normal);
+        let avg_n =
+            Vec3::from_array(v0.normal) + Vec3::from_array(v1.normal) + Vec3::from_array(v2.normal);
         assert!(
             geo_n.dot(avg_n) > 0.0,
             "Inverted triangle winding: geo_n={geo_n:?}, avg_n={avg_n:?}"

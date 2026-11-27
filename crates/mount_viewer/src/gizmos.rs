@@ -323,7 +323,11 @@ pub fn handle_screen_position(
     bounds: Bounds<Pixels>,
 ) -> Option<Point<Pixels>> {
     let frames = AxisFrames::from_scene(scene);
-    project_world_point(handle_world_position(handle, &frames, &scene.limits), camera, bounds)
+    project_world_point(
+        handle_world_position(handle, &frames, &scene.limits),
+        camera,
+        bounds,
+    )
 }
 
 /// Hit-tests all enabled limit gizmo handles and returns the closest one within grab radius.

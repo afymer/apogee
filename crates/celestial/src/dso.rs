@@ -397,7 +397,12 @@ impl DsoRecord {
         if let Some(ic) = self.ic_designation() {
             return ic;
         }
-        if let Some(first_alt) = self.alt_ngc.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(first_alt) = self
+            .alt_ngc
+            .first()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             return format!("NGC {first_alt}");
         }
         if let Some(name) = self.primary_common_name() {
@@ -553,11 +558,7 @@ impl DsoRecord {
             }
         };
 
-        if self.is_messier() {
-            raw.min(9.5)
-        } else {
-            raw
-        }
+        if self.is_messier() { raw.min(9.5) } else { raw }
     }
 }
 
@@ -987,10 +988,7 @@ mod tests {
                 Some("Andromeda Galaxy · NGC 224 · Sb · And".to_string())
             )
         );
-        assert_eq!(
-            m31.catalog_ids_summary().as_deref(),
-            Some("M31 · NGC 224")
-        );
+        assert_eq!(m31.catalog_ids_summary().as_deref(), Some("M31 · NGC 224"));
         assert_eq!(m31.mag_label(), "V 3.4");
         assert_eq!(m31.mag_detail_label(), "V 3.44");
         assert_eq!(m31.angular_size_label().as_deref(), Some("177.8' × 69.7'"));
@@ -1057,8 +1055,14 @@ mod tests {
             DsoKind::from_openngc_code("Cl+N"),
             Some(DsoKind::ClusterNebula)
         );
-        assert_eq!(DsoKind::from_openngc_code("*Ass"), Some(DsoKind::StarAssociation));
+        assert_eq!(
+            DsoKind::from_openngc_code("*Ass"),
+            Some(DsoKind::StarAssociation)
+        );
         assert_eq!(DsoKind::from_openngc_code("**"), Some(DsoKind::DoubleStar));
-        assert_eq!(DsoKind::from_openngc_code("SNR"), Some(DsoKind::SupernovaRemnant));
+        assert_eq!(
+            DsoKind::from_openngc_code("SNR"),
+            Some(DsoKind::SupernovaRemnant)
+        );
     }
 }
