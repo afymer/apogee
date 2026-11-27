@@ -9,10 +9,13 @@ pub mod hips;
 pub mod landscape;
 pub mod material;
 pub mod metrics;
+pub mod preload;
 pub mod sky;
 pub mod solar_system;
 pub mod stars;
 pub mod viewport;
+
+pub use preload::start_preload;
 
 pub use atmosphere::AtmosphereSettings;
 pub use dso::{
@@ -60,7 +63,6 @@ pub use camera::{
     PlanetariumCamera, PlanetariumViewInfo, SkyCoordinates, TrackingTarget, ViewMode,
 };
 use celestial::HorizonProfile;
-use grids::{create_altaz_grid_mesh, create_equatorial_grid_mesh, create_horizon_mesh};
 pub use material::{CelestialLineMaterial, CelestialLineUniforms, init_celestial_materials};
 
 pub use crate::viewport::{
@@ -569,6 +571,18 @@ struct CelestialHandles {
     star_entity: Option<Entity>,
 }
 
+/// Builds a 2-vertex degenerate `LineList` mesh so unpopulated line entities never register a
+/// 0-vertex mesh in Bevy's GPU mesh allocator.
+fn create_placeholder_line_mesh() -> Mesh {
+    let mut mesh = Mesh::new(
+        bevy::mesh::PrimitiveTopology::LineList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32; 3]; 2]);
+    mesh.insert_attribute(grids::ATTRIBUTE_LINE_TIER, vec![0.0_f32; 2]);
+    mesh
+}
+
 fn create_trajectory_mesh(points: &[([f32; 3], bool, f32)], minor_alpha: f32) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(points.len().saturating_sub(1) * 2);
     let mut line_tiers: Vec<f32> = Vec::with_capacity(points.len().saturating_sub(1) * 2);
@@ -582,6 +596,9 @@ fn create_trajectory_mesh(points: &[([f32; 3], bool, f32)], minor_alpha: f32) ->
         positions.push(p1);
         line_tiers.push(-1.0 - alpha0);
         line_tiers.push(-1.0 - alpha1);
+    }
+    if positions.is_empty() {
+        return create_placeholder_line_mesh();
     }
     let mut mesh = Mesh::new(bevy::mesh::PrimitiveTopology::LineList, default());
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -1452,6 +1469,7 @@ impl PlanetariumRenderer {
                 }
 
                 let init_span = tracing::info_span!("planetarium_init").entered();
+                let mut preloaded = preload::take_preload();
                 let mut app = App::new();
 
                 let width = initial_width.max(1);
@@ -1493,7 +1511,10 @@ impl PlanetariumRenderer {
                                 ..default()
                             })
                             .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>(
-                            ), // TODO: try to make pipelined rendering work
+                            ) // TODO: try to make pipelined rendering work
+                            .disable::<bevy::app::TerminalCtrlCHandlerPlugin>()
+                            .disable::<bevy::input::InputPlugin>()
+                            .disable::<bevy::a11y::AccessibilityPlugin>(),
                     );
                 }
 
@@ -1564,31 +1585,20 @@ impl PlanetariumRenderer {
                     (horizon_material, altaz_material, eq_material)
                 };
 
-                let horizon_mesh_handle = {
-                    let _span = tracing::info_span!("create_horizon_mesh").entered();
-                    app.world_mut()
-                        .resource_mut::<Assets<Mesh>>()
-                        .add(create_horizon_mesh(initial_topo_to_cam))
+                // Horizon, altaz, and equatorial line meshes are built on Frame 1 by
+                // `camera_movement_and_interpolation_system` (when `GridMeshState::level` is `None`),
+                // so initialize lightweight 2-vertex placeholders to avoid discarded startup work and
+                // empty-mesh GPU slab allocator warnings.
+                let (horizon_mesh_handle, altaz_mesh_handle, eq_mesh_handle, trajectory_mesh_handle) = {
+                    let placeholder = create_placeholder_line_mesh();
+                    let mut meshes_res = app.world_mut().resource_mut::<Assets<Mesh>>();
+                    (
+                        meshes_res.add(placeholder.clone()),
+                        meshes_res.add(placeholder.clone()),
+                        meshes_res.add(placeholder.clone()),
+                        meshes_res.add(placeholder),
+                    )
                 };
-
-                let altaz_mesh_handle = {
-                    let _span = tracing::info_span!("create_altaz_grid_mesh").entered();
-                    app.world_mut()
-                        .resource_mut::<Assets<Mesh>>()
-                        .add(create_altaz_grid_mesh(initial_topo_to_cam))
-                };
-
-                let eq_mesh_handle = {
-                    let _span = tracing::info_span!("create_equatorial_grid_mesh").entered();
-                    app.world_mut()
-                        .resource_mut::<Assets<Mesh>>()
-                        .add(create_equatorial_grid_mesh(initial_eq_to_cam))
-                };
-
-                let trajectory_mesh_handle = app
-                    .world_mut()
-                    .resource_mut::<Assets<Mesh>>()
-                    .add(create_trajectory_mesh(&[], 0.22));
                 let trajectory_material = CelestialLineMaterial {
                     uniforms: CelestialLineUniforms {
                         transform: glam::DMat4::from_mat3(initial_topo_to_cam).as_mat4(),
@@ -1598,30 +1608,37 @@ impl PlanetariumRenderer {
                     },
                 };
 
-                let star_catalog = {
+                let preloaded_stars = {
                     let _span = tracing::info_span!("load_star_catalog_step").entered();
-                    stars::load_star_catalog()
+                    preloaded
+                        .as_mut()
+                        .and_then(preload::PreloadState::take_stars)
+                        .or_else(|| {
+                            let catalog = stars::load_star_catalog()?;
+                            let index = Arc::new(stars::StarSpatialIndex::build_with_metadata(
+                                &catalog.records,
+                                catalog.metadata,
+                            ));
+                            Some(preload::PreloadedStarCatalog {
+                                records: catalog.records,
+                                index,
+                            })
+                        })
                 };
-                let star_setup = if let Some(catalog) = star_catalog {
-                    let star_count = catalog.records.len();
+                let star_setup = if let Some(stars_data) = preloaded_stars {
+                    let star_count = stars_data.records.len();
                     {
-                        let _span =
-                            tracing::info_span!("build_star_spatial_index", star_count).entered();
-                        let index = Arc::new(stars::StarSpatialIndex::build_with_metadata(
-                            &catalog.records,
-                            catalog.metadata,
-                        ));
                         let mut guard = bridge
                             .inner
                             .state
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner);
-                        guard.star_index = Some(index);
+                        guard.star_index = Some(stars_data.index);
                     }
                     let buffer_handle = {
                         let _span =
                             tracing::info_span!("create_star_shader_buffer", star_count).entered();
-                        let raw_bytes: &[u8] = bytemuck::cast_slice(&catalog.records);
+                        let raw_bytes: &[u8] = bytemuck::cast_slice(&stars_data.records);
                         let storage_buffer =
                             ShaderBuffer::new(raw_bytes, RenderAssetUsages::RENDER_WORLD);
                         app.world_mut()
@@ -1683,29 +1700,34 @@ impl PlanetariumRenderer {
                     None
                 };
 
-                let dso_catalog = {
+                let preloaded_dso = {
                     let _span = tracing::info_span!("load_dso_catalog_step").entered();
-                    dso::load_dso_catalog()
+                    preloaded
+                        .as_mut()
+                        .and_then(preload::PreloadState::take_dso)
+                        .or_else(|| {
+                            let catalog = dso::load_dso_catalog()?;
+                            let gpu_records: Vec<dso::DsoGpuRecord> = catalog
+                                .records
+                                .iter()
+                                .map(dso::DsoGpuRecord::from_record)
+                                .collect();
+                            let index = Arc::new(dso::DsoSpatialIndex::build(catalog.records));
+                            Some(preload::PreloadedDsoCatalog { gpu_records, index })
+                        })
                 };
-                let dso_setup = if let Some(catalog) = dso_catalog {
-                    let dso_count = catalog.records.len();
-                    let gpu_records: Vec<dso::DsoGpuRecord> = catalog
-                        .records
-                        .iter()
-                        .map(dso::DsoGpuRecord::from_record)
-                        .collect();
+                let dso_setup = if let Some(dso_data) = preloaded_dso {
+                    let dso_count = dso_data.gpu_records.len();
                     {
-                        let _span = tracing::info_span!("build_dso_spatial_index", dso_count).entered();
-                        let index = Arc::new(dso::DsoSpatialIndex::build(catalog.records));
                         let mut guard = bridge
                             .inner
                             .state
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner);
-                        guard.dso_index = Some(index);
+                        guard.dso_index = Some(dso_data.index);
                     }
                     let buffer_handle = {
-                        let raw_bytes: &[u8] = bytemuck::cast_slice(&gpu_records);
+                        let raw_bytes: &[u8] = bytemuck::cast_slice(&dso_data.gpu_records);
                         let storage_buffer =
                             ShaderBuffer::new(raw_bytes, RenderAssetUsages::RENDER_WORLD);
                         app.world_mut()
@@ -1758,15 +1780,22 @@ impl PlanetariumRenderer {
                 app.init_resource::<dso::DsoSettings>();
                 app.init_resource::<solar_system::SolarSystemRenderSettings>();
                 app.init_resource::<TrajectoryRenderSettings>();
-                let moon_textures = {
+                let mut moon_textures = {
                     let _span = tracing::info_span!("init_fallback_moon_textures").entered();
                     let mut images = app.world_mut().resource_mut::<Assets<Image>>();
                     solar_system::fallback_moon_textures(&mut images)
                 };
+                let mut solar_loader = preloaded
+                    .as_mut()
+                    .and_then(preload::PreloadState::take_solar_system_loader)
+                    .unwrap_or_else(|| solar_system::SolarSystemTextureLoader::spawn(bridge.clone()));
+                solar_loader.attach_bridge(bridge.clone());
+                {
+                    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+                    solar_loader.apply_ready(&mut images, &mut moon_textures);
+                }
                 app.insert_resource(moon_textures.clone());
-                app.insert_resource(solar_system::SolarSystemTextureLoader::spawn(
-                    bridge.clone(),
-                ));
+                app.insert_resource(solar_loader);
                 app.init_resource::<grids::CoordinateGridSettings>();
                 let tile_loader = hips::HipsTileLoader::new(Some(bridge.clone()));
                 app.insert_resource(tile_loader);
@@ -1774,7 +1803,23 @@ impl PlanetariumRenderer {
                 app.init_resource::<hips::HipsActiveTiles>();
                 app.init_resource::<hips::HipsGridSettings>();
                 app.init_resource::<hips::HipsSurfaceMeshCache>();
-                app.init_resource::<hips::HipsImageCache>();
+                let mut hips_image_cache = hips::HipsImageCache::default();
+                if let Some(hips_rx) = preloaded
+                    .as_mut()
+                    .and_then(|p| p.take_hips(bridge.clone()))
+                {
+                    match hips_rx.try_recv() {
+                        Ok(base) => {
+                            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+                            hips_image_cache.seed_preloaded_base(base, &mut images);
+                        }
+                        Err(crossbeam_channel::TryRecvError::Empty) => {
+                            hips_image_cache.set_pending_preload(hips_rx);
+                        }
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => {}
+                    }
+                }
+                app.insert_resource(hips_image_cache);
                 app.init_resource::<hips::HipsActiveSurveyTiles>();
                 app.init_resource::<hips::HipsSurveySettings>();
                 app.insert_resource(bridge.clone());
@@ -2292,5 +2337,15 @@ mod tests {
         settings.active = false;
         settings.opacity = 0.8;
         assert_eq!(trajectory_line_alpha(settings), 0.0);
+    }
+
+    #[test]
+    fn placeholder_line_mesh_has_two_vertices_and_trajectory_uses_it_when_empty() {
+        let placeholder = create_placeholder_line_mesh();
+        assert_eq!(placeholder.count_vertices(), 2);
+        let empty_traj = create_trajectory_mesh(&[], 0.22);
+        assert_eq!(empty_traj.count_vertices(), 2);
+        let single_traj = create_trajectory_mesh(&[([0.0, 0.0, 1.0], true, 1.0)], 0.22);
+        assert_eq!(single_traj.count_vertices(), 2);
     }
 }

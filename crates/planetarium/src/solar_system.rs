@@ -35,6 +35,7 @@ use crate::{
     material::{
         CelestialPipelineId, CelestialPipelineKey, CelestialProjectionUniforms, pipeline_descriptor,
     },
+    preload::BridgeWake,
 };
 
 pub const SUN_QUAD_SCALE: f32 = 6.5;
@@ -524,17 +525,30 @@ enum LoadedSolarSystemTextures {
 #[derive(Resource)]
 pub struct SolarSystemTextureLoader {
     rx: Option<crossbeam_channel::Receiver<LoadedSolarSystemTextures>>,
+    wake: std::sync::Arc<BridgeWake>,
 }
 
 impl SolarSystemTextureLoader {
+    /// Starts asynchronous Moon & planet texture loading without a [`BevyBridge`] yet.
+    /// Call [`Self::attach_bridge`] once [`crate::PlanetariumRenderer`] creates its bridge.
+    pub fn spawn_preloading() -> Self {
+        Self::spawn_inner(None)
+    }
+
     pub fn spawn(bridge: BevyBridge) -> Self {
+        Self::spawn_inner(Some(bridge))
+    }
+
+    fn spawn_inner(bridge: Option<BevyBridge>) -> Self {
         let (tx, rx) = crossbeam_channel::bounded(2);
+        let wake = std::sync::Arc::new(BridgeWake::new(bridge));
+        let wake_thread = std::sync::Arc::clone(&wake);
         let spawn_result = std::thread::Builder::new()
             .name("solar-system-textures".to_string())
             .spawn(move || {
                 std::thread::scope(|s| {
                     let tx_moon = tx.clone();
-                    let bridge_moon = bridge.clone();
+                    let wake_moon = std::sync::Arc::clone(&wake_thread);
                     s.spawn(move || {
                         let start = std::time::Instant::now();
                         if let Some((albedo, normal)) = load_moon_image_pair() {
@@ -546,7 +560,7 @@ impl SolarSystemTextureLoader {
                                 .send(LoadedSolarSystemTextures::Moon { albedo, normal })
                                 .is_ok()
                             {
-                                bridge_moon.request_frame();
+                                wake_moon.request_frame();
                             }
                         } else {
                             warn!(
@@ -556,7 +570,7 @@ impl SolarSystemTextureLoader {
                     });
 
                     let tx_planets = tx;
-                    let bridge_planets = bridge;
+                    let wake_planets = wake_thread;
                     s.spawn(move || {
                         let start = std::time::Instant::now();
                         if let Some((planet_albedo, ring_profiles)) = load_planet_array_images() {
@@ -571,7 +585,7 @@ impl SolarSystemTextureLoader {
                                 })
                                 .is_ok()
                             {
-                                bridge_planets.request_frame();
+                                wake_planets.request_frame();
                             }
                         } else {
                             warn!(
@@ -584,9 +598,50 @@ impl SolarSystemTextureLoader {
 
         if let Err(err) = spawn_result {
             warn!("Failed to spawn solar-system texture loader thread: {err}");
-            return Self { rx: None };
+            return Self { rx: None, wake };
         }
-        Self { rx: Some(rx) }
+        Self { rx: Some(rx), wake }
+    }
+
+    /// Attaches [`BevyBridge`] so subsequent background completions wake the renderer.
+    pub fn attach_bridge(&self, bridge: BevyBridge) {
+        self.wake.attach(bridge);
+    }
+
+    /// Drains any completed texture sets into [`MoonTextureHandles`].
+    pub fn apply_ready(
+        &mut self,
+        images: &mut Assets<Image>,
+        moon_textures: &mut MoonTextureHandles,
+    ) {
+        let mut disconnected = false;
+        if let Some(rx) = self.rx.as_ref() {
+            loop {
+                match rx.try_recv() {
+                    Ok(LoadedSolarSystemTextures::Moon { albedo, normal }) => {
+                        moon_textures.albedo = images.add(albedo);
+                        moon_textures.normal = images.add(normal);
+                        moon_textures.has_textures = true;
+                    }
+                    Ok(LoadedSolarSystemTextures::Planets {
+                        planet_albedo,
+                        ring_profiles,
+                    }) => {
+                        moon_textures.planet_albedo = images.add(planet_albedo);
+                        moon_textures.ring_profiles = images.add(ring_profiles);
+                        moon_textures.has_planet_textures = true;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => break,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if disconnected {
+            self.rx = None;
+        }
     }
 }
 
@@ -597,34 +652,7 @@ pub(crate) fn poll_solar_system_textures_system(
     mut images: ResMut<Assets<Image>>,
     mut moon_textures: ResMut<MoonTextureHandles>,
 ) {
-    let mut disconnected = false;
-    if let Some(rx) = loader.rx.as_ref() {
-        loop {
-            match rx.try_recv() {
-                Ok(LoadedSolarSystemTextures::Moon { albedo, normal }) => {
-                    moon_textures.albedo = images.add(albedo);
-                    moon_textures.normal = images.add(normal);
-                    moon_textures.has_textures = true;
-                }
-                Ok(LoadedSolarSystemTextures::Planets {
-                    planet_albedo,
-                    ring_profiles,
-                }) => {
-                    moon_textures.planet_albedo = images.add(planet_albedo);
-                    moon_textures.ring_profiles = images.add(ring_profiles);
-                    moon_textures.has_planet_textures = true;
-                }
-                Err(crossbeam_channel::TryRecvError::Empty) => break,
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
-            }
-        }
-    }
-    if disconnected {
-        loader.rx = None;
-    }
+    loader.apply_ready(&mut images, &mut moon_textures);
 }
 
 /// Discovers and uploads NASA LROC albedo and LOLA normal+height Moon textures plus planet and

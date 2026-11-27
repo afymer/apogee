@@ -7,25 +7,28 @@ use std::{
 use celestial::{
     DailyTrajectory, HorizonProfile, TrajectoryPointKind, TrajectorySample,
     compute_equatorial_daily_trajectory, compute_solar_system_window_trajectory,
-    coords::{Angle, canonical_spherical_to_cartesian, geodetic::GeodeticPosition},
+    coords::{
+        Angle, canonical_spherical_to_cartesian, geodetic::GeodeticPosition,
+        topocentric_enu_to_spherical,
+    },
 };
 use client::GlobalDaemonState;
 use components::{Slider, SliderEvent};
 use futures::StreamExt;
 use glam::DVec3;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Rgba, ScrollDelta, ScrollWheelEvent, Task, WeakEntity, Window,
-    div, point, prelude::*, px, rgb, svg,
+    AnyElement, App, Bounds, Context, Corners, CursorStyle, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, Rgba, ScrollDelta, ScrollWheelEvent,
+    Task, WeakEntity, Window, div, point, prelude::*, px, rgb, svg,
 };
 use horizon::GlobalHorizons;
 use observer::{GlobalObserver, ObserverClock, ObserverModel};
 use planetarium::{
     BevyBridge, DsoRenderParams, DsoSpatialIndex, HorizonImageData, HorizonLayerData,
-    ObserverClockSpec, PickedDso, PickedSolarSystemBody, PickedStar, PlanetariumRenderer,
-    PlanetariumViewInfo, StarRenderParams, StarSpatialIndex, TrackingTarget, TrajectoryRenderData,
-    ViewMode, pick_solar_system_body, rendered_solar_system_disc_radius_px,
+    ObserverClockSpec, PickedDso, PickedSolarSystemBody, PickedStar, PlanetariumCamera,
+    PlanetariumRenderer, PlanetariumViewInfo, StarRenderParams, StarSpatialIndex, TrackingTarget,
+    TrajectoryRenderData, ViewMode, pick_solar_system_body, rendered_solar_system_disc_radius_px,
 };
 use planner::GlobalNightPlan;
 use settings::{
@@ -59,6 +62,233 @@ const TRAJ_EDGE_FADE_FRAC: f32 = 0.22;
 const SELECTION_RING_MIN_DIAMETER_PX: f64 = 16.0;
 const SELECTION_RING_MAX_DIAMETER_PX: f64 = 96.0;
 const SELECTION_RING_MARGIN_PX: f64 = 5.0;
+const STARTUP_REVEAL_DURATION: Duration = Duration::from_millis(260);
+const STARTUP_ANIM_TICK: Duration = Duration::from_millis(16);
+
+#[inline]
+fn ease_out_cubic(t: f32) -> f32 {
+    let u = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - u * u * u
+}
+
+#[inline]
+fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.003_130_8 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct StartupBackdropKey {
+    width: u32,
+    height: u32,
+    sun_alt_tenths: i32,
+    sun_az_tenths: i32,
+    atmo_pct: u16,
+    ground_pct: u16,
+}
+
+struct StartupBackdropCache {
+    key: StartupBackdropKey,
+    image: Arc<RenderImage>,
+}
+
+#[inline]
+fn lerp_rgb(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+/// CPU mirror of `celestial_sky.wgsl` at initial zenith camera pose, producing an sRGB BGRA
+/// `RenderImage` so Frame 0 displays the live day/twilight/night sky and ground before Bevy swaps in.
+fn rasterize_startup_sky_backdrop(
+    width: u32,
+    height: u32,
+    sun_enu: DVec3,
+    atmo_strength: f32,
+    ground_opacity: f32,
+) -> Arc<RenderImage> {
+    let w = width.max(2);
+    let h = height.max(2);
+    let aspect = w as f32 / h as f32;
+
+    let initial_camera = PlanetariumCamera::default();
+    let cam_to_topo = initial_camera.topocentric_to_camera_matrix().transpose();
+    let proj = celestial::projection::CameraProjection::for_fov(initial_camera.fov_y, aspect);
+
+    let sun_dir = sun_enu.normalize_or_zero();
+    let sun_alt_deg = sun_dir.z.clamp(-1.0, 1.0).asin().to_degrees() as f32;
+    let palette = planetarium::atmosphere::compute_sky_palette(sun_alt_deg);
+    let (ground_horizon, ground_nadir) = planetarium::ground::compute_ground_palette(sun_alt_deg);
+
+    let safe_atmo = if atmo_strength.is_finite() {
+        atmo_strength.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let effective_atmo = if palette.max_intensity() > 1e-4 {
+        safe_atmo
+    } else {
+        0.0
+    };
+    let safe_ground = if ground_opacity.is_finite() {
+        ground_opacity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
+    let zenith = [
+        palette.zenith_color.x,
+        palette.zenith_color.y,
+        palette.zenith_color.z,
+    ];
+    let horizon = [
+        palette.horizon_color.x,
+        palette.horizon_color.y,
+        palette.horizon_color.z,
+    ];
+    let dusk = [
+        palette.dusk_color.x,
+        palette.dusk_color.y,
+        palette.dusk_color.z,
+    ];
+    let sun_glow = [
+        palette.sun_glow_color.x * palette.sun_glow_weight,
+        palette.sun_glow_color.y * palette.sun_glow_weight,
+        palette.sun_glow_color.z * palette.sun_glow_weight,
+    ];
+    let g_horizon = [ground_horizon.x, ground_horizon.y, ground_horizon.z];
+    let g_nadir = [ground_nadir.x, ground_nadir.y, ground_nadir.z];
+    let ground_aa = (3.0 / h as f32).max(0.002);
+
+    let mut buf = vec![0_u8; (w * h * 4) as usize];
+    for py in 0..h {
+        let ndc_y = 1.0 - 2.0 * ((f64::from(py) + 0.5) / f64::from(h));
+        for px in 0..w {
+            let ndc_x = 2.0 * ((f64::from(px) + 0.5) / f64::from(w)) - 1.0;
+            let v_cam = proj.unproject_ndc(ndc_x, ndc_y);
+            let dir_enu = (cam_to_topo * v_cam).normalize_or_zero();
+            let dir_z = dir_enu.z as f32;
+
+            let mut atmo_rgb = [0.0_f32; 3];
+            if effective_atmo > 1e-4 {
+                let horizon_mask = smoothstep(-0.05, 0.005, dir_z);
+                if horizon_mask > 1e-4 {
+                    let up = dir_z.clamp(0.0, 1.0);
+                    let h_val = 1.0 - up;
+                    let h2 = h_val * h_val;
+                    let h4 = h2 * h2;
+                    let h8 = h4 * h4;
+                    let h_mid = h_val.max(1e-5).powf(1.55);
+                    let horizon_blend = (0.34 * h_mid + 0.66 * h4).clamp(0.0, 1.0);
+
+                    let cos_theta = dir_enu.dot(sun_dir).clamp(-1.0, 1.0) as f32;
+                    let rayleigh_phase = 0.86 + 0.18 * cos_theta * cos_theta;
+                    let base = lerp_rgb(zenith, horizon, horizon_blend);
+
+                    let sun_half = f32::midpoint(cos_theta, 1.0);
+                    let sun_wide = sun_half * sun_half;
+                    let sun_pos = cos_theta.max(0.0);
+                    let sun_pos2 = sun_pos * sun_pos;
+                    let sun_core = sun_pos2 * sun_pos2;
+                    let dusk_term = h8 * (0.35 * sun_wide + 0.85 * sun_core) + h4 * 0.20 * sun_wide;
+
+                    let inv_mie = 1.0 / (1.0 - 0.78 * cos_theta).max(0.04);
+                    let mie = (inv_mie * inv_mie) * (0.045 + 0.055 * h4);
+                    let aureole = sun_pos.max(1e-5).powf(12.0) * 0.65;
+                    let glow_term = mie + aureole;
+
+                    let scale = effective_atmo * horizon_mask;
+                    for c in 0..3 {
+                        let s = base[c] * rayleigh_phase
+                            + dusk[c] * dusk_term
+                            + sun_glow[c] * glow_term;
+                        let mapped = ((s * (1.0 + s / 5.5225)) / (1.0 + s)).clamp(0.0, 1.0);
+                        atmo_rgb[c] = mapped * scale;
+                    }
+                }
+            }
+
+            let mut ground_rgb = [0.0_f32; 3];
+            let mut ground_a = 0.0_f32;
+            if safe_ground > 1e-4 {
+                let mask = 1.0 - smoothstep(-ground_aa, ground_aa, dir_z);
+                if mask > 1e-4 {
+                    let depth = (-dir_z).clamp(0.0, 1.0);
+                    ground_rgb = lerp_rgb(g_horizon, g_nadir, depth);
+                    ground_a = mask * safe_ground;
+                }
+            }
+
+            let r_lin = ground_rgb[0] * ground_a + atmo_rgb[0] * (1.0 - ground_a);
+            let g_lin = ground_rgb[1] * ground_a + atmo_rgb[1] * (1.0 - ground_a);
+            let b_lin = ground_rgb[2] * ground_a + atmo_rgb[2] * (1.0 - ground_a);
+
+            let idx = ((py * w + px) * 4) as usize;
+            buf[idx] = (linear_to_srgb(b_lin) * 255.0).round() as u8;
+            buf[idx + 1] = (linear_to_srgb(g_lin) * 255.0).round() as u8;
+            buf[idx + 2] = (linear_to_srgb(r_lin) * 255.0).round() as u8;
+            buf[idx + 3] = 255;
+        }
+    }
+
+    let img = image::RgbaImage::from_raw(w, h, buf).expect("buffer dimensions match w * h * 4");
+    Arc::new(RenderImage::new(vec![image::Frame::new(img)]))
+}
+
+fn startup_loading_badge() -> AnyElement {
+    let badge_bg: Hsla = rgb(0x0b101b).into();
+    let badge_border: Hsla = rgb(0x64748b).into();
+    let ring_accent: Hsla = rgb(0x3dd9c7).into();
+    let label_color: Hsla = rgb(0xe2e8f0).into();
+
+    h_flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_1p5()
+        .rounded_full()
+        .bg(badge_bg.opacity(0.76))
+        .border_1()
+        .border_color(badge_border.opacity(0.28))
+        .shadow_md()
+        .child(
+            div()
+                .relative()
+                .size(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .size(px(14.0))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(ring_accent.opacity(0.55)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .size(px(4.0))
+                        .rounded_full()
+                        .bg(ring_accent.opacity(0.92)),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(label_color.opacity(0.88))
+                .child("Preparing sky…"),
+        )
+        .into_any_element()
+}
 
 /// Opacity multiplier `[0.0..=1.0]` for the selection reticle ring.
 /// Stays `1.0` while the ring fits around the object and smoothly fades out once the
@@ -179,8 +409,28 @@ impl HoveredObject {
 pub fn init(cx: &mut App) {
     cx.observe_new(|workbench: &mut Workbench, window, cx| {
         if let Some(window) = window {
+            let scale = window.scale_factor().max(0.25);
+            let vp_size = window.viewport_size();
+            let vp_w = f32::from(vp_size.width);
+            let vp_h = f32::from(vp_size.height);
+            let initial_width = if vp_w > 1.0 {
+                (vp_w * scale).round().max(1.0) as u32
+            } else {
+                1024
+            };
+            let initial_height = if vp_h > 1.0 {
+                (vp_h * scale).round().max(1.0) as u32
+            } else {
+                1024
+            };
             let workbench_handle = cx.entity().downgrade();
-            let viewport = PlanetariumPanel::build(workbench_handle, window, cx, 1024, 1024);
+            let viewport = PlanetariumPanel::build(
+                workbench_handle,
+                window,
+                cx,
+                initial_width,
+                initial_height,
+            );
             cx.observe(&viewport, |_this, _viewport, cx| {
                 cx.notify();
             })
@@ -245,6 +495,9 @@ pub struct PlanetariumPanel {
     is_following_mount: bool,
     workbench: WeakEntity<Workbench>,
     last_synced_explore_nonce: Option<u64>,
+    first_bevy_frame_at: Option<std::time::Instant>,
+    startup_backdrop: Option<StartupBackdropCache>,
+    startup_anim_task: Option<Task<()>>,
 }
 
 fn tracking_target_for_selected(selected: &SelectedObject) -> TrackingTarget {
@@ -701,6 +954,9 @@ impl PlanetariumPanel {
                 is_following_mount: false,
                 workbench,
                 last_synced_explore_nonce: None,
+                first_bevy_frame_at: None,
+                startup_backdrop: None,
+                startup_anim_task: None,
             };
             panel.sync_horizon_to_bridge(cx);
             panel.sync_status_bar(cx);
@@ -1194,10 +1450,61 @@ impl PlanetariumPanel {
         }
     }
 
+    fn startup_reveal_opacity(&self) -> (f32, f32) {
+        match self.first_bevy_frame_at {
+            None => (1.0, 1.0),
+            Some(started) => {
+                let t = (started.elapsed().as_secs_f32()
+                    / STARTUP_REVEAL_DURATION.as_secs_f32())
+                    .clamp(0.0, 1.0);
+                if t >= 1.0 {
+                    (0.0, 0.0)
+                } else {
+                    let scrim_alpha = 1.0 - ease_out_cubic(t);
+                    let badge_alpha = 1.0 - smoothstep(0.0, 0.35, t);
+                    (scrim_alpha, badge_alpha)
+                }
+            }
+        }
+    }
+
+    fn start_startup_reveal_animation(&mut self, cx: &mut Context<Self>) {
+        if self.startup_anim_task.is_some() {
+            return;
+        }
+        self.startup_anim_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(STARTUP_ANIM_TICK).await;
+                let keep_going = this.update(cx, |this, cx| {
+                    let (scrim_alpha, _) = this.startup_reveal_opacity();
+                    cx.notify();
+                    if scrim_alpha <= 0.0 {
+                        this.startup_backdrop = None;
+                        this.startup_anim_task = None;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn on_bevy_frame(&mut self, cx: &mut Context<Self>) {
         let _ = self.ensure_star_index(cx);
         let _ = self.ensure_dso_index(cx);
-        self.latest_view_info = self.bridge.view_info();
+        let snapshot = self.bridge.snapshot();
+        self.latest_view_info = snapshot.view_info;
+        if self.first_bevy_frame_at.is_none()
+            && snapshot.texture_view.is_some()
+            && !snapshot.is_mount_frame
+        {
+            self.first_bevy_frame_at = Some(std::time::Instant::now());
+            self.start_startup_reveal_animation(cx);
+        }
         self.sync_status_bar(cx);
         let _ = self.compute_hovered_star(cx);
         cx.notify();
@@ -1436,11 +1743,20 @@ impl PlanetariumPanel {
 impl Render for PlanetariumPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.bridge.snapshot();
+        let is_mount_frame = snapshot.is_mount_frame || self.bridge.is_mount_camera_active();
         self.cached_texture = if snapshot.is_mount_frame {
             None
         } else {
             snapshot.texture_view
         };
+        if self.first_bevy_frame_at.is_none()
+            && self.cached_texture.is_some()
+            && !is_mount_frame
+        {
+            self.first_bevy_frame_at = Some(std::time::Instant::now());
+            self.start_startup_reveal_animation(cx);
+        }
+        let (scrim_alpha, badge_alpha) = self.startup_reveal_opacity();
         self.latest_view_info = snapshot.view_info;
         self.last_scale_factor = f64::from(window.scale_factor());
         let bridge = self.bridge.clone();
@@ -1464,6 +1780,67 @@ impl Render for PlanetariumPanel {
                     )
                 })
             });
+
+        let startup_overlay = if scrim_alpha > 0.001 && !is_mount_frame {
+            let (target_w, target_h) = proj_size.unwrap_or_else(|| {
+                let vs = window.viewport_size();
+                (
+                    f64::from(f32::from(vs.width)).max(1.0),
+                    f64::from(f32::from(vs.height)).max(1.0),
+                )
+            });
+            let fit_scale = (480.0 / target_w.max(1.0))
+                .min(270.0 / target_h.max(1.0))
+                .min(1.0);
+            let img_w = (target_w * fit_scale).round().clamp(64.0, 480.0) as u32;
+            let img_h = (target_h * fit_scale).round().clamp(64.0, 270.0) as u32;
+            let obs_ctx = cx
+                .try_global::<GlobalObserver>()
+                .map(|g| g.0.read(cx).observation_context())
+                .unwrap_or_default();
+            let (atmo_strength, ground_opacity) = cx
+                .try_global::<GlobalSettings>()
+                .map(|g| {
+                    let m = g.0.read(cx);
+                    (
+                        m.effective_atmosphere_strength(),
+                        m.effective_ground_opacity(),
+                    )
+                })
+                .unwrap_or((1.0, 1.0));
+            let sun_enu = celestial::solar::solar_topocentric_enu(obs_ctx.location, obs_ctx.epoch);
+            let (sun_az, sun_alt) = topocentric_enu_to_spherical(sun_enu);
+            let key = StartupBackdropKey {
+                width: img_w,
+                height: img_h,
+                sun_alt_tenths: (sun_alt.degrees() * 10.0).round() as i32,
+                sun_az_tenths: (sun_az.degrees() * 10.0).round() as i32,
+                atmo_pct: (atmo_strength.clamp(0.0, 1.0) * 100.0).round() as u16,
+                ground_pct: (ground_opacity.clamp(0.0, 1.0) * 100.0).round() as u16,
+            };
+            let cached_hit = self
+                .startup_backdrop
+                .as_ref()
+                .filter(|entry| entry.key == key)
+                .map(|entry| entry.image.clone());
+            let backdrop_img = cached_hit.unwrap_or_else(|| {
+                let img = rasterize_startup_sky_backdrop(
+                    img_w,
+                    img_h,
+                    sun_enu,
+                    atmo_strength,
+                    ground_opacity,
+                );
+                self.startup_backdrop = Some(StartupBackdropCache {
+                    key,
+                    image: img.clone(),
+                });
+                img
+            });
+            Some((backdrop_img, scrim_alpha, badge_alpha))
+        } else {
+            None
+        };
 
         let colors = cx.theme().colors();
         let pill_bg = colors.elevated_surface_background.opacity(0.65);
@@ -2384,6 +2761,46 @@ impl Render for PlanetariumPanel {
                     .child(preview)
                 },
             )
+            .when_some(startup_overlay, |el, (backdrop_img, scrim_alpha, badge_alpha)| {
+                el.child(
+                    div()
+                        .size_full()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .opacity(scrim_alpha)
+                        .child(
+                            gpui::canvas(
+                                |_bounds, _window, _cx| {},
+                                move |bounds, (), window, _cx| {
+                                    let _ = window.paint_image(
+                                        bounds,
+                                        bounds,
+                                        Corners::default(),
+                                        backdrop_img,
+                                        0,
+                                        false,
+                                    );
+                                },
+                            )
+                            .size_full(),
+                        ),
+                )
+                .when(badge_alpha > 0.01, |el| {
+                    el.child(
+                        div()
+                            .size_full()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .opacity(badge_alpha)
+                            .child(startup_loading_badge()),
+                    )
+                })
+            })
             .child(
                 v_flex()
                     .id("planetarium_overlay_controls")
@@ -3057,5 +3474,43 @@ mod tests {
         );
         assert_eq!(selection_ring_fade(60.0), 0.0);
         assert_eq!(selection_ring_fade(200.0), 0.0);
+    }
+
+    #[test]
+    fn ease_out_cubic_and_linear_to_srgb_curves() {
+        assert_eq!(ease_out_cubic(-0.5), 0.0);
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert!((ease_out_cubic(0.5) - 0.875).abs() < 1e-6);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert_eq!(ease_out_cubic(2.0), 1.0);
+
+        assert_eq!(linear_to_srgb(-0.1), 0.0);
+        assert_eq!(linear_to_srgb(0.0), 0.0);
+        assert!((linear_to_srgb(0.001) - 0.012_92).abs() < 1e-6);
+        assert!((linear_to_srgb(0.5) - 0.735_357).abs() < 1e-4);
+        assert!((linear_to_srgb(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rasterize_startup_sky_backdrop_reflects_day_and_night_conditions() {
+        let day_img =
+            rasterize_startup_sky_backdrop(64, 48, DVec3::new(0.0, 0.5, 0.866), 1.0, 1.0);
+        let day_bytes = day_img.as_bytes(0).expect("frame 0 bytes");
+        assert_eq!(day_bytes.len(), 64 * 48 * 4);
+        // Center pixel looks near zenith during daytime: sky blue has B > R and opaque alpha.
+        let center_idx = ((24 * 64 + 32) * 4) as usize;
+        assert!(
+            day_bytes[center_idx] > day_bytes[center_idx + 2],
+            "daytime zenith should be sky blue (B={}, R={})",
+            day_bytes[center_idx],
+            day_bytes[center_idx + 2]
+        );
+        assert_eq!(day_bytes[center_idx + 3], 255);
+
+        let night_img =
+            rasterize_startup_sky_backdrop(64, 48, DVec3::new(0.0, 0.8, -0.6), 1.0, 1.0);
+        let night_bytes = night_img.as_bytes(0).expect("frame 0 bytes");
+        assert!(night_bytes[center_idx] < day_bytes[center_idx]);
+        assert_eq!(night_bytes[center_idx + 3], 255);
     }
 }

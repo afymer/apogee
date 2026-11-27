@@ -18,6 +18,7 @@ use workspace::workbench::Workbench;
 fn main() {
     let app_start = std::time::Instant::now();
     apogee_tracing::init_tracing();
+    planetarium::start_preload();
 
     // Looks like tracy hardcods "MainThread" for the main thread's name
     // Renaming here only leads to helper threads (mainly for zbus) inheriting

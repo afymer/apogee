@@ -32,6 +32,7 @@ const MAX_DESCENDANT_DEPTH_DELTA: u8 = 3;
 const MAX_DESCENDANT_FALLBACK_TILES: usize = 64;
 const MAX_CACHED_SURVEY_TILES: usize = 1024;
 const TARGET_CACHED_SURVEY_TILES: usize = 768;
+const TILE_FADE_DURATION: Duration = Duration::from_millis(200);
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HipsTile {
@@ -57,11 +58,59 @@ pub struct HipsSurfaceMeshCache {
     tick: u64,
 }
 
+fn rgba_tile_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
+    Image::new(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        rgba,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
 #[derive(Resource, Default)]
 pub struct HipsImageCache {
     pub images: HashMap<(u8, u64), Handle<Image>>,
     last_used: HashMap<(u8, u64), u64>,
     tick: u64,
+    pub seeded_survey_name: Option<String>,
+    pending_preload: Option<crossbeam_channel::Receiver<crate::preload::PreloadedHipsBase>>,
+}
+
+impl HipsImageCache {
+    /// Seeds preloaded depth-0 tiles into the GPU asset store and image cache.
+    pub fn seed_preloaded_base(
+        &mut self,
+        base: crate::preload::PreloadedHipsBase,
+        images: &mut Assets<Image>,
+    ) -> Vec<(u8, u64)> {
+        self.seeded_survey_name = Some(base.survey_name);
+        let mut inserted = Vec::with_capacity(base.tiles.len());
+        for tile in base.tiles {
+            let key = (tile.depth, tile.hash);
+            if self.images.contains_key(&key) {
+                continue;
+            }
+            let handle = images.add(rgba_tile_image(tile.width, tile.height, tile.rgba));
+            self.images.insert(key, handle);
+            self.tick += 1;
+            let stamp = self.tick;
+            self.last_used.insert(key, stamp);
+            inserted.push(key);
+        }
+        inserted
+    }
+
+    pub(crate) fn set_pending_preload(
+        &mut self,
+        rx: crossbeam_channel::Receiver<crate::preload::PreloadedHipsBase>,
+    ) {
+        self.pending_preload = Some(rx);
+    }
 }
 
 #[derive(Resource, Default)]
@@ -75,6 +124,8 @@ pub struct HipsActiveSurveyTiles {
     pub tiles: HashMap<(u8, u64), Entity>,
     pub current_depth: Option<u8>,
     pub current_survey_name: Option<String>,
+    pub tile_fade_starts: HashMap<(u8, u64), Instant>,
+    pub pending_fade_keys: HashSet<(u8, u64)>,
 }
 
 #[derive(Resource)]
@@ -608,6 +659,39 @@ fn evict_lru_cache<V>(
     }
 }
 
+fn has_cached_ancestor<V>(images: &HashMap<(u8, u64), V>, depth: u8, hash: u64) -> bool {
+    let mut d = depth;
+    let mut h = hash;
+    while d > 0 {
+        d -= 1;
+        h >>= 2;
+        if images.contains_key(&(d, h)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn compute_tile_fade(
+    tile_fade_starts: &mut HashMap<(u8, u64), Instant>,
+    key: (u8, u64),
+    now: Instant,
+) -> (f32, bool) {
+    let Some(&start) = tile_fade_starts.get(&key) else {
+        return (1.0, false);
+    };
+    let t = (now.saturating_duration_since(start).as_secs_f32()
+        / TILE_FADE_DURATION.as_secs_f32())
+    .clamp(0.0, 1.0);
+    if t >= 1.0 {
+        tile_fade_starts.remove(&key);
+        (1.0, false)
+    } else {
+        let smooth = t * t * (3.0 - 2.0 * t);
+        (smooth, true)
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub(crate) fn hips_survey_system(
     mut commands: Commands,
@@ -623,28 +707,47 @@ pub(crate) fn hips_survey_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut tile_materials: Query<&mut CelestialTileMaterial, With<HipsSurveyTile>>,
+    bridge: Res<BevyBridge>,
 ) {
+    if let Some(rx) = image_cache.pending_preload.take() {
+        match rx.try_recv() {
+            Ok(base) => {
+                if base.survey_name == settings.survey.name {
+                    let after_first_survey_init =
+                        active_survey_tiles.current_survey_name.is_some();
+                    let inserted = image_cache.seed_preloaded_base(base, &mut images);
+                    if after_first_survey_init {
+                        for key in inserted {
+                            if !has_cached_ancestor(&image_cache.images, key.0, key.1) {
+                                active_survey_tiles.pending_fade_keys.insert(key);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                image_cache.pending_preload = Some(rx);
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {}
+        }
+    }
+
     while let Ok(result) = loader.result_rx.try_recv() {
         match result {
             TileLoadResult::Success(tile) => {
                 if tile.generation != loader.generation {
                     continue;
                 }
-                loader.in_flight.remove(&(tile.depth, tile.hash));
-                loader.failed_tiles.remove(&(tile.depth, tile.hash));
-                let image = Image::new(
-                    Extent3d {
-                        width: tile.width,
-                        height: tile.height,
-                        depth_or_array_layers: 1,
-                    },
-                    TextureDimension::D2,
-                    tile.rgba,
-                    TextureFormat::Rgba8UnormSrgb,
-                    RenderAssetUsages::RENDER_WORLD,
-                );
-                let handle = images.add(image);
                 let key = (tile.depth, tile.hash);
+                loader.in_flight.remove(&key);
+                loader.failed_tiles.remove(&key);
+                if !image_cache.images.contains_key(&key)
+                    && !has_cached_ancestor(&image_cache.images, tile.depth, tile.hash)
+                {
+                    active_survey_tiles.pending_fade_keys.insert(key);
+                }
+                let image = rgba_tile_image(tile.width, tile.height, tile.rgba);
+                let handle = images.add(image);
                 image_cache.images.insert(key, handle);
                 image_cache.tick += 1;
                 let stamp = image_cache.tick;
@@ -677,6 +780,8 @@ pub(crate) fn hips_survey_system(
                 commands.entity(*entity).despawn();
             }
             active_survey_tiles.tiles.clear();
+            active_survey_tiles.tile_fade_starts.clear();
+            active_survey_tiles.pending_fade_keys.clear();
             active_survey_tiles.current_depth = None;
         }
         return;
@@ -684,25 +789,34 @@ pub(crate) fn hips_survey_system(
 
     let survey_name = &settings.survey.name;
     if active_survey_tiles.current_survey_name.as_deref() != Some(survey_name) {
+        let keep_seeded = image_cache.seeded_survey_name.as_deref() == Some(survey_name);
         for entity in active_survey_tiles.tiles.values() {
             commands.entity(*entity).despawn();
         }
         active_survey_tiles.tiles.clear();
-        image_cache.images.clear();
-        image_cache.last_used.clear();
-        image_cache.tick = 0;
-        mesh_cache.meshes.clear();
-        mesh_cache.last_used.clear();
-        mesh_cache.tick = 0;
-        loader.generation = loader.generation.wrapping_add(1);
-        loader.clear_pending();
-        loader.in_flight.clear();
-        loader.failed_tiles.clear();
+        active_survey_tiles.tile_fade_starts.clear();
+        active_survey_tiles.pending_fade_keys.clear();
+        if !keep_seeded {
+            image_cache.images.clear();
+            image_cache.last_used.clear();
+            image_cache.tick = 0;
+            image_cache.seeded_survey_name = None;
+            mesh_cache.meshes.clear();
+            mesh_cache.last_used.clear();
+            mesh_cache.tick = 0;
+            loader.generation = loader.generation.wrapping_add(1);
+            loader.clear_pending();
+            loader.in_flight.clear();
+            loader.failed_tiles.clear();
+        }
         active_survey_tiles.current_survey_name = Some(survey_name.clone());
         active_survey_tiles.current_depth = None;
 
         let survey_arc = Arc::new(settings.survey.clone());
-        let base_keys: Vec<(u8, u64)> = (0..12).map(|h| (0, h)).collect();
+        let base_keys: Vec<(u8, u64)> = (0..12)
+            .map(|h| (0, h))
+            .filter(|key| !image_cache.images.contains_key(key))
+            .collect();
         loader.enqueue(&survey_arc, &base_keys);
     }
 
@@ -773,8 +887,11 @@ pub(crate) fn hips_survey_system(
     }
     for key in to_remove {
         active_survey_tiles.tiles.remove(&key);
+        active_survey_tiles.tile_fade_starts.remove(&key);
+        active_survey_tiles.pending_fade_keys.remove(&key);
     }
 
+    let now = Instant::now();
     for key in selection.desired {
         if active_survey_tiles.tiles.contains_key(&key) {
             continue;
@@ -785,6 +902,10 @@ pub(crate) fn hips_survey_system(
             continue;
         };
 
+        if active_survey_tiles.pending_fade_keys.remove(&key) {
+            active_survey_tiles.tile_fade_starts.insert(key, now);
+        }
+
         let mesh_handle = mesh_cache
             .meshes
             .entry(key)
@@ -794,11 +915,16 @@ pub(crate) fn hips_survey_system(
             })
             .clone();
 
+        let initial_fade = if active_survey_tiles.tile_fade_starts.contains_key(&key) {
+            0.0
+        } else {
+            1.0
+        };
         let material = CelestialTileMaterial {
             uniforms: CelestialTileUniforms {
                 transform,
                 projection: proj_params.into(),
-                alpha: effective_alpha,
+                alpha: effective_alpha * initial_fade,
             },
             image: image_handle,
             depth,
@@ -826,12 +952,23 @@ pub(crate) fn hips_survey_system(
         }
     }
 
-    for &entity in active_survey_tiles.tiles.values() {
+    let mut any_fading = false;
+    let HipsActiveSurveyTiles {
+        tiles: active_tiles,
+        tile_fade_starts,
+        ..
+    } = &mut *active_survey_tiles;
+    for (&key, &entity) in active_tiles.iter() {
+        let (fade, still_fading) = compute_tile_fade(tile_fade_starts, key, now);
+        any_fading |= still_fading;
         if let Ok(mut mat) = tile_materials.get_mut(entity) {
             mat.uniforms.transform = transform;
             mat.uniforms.projection = proj_params.into();
-            mat.uniforms.alpha = effective_alpha;
+            mat.uniforms.alpha = effective_alpha * fade;
         }
+    }
+    if any_fading {
+        bridge.request_frame();
     }
 
     let mc = &mut *mesh_cache;
@@ -1079,5 +1216,26 @@ mod tests {
         assert!(!entries.contains_key(&(5, 20)));
         assert!(!last_used.contains_key(&(4, 11)));
         assert!(!last_used.contains_key(&(5, 20)));
+    }
+
+    #[test]
+    fn compute_tile_fade_smoothly_ramps_and_cleans_up() {
+        let start = Instant::now();
+        let mut starts = HashMap::from([((0_u8, 1_u64), start)]);
+
+        let (fade0, active0) = compute_tile_fade(&mut starts, (0, 1), start);
+        assert_eq!(fade0, 0.0);
+        assert!(active0);
+
+        let (fade_mid, active_mid) =
+            compute_tile_fade(&mut starts, (0, 1), start + Duration::from_millis(100));
+        assert!((fade_mid - 0.5).abs() < 0.02);
+        assert!(active_mid);
+
+        let (fade_end, active_end) =
+            compute_tile_fade(&mut starts, (0, 1), start + Duration::from_millis(220));
+        assert_eq!(fade_end, 1.0);
+        assert!(!active_end);
+        assert!(!starts.contains_key(&(0, 1)));
     }
 }
